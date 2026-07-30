@@ -1,7 +1,7 @@
 # 02 · 缓存：从 CPU 到 CDN 到 KV Cache
 
 > 缓存是唯一能同时降低延迟和成本的手段，也是最容易引入正确性 bug 的手段。
-> "计算机科学只有两个难题：缓存失效和命名。"
+> "计算机科学只有两个难题：缓存失效（cache invalidation）和命名。"
 
 ---
 
@@ -27,7 +27,7 @@
 
 **设计原则：越靠近用户越好，但一致性越难。**
 
-**关键判断**：进程内缓存（L1）+ Redis（L2）的两级结构，能把 Redis 的 QPS 降 90%，但引入了**每个进程副本可能不一致**的问题。适用于：读极热、可容忍数秒陈旧、值不大的数据（配置、feature flag、租户元数据、汇率）。
+**关键判断**：进程内缓存（L1）+ Redis（L2）的两级结构，能把 Redis 的 QPS 降 90%，但引入了**每个进程副本可能不一致**的问题。适用于：读极热、可容忍数秒陈旧（staleness）、值不大的数据（配置、feature flag、租户元数据、汇率）。
 
 ---
 
@@ -54,12 +54,12 @@ def update_user(uid, data):
 **规则 1：更新时删除缓存，而不是写入缓存。**
 > 因为并发下"写缓存"会产生这个序列：
 > `A 读DB得v1 → B 写DB为v2 → B 写缓存v2 → A 写缓存v1` → 缓存永久是脏的 v1。
-> 而"删除"是幂等的，最坏情况是多回源一次。
+> 而"删除"是幂等的（idempotent），最坏情况是多回源（origin fetch）一次。
 
 **规则 2：先更新 DB，再删缓存（Cache-Aside 顺序）。**
 > 反过来（先删缓存再更新 DB）的问题：删完缓存后、更新 DB 前，另一个读请求把旧值回填进缓存 → 长期脏数据。
 
-⚠️ **即便如此，先更新 DB 再删缓存仍有一个极小概率的竞态**：
+⚠️ **即便如此，先更新 DB 再删缓存仍有一个极小概率的竞态（race condition）**：
 ```
 读请求 A：缓存未命中 → 读 DB 得 v1  ────────────────┐
 写请求 B：           更新 DB 为 v2 → 删缓存         │
@@ -69,7 +69,7 @@ def update_user(uid, data):
 
 **彻底的解法（按成本递增）**：
 1. **给缓存加短 TTL**（最实用）—— 脏数据最多存活 TTL 时长
-2. **延迟双删**：更新 DB → 删缓存 → 等 500ms → 再删一次
+2. **延迟双删（delayed double delete）**：更新 DB → 删缓存 → 等 500ms → 再删一次
 3. **订阅 binlog/CDC 来失效缓存** —— 单一失效来源，最可靠，生产推荐
 4. 版本号/CAS 写缓存
 
@@ -79,7 +79,7 @@ def update_user(uid, data):
 |---|---|---|
 | **Write-Through** | 应用 → 缓存 → 同步写 DB | 缓存永远最新；写延迟高 |
 | **Write-Behind** | 应用 → 缓存 → 异步批量写 DB | 写极快；**缓存挂了会丢数据** |
-| **Refresh-Ahead** | 临近过期时后台主动刷新 | 消除冷启动毛刺；可能刷新无人访问的键 |
+| **Refresh-Ahead** | 临近过期时后台主动刷新 | 消除冷启动（cold start）毛刺；可能刷新无人访问的键 |
 
 **Write-Behind 的合法使用场景**：可容忍丢失的高频计数（浏览量、点赞数）。用 Redis 累加，每 10 秒批量 flush 到 DB —— 把 10 万 TPS 变成 100 TPS。
 
@@ -87,20 +87,30 @@ def update_user(uid, data):
 
 ## 3. 三大经典故障：穿透、击穿、雪崩
 
-### 缓存穿透（Penetration）：查不存在的键
+> ⚠️ **英文面试警告**：「穿透 / 击穿 / 雪崩」这套三分法是中文技术社区的产物，**英文工程界没有对应术语**。
+> 直译成 cache penetration / breakdown / avalanche，英语母语面试官听不懂 —— avalanche 尤其糟，
+> 它在英文里没有任何技术含义。正确说法见下面每一节标注的英文，它们各自是独立的、真实存在的术语。
+
+| 中文 | ❌ 别说 | ✅ 英文该说 |
+|---|---|---|
+| 缓存穿透 | cache penetration | **queries for non-existent keys**；解法叫 **negative caching** |
+| 缓存击穿 | cache breakdown | **cache stampede** / **thundering herd**（这两个是标准术语） |
+| 缓存雪崩 | cache avalanche | 大量同时过期 → **synchronized/correlated expiry**；缓存集群挂 → **cascading failure** |
+
+### 缓存穿透（queries for non-existent keys）：查不存在的键
 
 ```
 攻击者用随机 UUID 查询 → 缓存永远不命中 → 全部打到 DB
 ```
 
 **对策**：
-1. **缓存空值**：`cache.set(key, NULL_SENTINEL, ttl=60)` —— 简单有效，注意 TTL 要短，且要能被写入路径正确失效
-2. **布隆过滤器**：把所有存在的 key 放进 BF，查询前先问 BF。BF 说"不存在"就 100% 不存在。
-   - 1 亿个 key，误判率 1% → 需要 ~120 MB
+1. **缓存空值（negative caching）**：`cache.set(key, NULL_SENTINEL, ttl=60)` —— 简单有效，注意 TTL 要短，且要能被写入路径正确失效
+2. **布隆过滤器（Bloom filter）**：把所有存在的 key 放进 BF，查询前先问 BF。BF 说"不存在"就 100% 不存在。
+   - 1 亿个 key，误判率（false positive rate） 1% → 需要 ~120 MB
    - 缺点：**不支持删除**（要用 Counting BF 或定期重建）
-3. **参数校验 + 限流**：非法格式的 ID 直接拒
+3. **参数校验 + 限流（rate limiting）**：非法格式的 ID 直接拒
 
-### 缓存击穿（Breakdown）：热点 key 过期瞬间
+### 缓存击穿（cache stampede / thundering herd）：热点 key 过期瞬间
 
 ```
 一个 QPS 5 万的热 key 过期 → 同一毫秒 5 万个请求同时回源 → DB 瞬间崩
@@ -117,9 +127,9 @@ v, err, _ := g.Do(key, func() (interface{}, error) {
     return db.Query(key)
 })
 ```
-注意：这只在单个进程内合并。多进程还需要分布式锁或下面的方法。
+注意：这只在单个进程内合并。多进程还需要分布式锁（distributed lock）或下面的方法。
 
-**b) 概率提前过期（XFetch）** —— 无锁，我的首选
+**b) 概率提前过期（probabilistic early expiration，XFetch）** —— 无锁（lock-free），我的首选
 ```python
 # 存储时同时记录计算耗时 delta 和写入时间
 value, delta, expiry = cache.get_with_meta(key)
@@ -130,26 +140,26 @@ return value
 ```
 效果：**在过期前，请求会以逐渐增大的概率提前刷新**，避免所有人在同一时刻撞墙。beta 默认 1.0，越大越早刷新。
 
-**c) 永不过期 + 后台刷新**：逻辑过期时间存在 value 里，发现逻辑过期就异步触发刷新，当前请求返回旧值。**保证永远有值可返回**（可用性优先）。
+**c) 永不过期 + 后台刷新**：逻辑过期时间存在 value 里，发现逻辑过期就异步触发刷新，当前请求返回旧值（serve stale）。**保证永远有值可返回**（可用性优先）。
 
 **d) 分布式锁**：只让一个请求回源，其余轮询等待。可行但增加延迟和复杂度，且锁本身要处理超时。
 
-### 缓存雪崩（Avalanche）：大量 key 同时过期 / 缓存集群挂
+### 缓存雪崩（correlated expiry / cascading failure）：大量 key 同时过期 / 缓存集群挂
 
-**成因 1：TTL 同时到期**（比如启动时批量预热，全设 300s）
-> 对策：**TTL 加随机抖动** `ttl = base + random(0, base * 0.1)`
+**成因 1：TTL 同时到期**（比如启动时批量预热（warm-up），全设 300s）
+> 对策：**TTL 加随机抖动（jitter）** `ttl = base + random(0, base * 0.1)`
 
 **成因 2：缓存集群整体不可用**
-> 这是最危险的：DB 平时只承担 5% 的流量，缓存挂了瞬间要承担 100% → 立刻崩溃，且崩溃后缓存无法预热 → **无法自愈**。
+> 这是最危险的：DB 平时只承担 5% 的流量，缓存挂了瞬间要承担 100% → 立刻崩溃，且崩溃后缓存无法预热 → **无法自愈（self-heal）**。
 
 **对策（必须提前设计）：**
-1. **本地缓存兜底**（L1）：即便 Redis 全挂，热数据仍有 L1 命中
-2. **回源限流**：给 DB 的回源路径加严格的并发上限（如 100 并发），超出的请求直接返回降级值/错误。**宁可拒绝 90% 也不要让 DB 崩**
-3. **熔断 + 降级**：DB 压力过大时返回静态默认值
-4. **缓存集群多可用区 + 分片**，避免单点全挂
+1. **本地缓存兜底**（fallback，L1）：即便 Redis 全挂，热数据仍有 L1 命中
+2. **回源限流（load shedding）**：给 DB 的回源路径加严格的并发上限（如 100 并发），超出的请求直接返回降级值/错误。**宁可拒绝 90% 也不要让 DB 崩**
+3. **熔断（circuit breaker） + 降级（graceful degradation）**：DB 压力过大时返回静态默认值
+4. **缓存集群多可用区（multi-AZ） + 分片（sharding）**，避免单点全挂
 
 **面试金句**：
-> "缓存的可用性设计里，最重要的一条是：**缓存挂掉时数据库必须能活下来**。所以回源路径上必须有并发限制，而不是让所有 miss 都直通 DB。我会给回源加一个信号量，容量按 DB 能承受的连接数设，满了就返回降级响应。"
+> "缓存的可用性设计里，最重要的一条是：**缓存挂掉时数据库必须能活下来**。所以回源路径上必须有并发限制，而不是让所有 miss 都直通 DB。我会给回源加一个信号量（semaphore），容量按 DB 能承受的连接数设，满了就返回降级响应。"
 
 ---
 
@@ -167,28 +177,28 @@ return value
 | 手段 | 做法 | 代价 |
 |---|---|---|
 | **本地缓存** | 检测到热 key 后，客户端进程内缓存 1–5 秒 | 短暂不一致 |
-| **Key 打散** | `hotkey:shard_{0..9}`，读时随机选一个 | 写要更新 10 份 |
-| **只读副本** | 热 key 走多个只读副本 | 复制延迟 |
-| **预计算 + CDN** | 把热内容推到 CDN | 只适合可公开缓存的内容 |
+| **Key 打散（spread the key）** | `hotkey:shard_{0..9}`，读时随机选一个 | 写要更新 10 份 |
+| **只读副本（read replica）** | 热 key 走多个只读副本 | 复制延迟（replication lag） |
+| **预计算（precompute） + CDN** | 把热内容推到 CDN | 只适合可公开缓存的内容 |
 
 ---
 
-## 5. 缓存淘汰策略
+## 5. 缓存淘汰策略（eviction policy）
 
 | 策略 | 说明 | 适用 |
 |---|---|---|
 | LRU | 淘汰最久未用 | 通用默认 |
 | **LFU** | 淘汰访问频率最低 | 有稳定热点时**优于 LRU** |
-| **W-TinyLFU** | 频率草图 + 分段 LRU | **当代最优**，Caffeine/Ristretto 采用 |
+| **W-TinyLFU** | 频率草图（frequency sketch） + 分段 LRU | **当代最优**，Caffeine/Ristretto 采用 |
 | FIFO / Clock | 便宜 | 内核页缓存 |
 | **S3-FIFO** | 三队列 FIFO，2023 新提出 | 简单且接近 W-TinyLFU 的命中率 |
 
 **LRU 的致命弱点：扫描污染（scan resistance）。**
-> 一次全表扫描或批处理任务会把所有热数据挤出缓存。W-TinyLFU 用一个 Count-Min Sketch 记录访问频率，只有当新 key 的频率**高于**将被淘汰的 key 时才准入 —— 一次性扫描的 key 进不来。
+> 一次全表扫描或批处理任务会把所有热数据挤出缓存。W-TinyLFU 用一个 Count-Min Sketch 记录访问频率，只有当新 key 的频率**高于**将被淘汰的 key 时才准入（admission policy） —— 一次性扫描的 key 进不来。
 
 **Redis 的 maxmemory-policy**：
 - `allkeys-lru`：通用缓存
-- `volatile-lru`：只淘汰设了 TTL 的（用于缓存+持久数据混存，但**混存本身是反模式**）
+- `volatile-lru`：只淘汰设了 TTL 的（用于缓存+持久数据混存，但**混存本身是反模式（anti-pattern）**）
 - `allkeys-lfu`：有明显热点时
 - `noeviction`：Redis 作为数据库时（写满会报错）
 
@@ -198,14 +208,14 @@ return value
 
 ## 6. CDN 与边缘缓存
 
-### 缓存键的设计是 CDN 的核心
+### 缓存键（cache key）的设计是 CDN 的核心
 
 ```
 默认缓存键 = 协议 + 域名 + 路径 + 查询串
 问题：?utm_source=xxx 会让每个营销链接产生一份独立缓存 → 命中率崩塌
 ```
 
-**必做的规范化**：
+**必做的规范化（normalization）**：
 - 剔除无关查询参数（utm_*、fbclid、gclid）
 - 排序查询参数
 - `Vary` 头要克制：`Vary: Accept-Encoding` 可以，`Vary: User-Agent` 会把缓存打成碎片
@@ -219,9 +229,9 @@ Cache-Control: public, max-age=60, s-maxage=3600, stale-while-revalidate=86400, 
 | 指令 | 含义 |
 |---|---|
 | `max-age` | 浏览器缓存时长 |
-| `s-maxage` | **CDN/共享缓存**时长（覆盖 max-age） |
+| `s-maxage` | **CDN/共享缓存（shared cache）**时长（覆盖 max-age） |
 | `stale-while-revalidate` | 过期后仍可返回旧内容，同时后台刷新 → **消除回源毛刺** |
-| `stale-if-error` | 源站挂了时继续返回旧内容 → **免费的可用性** |
+| `stale-if-error` | 源站（origin）挂了时继续返回旧内容 → **免费的可用性** |
 | `private` | 禁止 CDN 缓存（含用户数据时必须） |
 | `immutable` | 内容永不变（配合内容哈希文件名） |
 
@@ -234,7 +244,7 @@ Cache-Control: public, max-age=60, s-maxage=3600, stale-while-revalidate=86400, 
 | TTL 到期 | TTL | 最简单，最可靠 |
 | Purge by URL | 秒级 | 精确但要知道所有 URL |
 | **Surrogate Key / Cache Tag** | 秒级 | **最强**：给响应打标签（如 `product-123`, `tenant-acme`），一次 purge 所有相关内容 |
-| 版本化 URL | 立即 | `/assets/app.a3f9b2.js` —— 静态资源的标准做法，配 `immutable` |
+| 版本化 URL（cache busting） | 立即 | `/assets/app.a3f9b2.js` —— 静态资源的标准做法，配 `immutable` |
 
 **架构建议**：动态内容用 **Surrogate Key**。文章更新时 purge `article-42`，所有包含它的页面（列表页、首页、RSS）一并失效。
 
@@ -263,7 +273,7 @@ Transformer 推理时，每个 token 的 Key/Value 张量可复用。如果两�
    - 系统提示里**不能有时间戳、随机 ID、动态排序的工具列表**
    - 上下文必须**只在末尾追加**（append-only），不能在中间插入或修改
    - 一旦你"压缩历史"改写了前面的内容，**整个缓存作废**
-2. **会话粘性路由**：同一会话的请求要路由到同一个推理实例（KV cache 在那台机器的显存/本地缓存里）。这让 LLM 网关变成**有状态路由**。
+2. **会话粘性路由（session affinity / sticky routing）**：同一会话的请求要路由到同一个推理实例（KV cache 在那台机器的显存/本地缓存里）。这让 LLM 网关变成**有状态路由**。
 3. 缓存有 TTL（通常 5 分钟–1 小时），长时间空闲的会话会失效。
 
 **设计推论**：
@@ -307,10 +317,10 @@ cache_key = hash(tool_name, normalized_args, tenant_id, data_version)
 
 | 指标 | 健康值 | 异常含义 |
 |---|---|---|
-| 命中率 | > 90%（热数据缓存） | 下降 = 数据集变大 / TTL 太短 / 淘汰太激进 |
+| 命中率（hit rate） | > 90%（热数据缓存） | 下降 = 数据集变大 / TTL 太短 / 淘汰太激进 |
 | p99 延迟 | < 2 ms（Redis 同 AZ） | 高 = 大 key / 慢命令 / 网络 |
 | 淘汰率（evictions） | ≈ 0 | > 0 说明内存不够，命中率会持续恶化 |
-| 内存碎片率 | 1.0–1.5 | > 1.5 考虑重启/activedefrag |
+| 内存碎片率（memory fragmentation ratio） | 1.0–1.5 | > 1.5 考虑重启/activedefrag |
 | **回源 QPS** | 稳定 | 突增 = stampede 发生了 |
 | 连接数 | < maxclients 的 70% | |
 
@@ -323,7 +333,7 @@ cache_key = hash(tool_name, normalized_args, tenant_id, data_version)
 | 情况 | 理由 |
 |---|---|
 | 数据变更频率 ≈ 读取频率 | 命中率极低，纯增复杂度 |
-| 强一致性要求（余额、库存扣减） | 用 DB 直读 + 索引优化 |
+| 强一致性（strong consistency）要求（余额、库存扣减） | 用 DB 直读 + 索引优化 |
 | 数据量小且 DB 已经在内存里 | Postgres 的 buffer pool 就是缓存 |
 | 只是为了掩盖慢查询 | **先修查询/加索引**。缓存掩盖的问题在缓存失效时会加倍爆发 |
 

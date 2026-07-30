@@ -1,6 +1,6 @@
 # 02 · 上下文工程与检索
 
-> 上下文窗口不是容器，是**预算**。它有限、会腐化、且每多放一个 token 都在稀释其他 token 的注意力。
+> 上下文窗口（context window）不是容器，是**预算**。它有限、会腐化、且每多放一个 token 都在稀释其他 token 的注意力。
 > RAG 没有死，它降格成了上下文工程里的一个子操作：`select`。
 
 ---
@@ -14,14 +14,14 @@
 | **Prompt engineering** | 编写和组织 LLM 指令的方法 | 单次调用 |
 | **Context engineering** | **在 LLM 推理期间策划并维护最优 token 集合的策略集合** | 跨多轮、跨工具、跨会话 |
 
-差别不是措辞。Prompt engineering 的对象是"一段文本"，context engineering 的对象是**系统提示 + 工具定义 + 外部数据 + 消息历史 + 记忆**这五者在每一步推理时的**组合与取舍**。
+差别不是措辞。Prompt engineering 的对象是"一段文本"，context engineering 的对象是**系统提示（system prompt） + 工具定义（tool definition） + 外部数据 + 消息历史 + 记忆（memory）**这五者在每一步推理时的**组合与取舍**。
 
 根源是 Transformer 的 n² 结构：**注意力是有限预算**，每对 token 都要建立关系。你往窗口里塞的每一个 token，都在稀释其他 token 拿到的注意力份额。
 
 学术侧的确认：[《A Survey of Context Engineering for LLMs》(arXiv:2507.13334)](https://arxiv.org/abs/2507.13334)（166 页，综述 1400+ 篇）把它拆成 Context Retrieval and Generation / Context Processing / Context Management 三个基础组件，并指出一个核心缺口：模型**理解**复杂上下文的能力远强于**生成**同等复杂度长文本的能力。
 
 > **面试金句**：
-> "我不会说我们'做了 RAG'。RAG 是上下文工程里的 select 操作。完整的问题是：这一步推理的 token 预算是多少，其中多少给工具定义、多少给检索结果、多少给历史，以及什么时候把哪部分挪出窗口。只谈检索不谈预算，等于只谈缓存不谈淘汰策略。"
+> "我不会说我们'做了 RAG'。RAG 是上下文工程里的 select 操作。完整的问题是：这一步推理的 token 预算是多少，其中多少给工具定义、多少给检索结果、多少给历史，以及什么时候把哪部分挪出窗口。只谈检索不谈预算，等于只谈缓存不谈淘汰策略（eviction policy）。"
 
 ---
 
@@ -32,30 +32,30 @@
 结论（这些是你要背的）：
 
 1. **性能随输入长度单调下降，而且远在窗口填满之前就开始。** 不存在"窗口 200K，塞到 190K 都没事"这回事。
-2. **needle 与 question 的语义相似度越低，长度带来的退化越剧烈。** 精确匹配的检索题掩盖了真实退化。
-3. **单个 distractor（似是而非的干扰片段）就能降低准确率，4 个 distractor 复合放大**，且不同 distractor 的伤害不均匀 —— 某些会稳定诱发幻觉。
+2. **needle 与 question 的语义相似度（semantic similarity）越低，长度带来的退化越剧烈。** 精确匹配的检索题掩盖了真实退化。
+3. **单个 distractor（似是而非的干扰片段）就能降低准确率，4 个 distractor 复合放大**，且不同 distractor 的伤害不均匀 —— 某些会稳定诱发幻觉（hallucination）。
 4. **LongMemEval 上，~300 token 的聚焦 prompt 准确率显著高于 113,000 token 的完整 prompt**，所有模型家族一致。
-5. **模型行为差异**：Claude 系倾向不确定时弃答，GPT 系幻觉率最高。
+5. **模型行为差异**：Claude 系倾向不确定时弃答（abstain），GPT 系幻觉率最高。
 6. 重复词复制这类"零推理"任务在 **500–1000 词**之后开始明显崩坏。
 7. **反直觉**：把 haystack 打乱，反而比保持逻辑连贯的 haystack 表现**更好**，18 个模型一致 —— 论文未给出解释。
 
 ⚠️ 网上广泛转述的"18 个模型准确率下降 30–50%"这个数字**在原文中并不以单一数字形式存在**，不要引用。
 
-**第 7 条容易被误读。** 它不是说"随便乱放"，而是说：**连贯的干扰文本比零散的干扰文本更伤注意力**（模型更容易被一段读起来合理的错误上下文带走）。把"上下文排布顺序"当作**可 A/B 的变量**，而不是当常识去优化。**第 5 条更阴险**：同一套检索管线换个模型、指标变了，你可能会去调检索 —— 但真实原因是弃答/幻觉倾向不同。**换模型后必须重跑检索基线**。
+**第 7 条容易被误读。** 它不是说"随便乱放"，而是说：**连贯的干扰文本比零散的干扰文本更伤注意力**（模型更容易被一段读起来合理的错误上下文带走）。把"上下文排布顺序"当作**可 A/B 的变量**，而不是当常识去优化。**第 5 条更阴险**：同一套检索管线（retrieval pipeline）换个模型、指标变了，你可能会去调检索 —— 但真实原因是弃答/幻觉倾向不同。**换模型后必须重跑检索基线**。
 
 ---
 
 ## 3. 上下文预算表：把窗口当一等资源核算
 
-反模式：把 200K 窗口当 200K 可用空间。正确做法是给每个段落**分配硬预算**，并在超预算时有明确的降级动作。
+反模式（anti-pattern）：把 200K 窗口当 200K 可用空间。正确做法是给每个段落**分配硬预算**，并在超预算时有明确的降级（graceful degradation）动作。
 
 下面是一个 200K 窗口、工具型 Agent 的可抄预算表：
 
 | 段落 | 占比 | 200K 下的绝对值 | 缓存属性 | 超预算时怎么办 |
 |---|---|---|---|---|
-| 系统提示 / 角色 / 输出契约 | 2–4% | 4k–8k | **稳定前缀**，逐 token 不变 | 不能动；动了全窗口缓存失效 |
-| 工具定义（JSON Schema） | 5–15% | 10k–30k | **稳定前缀**，排在 system 之前 | 按任务阶段做工具子集（见 §4 isolate） |
-| 长期记忆 / 项目规范 | 2–5% | 4k–10k | 准稳定，追加式 | 摘要化、外部化到文件 |
+| 系统提示 / 角色 / 输出契约 | 2–4% | 4k–8k | **稳定前缀**（stable prefix），逐 token 不变 | 不能动；动了全窗口缓存失效 |
+| 工具定义（JSON Schema） | 5–15% | 10k–30k | **稳定前缀**，排在 system 之前 | 按任务阶段做工具子集（tool subsetting，见 §4 isolate） |
+| 长期记忆 / 项目规范 | 2–5% | 4k–10k | 准稳定，追加式 | 摘要化、外部化（externalize）到文件 |
 | **检索结果** | 10–25% | 20k–50k | **每轮变化，绝不能放前缀** | 降 top-k、加 rerank、提高阈值 |
 | 对话历史 + **工具结果** | 30–50% | 60k–100k | 只追加 | **优先清理工具结果，不是对话** |
 | 当前用户输入 | <1% | 0.5k–2k | 变化 | — |
@@ -63,9 +63,9 @@
 
 三条规则：
 
-**规则 1：有效工作区（历史 + 检索）超过窗口的 50% 就该开始压缩。** 不要等到 95%。社区对 Claude Code 的逆向普遍认为 auto-compact 在容量 **~95%** 触发（⚠️ 官方未文档化，社区逆向值互相矛盾），而同一批实践者的建议值是调到 **40–70%**。这个落差本身就是信号。
+**规则 1：有效工作区（历史 + 检索）超过窗口的 50% 就该开始压缩（compaction）。** 不要等到 95%。社区对 Claude Code 的逆向普遍认为 auto-compact 在容量 **~95%** 触发（⚠️ 官方未文档化，社区逆向值互相矛盾），而同一批实践者的建议值是调到 **40–70%**。这个落差本身就是信号。
 
-**规则 2：工具结果是最大的污染源，不是对话历史。** 一次 `ls -R`、一次全文件读取、一次 API 返回的 JSON，动辄几千 token，且 90% 与后续决策无关。压缩的第一目标永远是工具结果。（社区对 Claude Code 的逆向给出"工具响应占 agent 总 token **67.6%**、系统提示 3.4%"—— ⚠️ 非官方、未核实，只当量级参考。）
+**规则 2：工具结果是最大的污染源（context pollution），不是对话历史。** 一次 `ls -R`、一次全文件读取、一次 API 返回的 JSON，动辄几千 token，且 90% 与后续决策无关。压缩的第一目标永远是工具结果。（社区对 Claude Code 的逆向给出"工具响应占 agent 总 token **67.6%**、系统提示 3.4%"—— ⚠️ 非官方、未核实，只当量级参考。）
 
 **规则 3：预算要按步骤设，不是按会话设。** 一个 30 步的 Agent，如果每步只加 3k token，第 30 步就是 90k。把"单步最大新增 token"写进运行时约束。
 
@@ -79,8 +79,8 @@
 |---|---|---|---|
 | **Write** | 把知识写到窗口**之外**并持久化 | scratchpad 文件、`progress.md`、memory tool、结构化 feature list、git commit | 任何"下一步还要用但当前不需要"的信息 |
 | **Select** | 决定哪些源进入窗口 | 检索（RAG）、工具子集、记忆召回、文件读取 | 每一步推理前 |
-| **Compress** | 在关键事实结构化之后再压缩 | 工具结果清理、分层摘要、compaction | 工作区 > 窗口 50%，或 tool result 累计 > 3 万 token |
-| **Isolate** | 按域/子代理切分上下文可见性 | 子代理、沙箱、工具命名空间、独立 MCP server | 上下文互相污染，或需要独立判断 |
+| **Compress** | 在关键事实结构化之后再压缩 | 工具结果清理、分层摘要（hierarchical summarization）、compaction | 工作区 > 窗口 50%，或 tool result 累计 > 3 万 token |
+| **Isolate** | 按域/子代理切分上下文可见性 | 子代理（sub-agent）、沙箱（sandbox）、工具命名空间（tool namespace）、独立 MCP server | 上下文互相污染，或需要独立判断 |
 
 **Write 的关键判据：长任务必须外部化状态。** 不要押在"单个会话/单个沙箱存活"上 —— 写 progress 文件 + git commit + 结构化 feature list。E2B 的会话硬上限是 Hobby **1 小时** / Pro **24 小时**（2026 年中量级，随时变动），你的任务可能比会话活得久。
 
@@ -91,7 +91,7 @@
 
 同一个团队在 2025-06 和 2026-04 分别给出了"共享完整 trace"和"完全干净互不共享"两条相反建议 —— **它们没有被调和，这是按角色类型分流的问题，不是谁对谁错**。详见 [05-multi-agent-orchestration.md](05-multi-agent-orchestration.md)。
 
-⚠️ **Isolate 的固有代价**：子代理回传是**有损摘要**，规模约 **1,000–2,000 token**。这是设计意图不是缺陷，但代价是父代理**无法复审原始证据**。当你需要审计链路时，isolate 是错的选择。
+⚠️ **Isolate 的固有代价**：子代理回传是**有损摘要**（lossy summary），规模约 **1,000–2,000 token**。这是设计意图不是缺陷，但代价是父代理**无法复审原始证据**。当你需要审计链路（audit trail）时，isolate 是错的选择。
 
 ---
 
@@ -123,18 +123,18 @@
                         └───────────────────────────────────────────┘
 ```
 
-### 5.1 分块：三条路线，成本差 8×
+### 5.1 分块（chunking）：三条路线，成本差 8×
 
 | 路线 | 做法 | 收益 | 代价 |
 |---|---|---|---|
 | 朴素切分 | 递归 512 token + overlap 64 | 基线 | 代词/跨引用丢失，chunk 脱离语境 |
 | **Contextual Retrieval** | 用 LLM 给每个 chunk 生成 50–100 token 的文档级上下文，拼在 chunk 前 | 检索失败率 **−35%**（5.7%→3.7%）；+ contextual BM25 **−49%**；+ rerank **−67%**（→1.9%） | **$1.02 / 百万文档 token** 一次性成本；多一个 LLM 环节 |
 | **Late chunking** | 先整篇过长上下文 embedding 模型拿 token 级表示，**再**切 chunk 做 mean pooling | 保住代词/跨引用；BEIR 增益**随文档长度增长而增长** | 需要长上下文 embedding 模型 |
-| **Contextualized chunk embeddings** | 模型内置（voyage-context-4 自带 auto-chunking，示例 target 512 / overlap 64） | 省掉 LLM 环节，**$0.12/1M**（比 contextual retrieval 低约 8.5×） | **厂商锁定**；基准全是厂商自评 |
+| **Contextualized chunk embeddings** | 模型内置（voyage-context-4 自带 auto-chunking，示例 target 512 / overlap 64） | 省掉 LLM 环节，**$0.12/1M**（比 contextual retrieval 低约 8.5×） | **厂商锁定**（vendor lock-in）；基准全是厂商自评 |
 
 [Anthropic Contextual Retrieval（2024-09-19）](https://www.anthropic.com/engineering/contextual-retrieval)仍是被引最多的基线，它的参数值得直接抄：chunk 数百 token（示例 800 token chunk / 8k token 文档），reranker **top-150 → 截 top-20**（top-20 优于 top-5/top-10）。上下文化成本可用 prompt caching 再降最多 90%。
 
-⚠️ **不要把"top-20 优于 top-5"推广到无 rerank 的场景。** 那是 rerank 之后的结论。没有 rerank 时，多召回 = 多 distractor = §2 的第 3 条。
+⚠️ **不要把"top-20 优于 top-5"推广到无 rerank 的场景。** 那是 rerank 之后的结论。没有 rerank 时，多召回（recall）= 多 distractor = §2 的第 3 条。
 
 ### 5.2 Embedding 选型（2026 年中量级，随时变动）
 
@@ -149,13 +149,13 @@
 
 三条选型纪律：
 
-1. **别用 MTEB 分数直接决定选型。** 榜单过拟合严重，多语言/长文档/领域词表现与英文均分脱节。
+1. **别用 MTEB 分数直接决定选型。** 榜单过拟合（overfitting）严重，多语言/长文档/领域词表现与英文均分脱节。
 2. **Matryoshka 截断几乎是免费的**：截到 **256 维**通常只损 **2–3%** 精度，存储降 **4×**。1 亿向量从 1536 维（约 600 GB）降到 256 维（约 100 GB），这是真金白银。
-3. **embedding 缓存键必须包含 `model_id`** —— 换模型后旧向量全部作废，且**必须全量重建索引**。把重建时间写进容量模型：1 亿 chunk × $0.02/1M token × 平均 300 token ≈ **$600** 的 API 费用 + 若干小时的索引构建。
+3. **embedding 缓存键必须包含 `model_id`** —— 换模型后旧向量全部作废，且**必须全量重建索引（reindex）**。把重建时间写进容量模型：1 亿 chunk × $0.02/1M token × 平均 300 token ≈ **$600** 的 API 费用 + 若干小时的索引构建。
 
-### 5.3 混合检索与 RRF
+### 5.3 混合检索（hybrid retrieval）与 RRF
 
-**为什么必须混合**：dense 在**词法精确**查询上系统性失效 —— 错误码、SKU、函数名/符号名、罕见实体、受控词表。embedding 会把 `ERR_4471` 映射到"错误码语义邻域"，召回一堆别的错误码。
+**为什么必须混合**：dense 在**词法（lexical）精确**查询上系统性失效 —— 错误码、SKU、函数名/符号名、罕见实体、受控词表（controlled vocabulary）。embedding 会把 `ERR_4471` 映射到"错误码语义邻域"，召回一堆别的错误码。
 
 **RRF（Reciprocal Rank Fusion）**之所以在生产胜出，是因为它 **scale-agnostic** —— 只吃排名不吃分数，绕开 cosine(0–1) 与 BM25(无上界) 的归一化不稳定问题：
 
@@ -167,7 +167,7 @@ score(d) = Σ_i  1 / (k + rank_i(d))        k = 60（行业惯例）
 
 ⚠️ **收益幅度存在争议，别对外承诺大数字**：部分 2026 文章称 hybrid 相对 dense-only NDCG **+26–31%**（未见可核对的原始实验）；而第三方实测给出的口径是**裸 RRF 相对 BM25 只 +1.3% NDCG，调优后才 +7.4~7.5%**。专利检索这种极窄领域，RRF(K=30) 的 NDCG@100 绝对增益只有 **+0.0094**（0.3475 vs 0.3381）。
 
-**结论：领域越窄，hybrid 的绝对增益越小。** 收益基本来自 alpha/权重调参与领域适配，而调 alpha 只需要 **~40 条**标注的 query-relevance 对 —— 这是整条流水线里 ROI 最高的 40 条标注。
+**结论：领域越窄，hybrid 的绝对增益越小。** 收益基本来自 alpha/权重调参与领域适配（domain adaptation），而调 alpha 只需要 **~40 条**标注的 query-relevance 对 —— 这是整条流水线里 ROI 最高的 40 条标注。
 
 convex 融合的 alpha 经验值（alpha = dense 权重）：**技术文档 0.3、混合语料 0.6、对话式 0.7–0.8**。
 
@@ -175,7 +175,7 @@ WANDS 基准上的三方对照：hybrid **0.7497** / BM25 0.6983 / 纯向量 0.6
 
 ### 5.4 Rerank：收益最确定的一环
 
-一阶段召回 top-100 → 压到 **30–50** 候选 → cross-encoder 重排 → 截 top-10~20。端到端 **100–200 ms**。
+一阶段召回（first-stage retrieval）top-100 → 压到 **30–50** 候选 → cross-encoder 重排 → 截 top-10~20。端到端 **100–200 ms**。
 
 | Reranker（第三方榜，2026-02 量级） | ELO | 延迟 | 单价 |
 |---|---|---|---|
@@ -185,7 +185,7 @@ WANDS 基准上的三方对照：hybrid **0.7497** / BM25 0.6983 / 纯向量 0.6
 | Voyage Rerank 2.5 | 1544 | 613 ms | $0.050 |
 | Jina Reranker v3 | — | **188 ms**（Hit@1 81.33%） | — |
 
-⚠️ 该榜的 nDCG@10 列（0.079–0.110）与 ELO 排序不一致，疑为相对增量口径 —— **不要引用它的绝对 nDCG**。延迟是唯一可以横向比的列，而且它很重要：600ms 的 reranker 在多跳 Agent 里会被放大 10 倍。
+⚠️ 该榜的 nDCG@10 列（0.079–0.110）与 ELO 排序不一致，疑为相对增量口径 —— **不要引用它的绝对 nDCG**。延迟是唯一可以横向比的列，而且它很重要：600ms 的 reranker 在多跳（multi-hop）Agent 里会被放大 10 倍。
 
 ### 5.5 Late interaction / ColBERT：先算存储再谈质量
 
@@ -193,7 +193,7 @@ WANDS 基准上的三方对照：hybrid **0.7497** / BM25 0.6983 / 纯向量 0.6
 
 PLAID 相对 vanilla ColBERTv2 提速 GPU **2.5–7×** / CPU **9–45×**；[MUVERA（arXiv:2405.19504）](https://arxiv.org/html/2405.19504)相对 PLAID recall **+10%**、latency **−90%**，FDE 经 PQ 再压 32×。Weaviate 1.31 已提供 `Encoding.muvera(...)`，Qdrant/Vespa 亦有落地 —— **它已经从研究变成了配置开关**。
 
-但默认答案仍然是：**先把 hybrid + rerank 调好，再考虑多向量**。为了"看起来先进"上 ColBERT，代价是存储涨 34×。
+但默认答案仍然是：**先把 hybrid + rerank 调好，再考虑多向量（multi-vector）**。为了"看起来先进"上 ColBERT，代价是存储涨 34×。
 
 ---
 
@@ -206,7 +206,7 @@ PLAID 相对 vanilla ColBERTv2 提速 GPU **2.5–7×** / CPU **9–45×**；[MU
 - [《Is Grep All You Need?》(arXiv:2605.15184, 2026-05-14)](https://arxiv.org/abs/2605.15184)：LongMemEval 116 题子集，**grep 总体准确率高于 vector retrieval**。但论文自己强调：结果**强烈依赖使用哪个 harness 和何种 tool-calling 风格** —— 检索方法本身不决定结果。
 - [LlamaIndex 基准（2026-01-13）](https://www.llamaindex.ai/blog/did-filesystem-tools-kill-vector-search)：小规模（5 篇 arXiv 论文，22–52 页）下文件系统 Agent correctness **8.4/10**、relevance 9.6/10、平均 **11.17 s**；传统 hybrid RAG correctness **6.4/10**、relevance 8.0/10、平均 **7.36 s**。**扩到 100 / 1000 篇后：RAG 在速度上大幅胜出、correctness 略胜、relevance 持平。**
 
-**这不是矛盾，是规模分流。** 判据表：
+**这不是矛盾，是规模分流。** 判据（decision criteria）表：
 
 | 维度 | 选 Agentic（grep/ls/read） | 选预先检索索引 |
 |---|---|---|
@@ -215,16 +215,16 @@ PLAID 相对 vanilla ColBERTv2 提速 GPU **2.5–7×** / CPU **9–45×**；[MU
 | 语料位置 | Agent 已有沙箱访问权 | 需要跨服务查询 |
 | 延迟预算 | 宽松（多轮工具调用，10s+） | 紧（<1s 单跳） |
 | 成本模型 | 多轮工具调用 token 成本高且不可预测 | 单次检索成本固定 |
-| 新鲜度 | **实时**（读的就是当前状态） | 索引延迟（秒~小时） |
+| 新鲜度（freshness） | **实时**（读的就是当前状态） | 索引延迟（indexing lag，秒~小时） |
 | 权限 | 靠文件系统权限兜底 | 必须在检索层做过滤 |
 
 **grep 路线的两条硬假设，破了就崩：**
 1. 语料以文本文件形式存在于文件系统上；
-2. 规模在数百到数千文档量级，Agent 能自己挑文件而不被低信噪比淹没。
+2. 规模在数百到数千文档量级，Agent 能自己挑文件而不被低信噪比（signal-to-noise ratio）淹没。
 
-[Doug Turnbull 的补充](https://softwaredoug.com/blog/2026/04/06/agentic-search-is-having-a-grep-moment)很关键：grep 能用的真正原因**不是检索工具本身，而是 harness 用 hook / 结构化输出做验收校验在兜底**。naive 的多轮工具调用最终会在 token 成本上翻车。
+[Doug Turnbull 的补充](https://softwaredoug.com/blog/2026/04/06/agentic-search-is-having-a-grep-moment)很关键：grep 能用的真正原因**不是检索工具本身，而是 harness 用 hook / 结构化输出（structured output）做验收校验在兜底（fallback）**。naive 的多轮工具调用最终会在 token 成本上翻车。
 
-**工程结论**：单 repo / 单项目 → 文件系统工具；企业级异构语料 → 检索索引。**混合形态是最实用的**：向量检索定位到"哪几个文件/目录相关"，然后让 Agent 用 grep + read 在这个小范围里精确挖 —— 检索负责收窄搜索空间，Agent 负责精确性。
+**工程结论**：单 repo / 单项目 → 文件系统工具；企业级异构语料 → 检索索引。**混合形态是最实用的**：向量检索定位到"哪几个文件/目录相关"，然后让 Agent 用 grep + read 在这个小范围里精确挖 —— 检索负责收窄搜索空间（search space），Agent 负责精确性。
 
 ---
 
@@ -247,7 +247,7 @@ PLAID 相对 vanilla ColBERTv2 提速 GPU **2.5–7×** / CPU **9–45×**；[MU
 
 **唯一的例外**：**小而稳定**的知识库（比如 3 万 token 的产品手册）+ prompt caching，全量塞入比建检索基础设施更快更便宜。但这个例外有硬边界 —— **一旦知识库频繁更新，或每个用户的文档集不同，缓存立即失效**，经济性瞬间翻转。
 
-顺带一提定价：Claude 4.6 及以后的 **1M 上下文按标准价，无长上下文溢价**；而 Gemini 3.1 Pro Preview 是一线厂商里唯一有明确长上下文阶梯溢价的（≤200k **$2.00** / >200k **$4.00** 每百万输入，2026 年中量级）。这会直接改变你的"塞进去还是检索"的临界点。
+顺带一提定价：Claude 4.6 及以后的 **1M 上下文按标准价，无长上下文溢价**；而 Gemini 3.1 Pro Preview 是一线厂商里唯一有明确长上下文阶梯溢价的（≤200k **$2.00** / >200k **$4.00** 每百万输入，2026 年中量级）。这会直接改变你的"塞进去还是检索"的临界点（crossover point）。
 
 ---
 
@@ -275,7 +275,7 @@ query ──► 分类器 ──┬── 点查 / 局部事实 / 时效性 ─�
 
 ## 9. 上下文组装顺序与前缀缓存的硬约束
 
-这一节把 [01-building-blocks/02-caching.md](../01-building-blocks/02-caching.md) §7 的结论落到具体参数上。**前缀缓存是 2026 最大的单点性能杠杆**（不重算 > 算得更快），而它对上下文组装施加的是**硬约束，不是建议**。
+这一节把 [01-building-blocks/02-caching.md](../01-building-blocks/02-caching.md) §7 的结论落到具体参数上。**前缀缓存（prefix caching）是 2026 最大的单点性能杠杆**（不重算 > 算得更快），而它对上下文组装（context assembly）施加的是**硬约束，不是建议**。
 
 **正确的组装顺序（从前到后）：**
 
@@ -290,13 +290,13 @@ query ──► 分类器 ──┬── 点查 / 局部事实 / 时效性 ─�
 |---|---|---|---|
 | 缓存读折扣 | **0.1×** 输入价 | GPT-5.x **10%**；gpt-4.1/o3 25%；gpt-4o 50% | — |
 | 缓存写费 | 5m **1.25×** / 1h **2×** | GPT-5.6+ **1.25×**（此前免费） | — |
-| 回本点 | 5m 读 **1** 次；1h 读 **2** 次 | — | — |
-| 最小可缓存前缀 | **非单调**：512（Opus 5 / Fable 5）、1024（Sonnet 5 / Opus 4.8）、2048（Opus 4.7）、**4096（Haiku 4.5）** | 1024 tokens | 隐式 4096（3.5 Flash / 3.1 Pro）、2048（2.5 系） |
-| 存活时间 | 5m / 1h | GPT-5.6+ 至少保留 30 分钟；更早模型 5–10 分钟不活动淘汰 | — |
+| 回本点（break-even point） | 5m 读 **1** 次；1h 读 **2** 次 | — | — |
+| 最小可缓存前缀（cacheable prefix） | **非单调**：512（Opus 5 / Fable 5）、1024（Sonnet 5 / Opus 4.8）、2048（Opus 4.7）、**4096（Haiku 4.5）** | 1024 tokens | 隐式 4096（3.5 Flash / 3.1 Pro）、2048（2.5 系） |
+| 存活时间（TTL） | 5m / 1h | GPT-5.6+ 至少保留 30 分钟；更早模型 5–10 分钟不活动淘汰 | — |
 | 存储费 | 无 | 无 | **$1.00 / 百万 token / 小时**（唯一有持有成本的） |
 | 控制参数 | 最多 **4 个** breakpoint，每个回看 **20 个** content block | `prompt_cache_key`、`prompt_cache_options.mode` = `explicit`/`implicit` | — |
 
-**Anthropic 的失效级联顺序必须背下来**：`tools → system → messages`。
+**Anthropic 的失效级联（invalidation cascade）顺序必须背下来**：`tools → system → messages`。
 
 - 改一个 **tool 定义** → **全部失效**
 - 改 **system** → system + messages 失效
@@ -318,7 +318,7 @@ Anthropic 的 context editing 提供了可直接抄的参数（beta header `cont
 | | `keep` | 3 个 tool use/result 对 | 3 |
 | | `clear_at_least` | — | **5000**（关键，见下） |
 | | `exclude_tools` | — | `web_search`、memory 类 |
-| | `clear_tool_inputs` | `false` | `false`（保留调用参数便于溯源） |
+| | `clear_tool_inputs` | `false` | `false`（保留调用参数便于溯源 traceability） |
 | `clear_thinking_20251015` | — | Opus 4.5+/Sonnet 4.6+ 默认保留全部；更早模型只留最后一轮 | 组合使用时必须排在 edits 数组**首位** |
 | 服务端 compaction | `compact_20260112` | — | SDK 客户端 compaction（`compaction_control`）**已废弃** |
 
@@ -326,13 +326,13 @@ Anthropic 的 context editing 提供了可直接抄的参数（beta header `cont
 
 **三个必须知道的坑：**
 
-**坑 1：压缩会击穿 prompt cache 前缀，可能净亏钱。** 清理 tool result 改写了 messages 的中段 → 后面全部重算。cache read 便宜 90%，你省下的 token 数可能远抵不上失去的缓存折扣。**`clear_at_least` 就是为这个存在的**：一次至少清理够多的 token，让"重建缓存"这笔投资摊得开。必须做 **token 数与 cache 命中率的联合核算**，不是只看 token 数。
+**坑 1：压缩会击穿 prompt cache 前缀，可能净亏钱。** 清理 tool result 改写了 messages 的中段 → 后面全部重算。cache read 便宜 90%，你省下的 token 数可能远抵不上失去的缓存折扣。**`clear_at_least` 就是为这个存在的**：一次至少清理够多的 token，让"重建缓存"这笔投资摊得开。必须做 **token 数与 cache 命中率（hit rate）的联合核算**，不是只看 token 数。
 
-**坑 2：忘掉 `exclude_tools`。** memory、`web_search` 这类结果被清掉，Agent 会**反复重查** —— 成本不降反升，而且会在轨迹里表现为"步骤重复"（MAST 分类法里占 15.7% 的头号失败模式）。
+**坑 2：忘掉 `exclude_tools`。** memory、`web_search` 这类结果被清掉，Agent 会**反复重查** —— 成本不降反升，而且会在轨迹（trajectory）里表现为"步骤重复"（MAST 分类法里占 15.7% 的头号失败模式）。
 
 **坑 3：压缩是不可逆的信息丢失。** 摘要掉的东西，Agent 之后**不知道自己不知道**。
 
-**保留清单（摘要时必须逐字保留，不许改写）：**
+**保留清单（摘要时必须逐字保留 verbatim，不许改写）：**
 
 | 类别 | 例子 | 理由 |
 |---|---|---|
@@ -340,15 +340,15 @@ Anthropic 的 context editing 提供了可直接抄的参数（beta header `cont
 | 未完成的承诺 | "还需要更新 3 个调用点" | 丢了就是任务不完整 |
 | 约束与否决 | "用户明确说不要改 schema" | 丢了会重犯 |
 | 失败记录 | "方案 A 试过，报错 X" | 丢了会无限重试 |
-| 用户原话中的需求 | 验收标准 | 摘要最容易偷偷改变语义的地方 |
+| 用户原话中的需求 | 验收标准（acceptance criteria） | 摘要最容易偷偷改变语义的地方 |
 
 **可以安全丢弃的**：中间工具输出的原始体、被否决方案的推导过程、已完成且已验证步骤的细节。
 
-**预演工具**：`count_tokens` 端点支持带 `context_management` 参数，返回 `original_input_tokens` 与清理后的 `input_tokens` —— 上线前用它把压缩策略跑一遍，别在生产上试。
+**预演（dry run）工具**：`count_tokens` 端点支持带 `context_management` 参数，返回 `original_input_tokens` 与清理后的 `input_tokens` —— 上线前用它把压缩策略跑一遍，别在生产上试。
 
 ---
 
-## 11. 多租户与权限过滤：检索层最容易出的合规事故
+## 11. 多租户（multi-tenancy）与权限过滤：检索层最容易出的合规事故
 
 **三种做法，只有一种对：**
 
@@ -356,15 +356,15 @@ Anthropic 的 context editing 提供了可直接抄的参数（beta header `cont
 |---|---|
 | **Post-filter**（先 ANN 取 top-k，再过滤租户） | ❌ **top-10 可能全是别的租户的，过滤后返回 0 条**。而且 ANN 已经"看见"了跨租户数据 |
 | **Pre-filter**（ANN 遍历时带 `WHERE tenant_id=?`） | ⚠️ 租户占比极低时 ANN 图的连通性被破坏，召回率崩塌 |
-| **按租户分区/分集合** | ✅ 过滤退化成"选哪个索引"，不影响 ANN 质量。代价是小租户多时索引碎片化 |
+| **按租户分区/分集合**（partitioning） | ✅ 过滤退化成"选哪个索引"，不影响 ANN 质量。代价是小租户多时索引碎片化 |
 
 详见 [01-building-blocks/01-storage-engines.md](../01-building-blocks/01-storage-engines.md) §6 与案例 [06-case-studies/03-multi-tenant-vector-search.md](../06-case-studies/03-multi-tenant-vector-search.md)。
 
 **另外四条纪律：**
 
-1. **权限过滤必须在检索层，不能交给 LLM 判断。** "在 prompt 里告诉模型只能用 A 部门的文档"不是访问控制，是许愿。
-2. **ACL 会变，检索结果会陈旧。** 检索时带上 ACL 版本号/快照时间，**生成前做一次二次授权检查**。用户 10:00 被移出项目组，10:01 的检索不能还命中该项目文档。
-3. **跨租户共享 prefix cache 是已实证的泄露面。** PROMPTPEEK（NDSS 2025）表明共享 prefix cache 可被逐 token 重建他人 prompt：已知模板时成功率 **99%**，**无任何背景知识也有 95%**，约 **60 次请求**即可套出用户属性。攻击面覆盖 vLLM、SGLang、LightLLM、DeepSpeed。
+1. **权限过滤（permission filtering）必须在检索层，不能交给 LLM 判断。** "在 prompt 里告诉模型只能用 A 部门的文档"不是访问控制（access control），是许愿。
+2. **ACL 会变，检索结果会陈旧（staleness）。** 检索时带上 ACL 版本号/快照时间，**生成前做一次二次授权检查**。用户 10:00 被移出项目组，10:01 的检索不能还命中该项目文档。
+3. **跨租户共享 prefix cache 是已实证的泄露面（leakage surface）。** PROMPTPEEK（NDSS 2025）表明共享 prefix cache 可被逐 token 重建他人 prompt：已知模板时成功率 **99%**，**无任何背景知识也有 95%**，约 **60 次请求**即可套出用户属性。攻击面覆盖 vLLM、SGLang、LightLLM、DeepSpeed。
 4. **由此产生本章最大的张力**：prefix cache 是最大的性能杠杆（§9），也是最大的跨租户泄露面。
 
 > **面试金句**：
@@ -374,7 +374,7 @@ Anthropic 的 context editing 提供了可直接抄的参数（beta header `cont
 
 ## 12. 检索评测：分层归因，否则你在调错东西
 
-**第一步永远是分层归因**，而不是看端到端答案质量：
+**第一步永远是分层归因（layered attribution）**，而不是看端到端答案质量：
 
 ```
 答案错了
@@ -385,7 +385,7 @@ Anthropic 的 context editing 提供了可直接抄的参数（beta header `cont
 
 | 层 | 指标 | 生产目标线（2026 量级） |
 |---|---|---|
-| 一阶段召回 | Recall@100 | > 95%（rerank 的天花板由它决定） |
+| 一阶段召回 | Recall@100 | > 95%（rerank 的天花板 upper bound 由它决定） |
 | 融合后 | **Recall@10** | **85–91%** |
 | | **MRR** | **> 0.80** |
 | | Hit Rate@10 | **> 90%** |
@@ -414,7 +414,7 @@ Anthropic 的 context editing 提供了可直接抄的参数（beta header `cont
 | 语料 **< 100 万 token** 却想上 GraphRAG | 索引开销 6–8× 收不回来 | flat RAG |
 | 只是为了"看起来有 AI 架构" | 你会得到一套需要维护的索引管道、一个新的一致性问题、一个新的权限泄露面 | 别做 |
 
-**最大的反模式：把 RAG 当成"记忆"。** 检索是无状态的 select 操作，它不知道 Agent 上一步做了什么。用向量库存对话历史然后指望它变成记忆，会得到一个既检索不准、又没有时序、还无法遗忘的系统。Agent 的记忆需要显式的 write 操作和状态机 —— 见 [04-agent-memory-and-state.md](04-agent-memory-and-state.md)。
+**最大的反模式：把 RAG 当成"记忆"。** 检索是无状态的 select 操作，它不知道 Agent 上一步做了什么。用向量库存对话历史然后指望它变成记忆，会得到一个既检索不准、又没有时序、还无法遗忘的系统。Agent 的记忆需要显式的 write 操作和状态机（state machine） —— 见 [04-agent-memory-and-state.md](04-agent-memory-and-state.md)。
 
 **第二大反模式：先建检索基础设施，再想清楚 query 长什么样。** 分块策略、embedding 维度、融合权重全部依赖 query 分布。**没有 40 条真实 query 之前，你调的每一个参数都是猜的。**
 

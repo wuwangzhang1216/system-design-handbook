@@ -1,4 +1,4 @@
-# 05 · 多 Agent 编排
+# 05 · 多 Agent 编排（multi-agent orchestration）
 
 > 2025 年业界为"要不要多 Agent"吵了一年，2026 年收敛成一条可执行的结论：
 > **并行只用于"读"和"评"，"写"必须单线程。**
@@ -41,15 +41,15 @@
 
 | 模式 | 拓扑 | 相对单 Agent 的成本倍数 | 适用判据 | 撞墙条件 / 失效信号 |
 |---|---|---|---|---|
-| **Orchestrator-Worker** | 1 lead → N worker（**同步**执行），worker 回传摘要 | ~2–4× | **广度优先的只读探索**：多来源检索、竞品调研、代码库全局理解 | lead 上下文 ~6 步后熵饱和 → 决策退化；一个慢 worker 阻塞全局；worker 重复劳动 |
-| **Map-Reduce 扇出** | 同构任务 N 份并行 → 单点 reduce | ~N× 计算，但墙钟时间 −最多 90% | 任务**完全同构且互不依赖**：批量文档抽取、批量文件分类 | reduce 阶段上下文爆炸；分片边界跨越了语义边界 |
-| **Planner-Executor** | 先出计划（固化）→ 按计划执行 | ~1.3–1.6× | 步骤可预先枚举、需要人审计划、需要抗注入（计划固化后工具调用序列不可被改写） | 计划过时（环境在执行中变了）；**参数仍可被注入影响**，只有序列不可变 |
-| **Handoff / Swarm** | Agent A 把控制权连同上下文转交 Agent B | ~1.2–2× | 明确的**角色切换**：分诊 → 专科；意图识别 → 领域 Agent | 无结构的 swarm 会形成环；转交时上下文丢失导致"重新问一遍" |
-| **反思 / 批评者**（Reflexion、Code-Review-Loop） | 生成 Agent ⟷ 批评 Agent，多轮 | **~2.3×**（F1 0.943，相对 sequential pipeline 基线） | 输出质量比成本重要；**有客观验收信号**（测试、编译、schema） | **无外部反馈的纯自反思会退化** —— 模型常把对的改错（degeneration-of-thought） |
-| **辩论 / 投票** | N 个 Agent 互相说服，或独立采样后多数投票 | ~N× | 只在**没有确定性验收器**时考虑 | 同等预算下，辩论**不可靠地优于简单 self-consistency 多数投票**。有验收器时应直接用验收器 |
-| **分层 supervisor-worker** | 多层 orchestrator | **~1.4×**（F1 0.921） | 任务域天然分层（部门 → 团队 → 个人） | 层数 > 3 时归因和调试成本爆炸；深度默认上限就是 3 |
-| **Hybrid（路由 + 缓存 + 自适应重试）** | 单 Agent 主干 + 按需升级 | **~1.15×，拿回 reflexive 收益的 89%** | **成本敏感的生产系统的默认选择** | 路由器本身成为质量瓶颈 |
-| **编排脚本化**（Dynamic Workflows 形态） | 模型**写一段编排脚本**，运行时在会话外执行 | 取决于扇出，但**中间结果不进上下文** | 扇出大、中间结果体积大 | 运行中不能插入用户输入；恢复语义有坑（见 §8） |
+| **Orchestrator-Worker** | 1 lead → N worker（**同步**执行），worker 回传摘要 | ~2–4× | **广度优先（breadth-first）的只读探索（read-only exploration）**：多来源检索、竞品调研、代码库全局理解 | lead 上下文 ~6 步后熵饱和（entropy saturation）→ 决策退化；一个慢 worker 阻塞全局；worker 重复劳动 |
+| **Map-Reduce 扇出（fan-out）** | 同构任务 N 份并行 → 单点 reduce | ~N× 计算，但墙钟时间（wall-clock time） −最多 90% | 任务**完全同构且互不依赖**：批量文档抽取、批量文件分类 | reduce 阶段上下文爆炸；分片边界（shard boundary）跨越了语义边界 |
+| **Planner-Executor** | 先出计划（固化）→ 按计划执行 | ~1.3–1.6× | 步骤可预先枚举、需要人审计划、需要抗注入（计划固化后工具调用序列不可被改写） | 计划过时（环境在执行中变了）；**参数仍可被注入（prompt injection）影响**，只有序列不可变 |
+| **Handoff / Swarm** | Agent A 把控制权连同上下文转交 Agent B | ~1.2–2× | 明确的**角色切换**：分诊（triage）→ 专科；意图识别 → 领域 Agent | 无结构的 swarm 会形成环；转交时上下文丢失导致"重新问一遍" |
+| **反思（self-reflection）/ 批评者（critic）**（Reflexion、Code-Review-Loop） | 生成 Agent ⟷ 批评 Agent，多轮 | **~2.3×**（F1 0.943，相对 sequential pipeline 基线） | 输出质量比成本重要；**有客观验收信号**（测试、编译、schema） | **无外部反馈的纯自反思会退化** —— 模型常把对的改错（degeneration-of-thought） |
+| **辩论（debate）/ 投票** | N 个 Agent 互相说服，或独立采样后多数投票（majority voting） | ~N× | 只在**没有确定性验收器（deterministic verifier）**时考虑 | 同等预算下，辩论**不可靠地优于简单 self-consistency 多数投票**。有验收器时应直接用验收器 |
+| **分层（hierarchical）supervisor-worker** | 多层 orchestrator | **~1.4×**（F1 0.921） | 任务域天然分层（部门 → 团队 → 个人） | 层数 > 3 时归因和调试成本爆炸；深度默认上限就是 3 |
+| **Hybrid（路由 + 缓存 + 自适应重试）** | 单 Agent 主干 + 按需升级 | **~1.15×，拿回 reflexive 收益的 89%** | **成本敏感的生产系统的默认选择** | 路由器（router）本身成为质量瓶颈 |
+| **编排脚本化（orchestration as code）**（Dynamic Workflows 形态） | 模型**写一段编排脚本**，运行时在会话外执行 | 取决于扇出，但**中间结果不进上下文** | 扇出大、中间结果体积大 | 运行中不能插入用户输入；恢复语义有坑（见 §8） |
 
 ⚠ 成本倍数的基线不统一：**2.3× / 1.4× / 1.15×** 三个数来自同一项研究（[arXiv:2603.22651](https://arxiv.org/abs/2603.22651)，10,000 份 SEC 文件 / 25 类字段 / 5 个模型，2026-03-24），基线是 **sequential pipeline**；**4× / 15× / 7×** 来自 Anthropic 口径，基线是**纯 chat**。**不可混用，引用时必须带基线。**
 
@@ -111,24 +111,24 @@
 
 ## 4. 上下文如何跨 Agent 传递
 
-这是多 Agent 里唯一真正的技术难点。三种传递方式，信息损失和成本正相关：
+这是多 Agent 里唯一真正的技术难点。三种传递方式，信息损失（information loss）和成本正相关：
 
-| 传递方式 | 信息保真 | 成本 | 一手契约参考 | 适用角色 |
+| 传递方式 | 信息保真（fidelity） | 成本 | 一手契约参考 | 适用角色 |
 |---|---|---|---|---|
-| **完整 trace 继承** | 高 | 父上下文 × N，且 worker 无法享受自己的前缀缓存 | Cognition 2025-06 原则①：共享**完整 agent trace 而非单条消息** | **继承派**：延续同一条决策线的角色（接力执行、深挖某个分支） |
-| **自包含 prompt 字符串** | 中（取决于你写得多全） | 低 | Claude Agent SDK subagent：子 Agent 上下文**全新隔离**，父→子唯一通道是 Agent tool 的 prompt 字符串；**父只拿到子的最后一条消息** | 多数场景的默认 |
-| **结构化产出交换** | 低但**可验证** | 最低 | 强制 JSON schema，字段级校验 | **新生派**：需要独立判断的角色（评审、验证、投票） |
+| **完整 trace 继承（trace inheritance）** | 高 | 父上下文 × N，且 worker 无法享受自己的前缀缓存 | Cognition 2025-06 原则①：共享**完整 agent trace 而非单条消息** | **继承派**：延续同一条决策线的角色（接力执行、深挖某个分支） |
+| **自包含 prompt 字符串（self-contained prompt）** | 中（取决于你写得多全） | 低 | Claude Agent SDK subagent：子 Agent 上下文**全新隔离**，父→子唯一通道是 Agent tool 的 prompt 字符串；**父只拿到子的最后一条消息** | 多数场景的默认 |
+| **结构化产出交换（structured output exchange）** | 低但**可验证** | 最低 | 强制 JSON schema，字段级校验（field-level validation） | **新生派**：需要独立判断的角色（评审、验证、投票） |
 
 **最重要的一条设计规则，且它是有争议的**：
 
 - Cognition 2025-06-12 主张共享完整 trace；同一作者 2026-04-22 又报告 Code-Review-Loop 里审查 Agent 与编码 Agent **完全干净、互不共享上下文**时效果最好。**两篇没有互相调和。**
-- 我的调和判据：**执行链共享上下文，验证链隔离上下文。** 一个角色如果要**延续**前面的决策，它需要继承；一个角色如果要**独立判断**前面的决策对不对，继承就是污染——它会被前面的推理说服。
+- 我的调和判据：**执行链共享上下文，验证链隔离上下文。** 一个角色如果要**延续**前面的决策，它需要继承；一个角色如果要**独立判断**前面的决策对不对，继承就是污染（context pollution）——它会被前面的推理说服。
 
-**信息损失是设计意图，不是缺陷**：子 Agent 可能消耗数万 token 探索，只回传 **1,000–2,000 token** 的浓缩摘要，完整探索上下文被丢弃、不污染父上下文（[Anthropic 一手口径](https://www.anthropic.com/engineering/multi-agent-research-system)）。代价明确：**父 Agent 无法复审原始证据**。
+**信息损失是设计意图，不是缺陷**：子 Agent 可能消耗数万 token 探索，只回传 **1,000–2,000 token** 的浓缩摘要（condensed summary），完整探索上下文被丢弃、不污染父上下文（[Anthropic 一手口径](https://www.anthropic.com/engineering/multi-agent-research-system)）。代价明确：**父 Agent 无法复审原始证据**。
 
 对策不是"回传更多"，而是：**子 Agent 把原始证据写入外部存储（对象存储 / 文件 / DB），摘要里只带引用路径与 hash**。父需要复审时按路径去取。这同时解决了摘要失真和上下文膨胀。
 
-⚠ **子 Agent 的输出是不可信输入。** 生产 harness 已经在做这件事：扫描子 Agent 最终消息中的"指令形状"——伪造 `<system-reminder>` 控制标签就地转义、伪造 `Human:` / `Assistant:` 轮次标记加反斜杠、提及权限配置时加标记行（**只标记不删改**）。**自建编排必须自己补这一层**：子 Agent 返回值不能直接拼进父的 system prompt 区域，跨 Agent 消息不能构成权限授予。
+⚠ **子 Agent 的输出是不可信输入（untrusted input）。** 生产 harness 已经在做这件事：扫描子 Agent 最终消息中的"指令形状"——伪造 `<system-reminder>` 控制标签就地转义、伪造 `Human:` / `Assistant:` 轮次标记加反斜杠、提及权限配置时加标记行（**只标记不删改**）。**自建编排必须自己补这一层**：子 Agent 返回值不能直接拼进父的 system prompt 区域，跨 Agent 消息不能构成权限授予（privilege grant）。
 
 ---
 
@@ -147,9 +147,9 @@
 
 ### 我的四问判据（面试里直接用这四个问题回应"要不要多 Agent"）
 
-1. **子任务之间有隐含的决策依赖吗？** 两个子任务的产出需要"风格一致""接口一致""假设一致"→ **有依赖 → 不要并行**。这类一致性无法靠 prompt 约定实现，只能靠共享上下文，而共享上下文正是多 Agent 想省的东西。
+1. **子任务之间有隐含的决策依赖（decision dependency）吗？** 两个子任务的产出需要"风格一致""接口一致""假设一致"→ **有依赖 → 不要并行**。这类一致性无法靠 prompt 约定实现，只能靠共享上下文，而共享上下文正是多 Agent 想省的东西。
 2. **是读还是写？** 写 → 单线程。这是 2026 年的共识，没有例外条款。
-3. **子任务边界能用一段自包含的 prompt 完整描述吗？** 必须包含：文件路径、错误原文、已经定下的决策、**完成判定标准**、**输出 schema**、**最大轮数**。写不出来 → 说明边界还没切清楚，先别拆。MAST 里"步骤重复"占 **15.7%**，根因就是任务边界模糊导致 subagent 执行完全相同的搜索。
+3. **子任务边界能用一段自包含的 prompt 完整描述吗？** 必须包含：文件路径、错误原文、已经定下的决策、**完成判定标准（completion criteria）**、**输出 schema**、**最大轮数（max turns）**。写不出来 → 说明边界还没切清楚，先别拆。MAST 里"步骤重复"占 **15.7%**，根因就是任务边界模糊导致 subagent 执行完全相同的搜索。
 4. **值不值？** 3.7× 的 token × 你的单价 vs 预期收益。如果同样的预算给单 Agent 多采样几次 + 一个确定性验收器就能达到，**就不要上多 Agent**。
 
 ### 明确不要用的四种情况
@@ -159,7 +159,7 @@
 | **强依赖的顺序任务** | 每一步的输入是上一步的输出。并行度为 1 时，多 Agent 只增加了摘要损失和协调开销 |
 | **需要共享细粒度上下文** | 子 Agent 拿不到父的历史。你会看到"重新问一遍"和"假设不一致" |
 | **子任务边界不清晰** | 见判据 3。边界模糊 → 重复劳动 + 冲突写入 |
-| **你还没有轨迹级 eval** | 多 Agent 的失效是隐蔽的（轨迹脏但答案对、答案对但花了 10 倍钱）。**outcome-only eval 对多 Agent 是全盲的** |
+| **你还没有轨迹级（trajectory-level）eval** | 多 Agent 的失效是隐蔽的（轨迹脏但答案对、答案对但花了 10 倍钱）。**outcome-only eval 对多 Agent 是全盲的** |
 
 > **面试金句**：
 > "我不会先问'要不要多 Agent'，我会先问'哪些子任务是只读的'。只读的部分可以扇出，因为读之间没有冲突；写的部分必须收敛到单一 writer，因为**行动隐含决策，两个并行的写者会做出互相冲突的决策，而这种冲突在合并时才暴露，那时已经晚了**。所以我的默认架构是：N 个只读 worker 并行探索 → 一个 lead 综合 → 一个 writer 单线程落盘 → 一个确定性验收器（跑测试）判定。额外的 Agent 只贡献判断，不贡献动作。"
@@ -168,15 +168,15 @@
 
 ## 6. 失效模式分类
 
-### 学术分类法：MAST
+### 学术分类法（failure taxonomy）：MAST
 
-[MAST（arXiv:2503.13657）](https://arxiv.org/abs/2503.13657)，1600+ 条标注 trace、7 个框架、标注者一致性 κ=0.88，把多 Agent 失效分成三大类：
+[MAST（arXiv:2503.13657）](https://arxiv.org/abs/2503.13657)，1600+ 条标注 trace、7 个框架、标注者一致性（inter-annotator agreement）κ=0.88，把多 Agent 失效分成三大类：
 
 | 大类 | 占比 | 细分 top 项 |
 |---|---|---|
-| **① 系统设计 / 规格不清** | **43.8%** | 步骤重复 15.7%、违反任务规格 11.8%、不知道终止条件 12.4%、不主动澄清 6.8% |
-| **② Agent 间错位** | **32.25%** | 推理-行动不一致 13.2%、任务跑偏 7.4% |
-| **③ 任务验证缺失** | **23.5%** | 错误验证 9.10%、无/不完整验证 8.20%、过早终止 6.20% |
+| **① 系统设计 / 规格不清** | **43.8%** | 步骤重复（step repetition） 15.7%、违反任务规格（spec violation） 11.8%、不知道终止条件（termination condition） 12.4%、不主动澄清 6.8% |
+| **② Agent 间错位** | **32.25%** | 推理-行动不一致（reasoning-action mismatch） 13.2%、任务跑偏（task derailment） 7.4% |
+| **③ 任务验证缺失** | **23.5%** | 错误验证 9.10%、无/不完整验证 8.20%、过早终止（premature termination） 6.20% |
 
 同一研究的干预实验给出了性价比排序：**只调 workflow（加一个审批环节）→ +9.4% 成功率；加高层验证步骤 → +15.6%**。也就是说，**在改模型、改 prompt 之前，先加验证步骤**。
 
@@ -204,16 +204,16 @@
 
 ## 7. 并行写冲突与隔离
 
-**实证基线**：AI 编码 Agent 的 PR 合并冲突率 **27.67%**（[AgenticFlict, arXiv:2604.03551](https://arxiv.org/abs/2604.03551)，107,000+ 次完成的合并模拟中 29,000+ 冲突，142,000+ Agent PR / 59,000+ 仓库）。这不是理论风险。
+**实证基线**：AI 编码 Agent 的 PR 合并冲突率（merge conflict rate）**27.67%**（[AgenticFlict, arXiv:2604.03551](https://arxiv.org/abs/2604.03551)，107,000+ 次完成的合并模拟中 29,000+ 冲突，142,000+ Agent PR / 59,000+ 仓库）。这不是理论风险。
 
 四种隔离手段，按强度递增：
 
 | 手段 | 做法 | 解决什么 | **不解决什么** |
 |---|---|---|---|
-| **分文件所有权** | 拆分工作，每个 Agent 拥有不同的文件集 | 直接覆盖 | 语义冲突（改了同一个接口的两端） |
-| **文件锁 / 共享任务列表** | 共享任务清单 + 锁，防竞态 | 并发认领同一任务 | 长时持锁导致的串行化 |
+| **分文件所有权** | 拆分工作，每个 Agent 拥有不同的文件集 | 直接覆盖 | 语义冲突（semantic conflict，改了同一个接口的两端） |
+| **文件锁（file lock）/ 共享任务列表** | 共享任务清单 + 锁，防竞态（race condition） | 并发认领同一任务 | 长时持锁导致的串行化（serialization） |
 | **git worktree 隔离** | 每个 Agent 一个独立工作区与分支（`.claude/worktrees/<name>/`，分支 `worktree-<name>`，运行期自动 `git worktree lock`） | **工作区级文件隔离** | **任务分解、依赖跟踪、语义冲突、合并选择** —— 冲突被推迟到 merge time 由 git 检出，好处是不再静默发生 |
-| **单写者 + 合并裁决 Agent** | 并行只产出 patch/建议，由唯一 writer 或裁决 Agent 决定合入 | 语义冲突 | 吞吐（这是有意的） |
+| **单写者 + 合并裁决 Agent（merge arbiter）** | 并行只产出 patch/建议，由唯一 writer 或裁决 Agent 决定合入 | 语义冲突 | 吞吐（这是有意的） |
 
 **注意 worktree 的隐藏坑**：`.env` 这类被 gitignore 的文件默认不会进新工作区，需要显式声明（如 `.worktreeinclude`）复制进去，否则 Agent 在新 worktree 里跑不起来，而失败信息看起来像业务 bug。
 
@@ -223,7 +223,7 @@
 
 ## 8. 预算、并发与深度控制
 
-失控扇出是多 Agent 最贵的事故形态——Anthropic 观察到简单 query 被拉起 **50+ 个 subagent**。产品化的对策是三层同时设限，**缺任何一层都会被穿透**：
+失控扇出（runaway fan-out）是多 Agent 最贵的事故形态——Anthropic 观察到简单 query 被拉起 **50+ 个 subagent**。产品化的对策是三层同时设限，**缺任何一层都会被穿透**：
 
 ```
 第 1 层 · 结构上限（防止拓扑爆炸）
@@ -241,7 +241,7 @@
   └ 每个 subagent 的 `maxTurns` —— **必填，不是可选**
 ```
 
-**扇出配额（可直接抄的一手口径）**：
+**扇出配额（fan-out quota，可直接抄的一手口径）**：
 
 | 任务类型 | 配额 |
 |---|---|
@@ -252,9 +252,9 @@
 
 并行化对复杂 query 最多能减少 **90%** 的研究耗时——但注意 **lead 是同步执行 subagent 的，一个慢 subagent 会阻塞整个系统**。异步执行能进一步并行，代价是协调复杂度。
 
-### 恢复语义：一个真实的坑
+### 恢复语义（resume semantics）：一个真实的坑
 
-Dynamic Workflows 的恢复是**按 Agent 启动顺序回放，缓存命中止于第一个未完成的 Agent，此后启动的全部重跑，哪怕它们已经完成**。A/B/C/D 依次启动、停在 B 运行中 → 恢复时只有 A 命中，**B/C/D 全部重跑**。另外恢复**仅限同一会话**，退出 CLI 后下次会话从零开始。
+Dynamic Workflows 的恢复是**按 Agent 启动顺序回放（replay），缓存命中止于第一个未完成的 Agent，此后启动的全部重跑，哪怕它们已经完成**。A/B/C/D 依次启动、停在 B 运行中 → 恢复时只有 A 命中，**B/C/D 全部重跑**。另外恢复**仅限同一会话**，退出 CLI 后下次会话从零开始。
 
 **工程推论有两条**：
 1. **把工作切成很多小 Agent 比一个长 Agent 保住更多进度。**
@@ -266,7 +266,7 @@ Dynamic Workflows 的恢复是**按 Agent 启动顺序回放，缓存命中止�
 
 ## 9. 结果聚合与冲突消解
 
-**第一原则：能用确定性裁决就不要让 Agent 互相说服。**
+**第一原则：能用确定性裁决（deterministic arbitration）就不要让 Agent 互相说服。**
 
 | 裁决方式 | 何时用 | 证据 |
 |---|---|---|
@@ -276,15 +276,15 @@ Dynamic Workflows 的恢复是**按 Agent 启动顺序回放，缓存命中止�
 | **Agent 辩论** | 最后选择 | 成本 N×，收益不稳定 |
 | **纯自反思（无外部反馈）** | **不要用** | 会退化：模型常把对的改错（[arXiv:2310.01798](https://arxiv.org/abs/2310.01798)） |
 
-**聚合的三条工程规则：**
+**聚合（aggregation）的三条工程规则：**
 
 1. **子 Agent 的输出必须是结构化的**（JSON schema 强制），不是自然语言。自然语言聚合会把 reduce 阶段变成第二次推理，成本和错误都翻倍。
 2. **reduce 优先用代码**。只有确实需要语义判断的部分才交给 LLM，且要限定它只做判断不做重写。
-3. **冲突要显式表达而不是静默取胜**。聚合结果里保留 `conflicts: [{field, candidates, resolved_by}]`，让人能审。多 Agent 系统里最贵的 bug 是"两个 worker 给了矛盾结论，lead 随便选了一个，没人知道"。
+3. **冲突要显式表达而不是静默取胜（silent overwrite）**。聚合结果里保留 `conflicts: [{field, candidates, resolved_by}]`，让人能审。多 Agent 系统里最贵的 bug 是"两个 worker 给了矛盾结论，lead 随便选了一个，没人知道"。
 
 ---
 
-## 10. 可观测：父子 span 与归因
+## 10. 可观测（observability）：父子 span 与归因（attribution）
 
 ### span 结构
 
@@ -304,9 +304,9 @@ workflow  (gen_ai.workflow.duration)
 
 span 命名规则（OTel GenAI 约定）：推理/嵌入 `{gen_ai.operation.name} {gen_ai.request.model}`；工具 `execute_tool {gen_ai.tool.name}`。
 
-⚠ **状态警告**：OTel GenAI 语义约定**全部条目仍是 Development，0 项 GA**（2026-07-30 一手核实），且已在 2026-06 迁到独立仓库、**尚无 release/tag ⇒ 拿不到可 pin 的版本化 schema URL**。主 semconv 仓库 v1.42.0 弃用全部 `gen_ai.*`、v1.43.0 完全移除。**要接就用兼容开关 `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental` 双发，别把属性名硬编码进告警规则。**
+⚠ **状态警告**：OTel GenAI 语义约定（semantic conventions）**全部条目仍是 Development，0 项 GA**（2026-07-30 一手核实），且已在 2026-06 迁到独立仓库、**尚无 release/tag ⇒ 拿不到可 pin 的版本化 schema URL**。主 semconv 仓库 v1.42.0 弃用全部 `gen_ai.*`、v1.43.0 完全移除。**要接就用兼容开关 `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental` 双发，别把属性名硬编码进告警规则。**
 
-另外两个必须知道的空白：**官方命名空间里没有 cost 属性，也没有 tenant / user 属性**。多 Agent 的成本归因是你自己要补的扩展，跨平台不保证被识别。
+另外两个必须知道的空白：**官方命名空间里没有 cost 属性，也没有 tenant / user 属性**。多 Agent 的成本归因（cost attribution）是你自己要补的扩展，跨平台不保证被识别。
 
 ### 归因：要回答的四个问题
 
@@ -315,15 +315,15 @@ span 命名规则（OTel GenAI 约定）：推理/嵌入 `{gen_ai.operation.name
 | 这次运行花了多少钱，花在哪个 Agent 上？ | 按 `invoke_agent` span 聚合 token（含 `cache_read` / `cache_creation` 分拆）。**当 provider 同时报 used 与 billable token 时，必须上报 billable** |
 | 失败责任在 orchestrator 还是 worker？ | 轨迹级判定：worker 都成功但最终答案错 → orchestrator。参考基线：orchestrator 67.7% |
 | 有没有重复劳动？ | 确定性 evaluator：跨 worker 的工具调用参数去重率 |
-| 有没有死循环 / 过早终止？ | step count 对预算、必经步骤是否出现、工具调用序列匹配 |
+| 有没有死循环（infinite loop）/ 过早终止？ | step count 对预算、必经步骤是否出现、工具调用序列匹配 |
 
 **关键做法：可判定的轨迹指标用代码 evaluator，不要用 LLM judge。** 布尔轨迹分数在每条采样 trace 上计算几乎是免费的，适合直接做告警信号；只有语义层（"这一步选这个工具合不合理"）才交给 judge。轨迹匹配可以做成四档：`strict`（完全一致同序）/ `unordered`（同一组工具，顺序不限，适合并行取数）/ `subset`（不许多调）/ `superset`（至少覆盖参考轨迹）。
 
-⚠ **最后一条，也是最容易被忽略的**：生产遥测里一个基础设施 bug 曾在两周窗口内把失败率**虚高约 2.5×**，同时影响 15 个 Agent，伪装成"终止挂起"。**先信数据管道，再信数据。**
+⚠ **最后一条，也是最容易被忽略的**：生产遥测（production telemetry）里一个基础设施 bug 曾在两周窗口内把失败率**虚高约 2.5×**，同时影响 15 个 Agent，伪装成"终止挂起"。**先信数据管道，再信数据。**
 
 ---
 
-## 11. 反模式清单
+## 11. 反模式清单（anti-patterns）
 
 1. **"Anthropic 说好、Cognition 说不好，二选一"** —— 两边讨论的是不同象限（只读研究 vs 有依赖的写入），2026 已收敛为"读可并行、写必单线程"。
 2. **"共享完整 trace 永远更好"** —— 执行链共享、验证链隔离。一刀切两边都错。
@@ -336,7 +336,7 @@ span 命名规则（OTel GenAI 约定）：推理/嵌入 `{gen_ai.operation.name
 9. **把子 Agent 的返回值直接拼进父的 system prompt** —— 子 Agent 输出是不可信输入。伪造 `<system-reminder>`、伪造轮次标记、声称"已获授权"都是已知形态。
 10. **把学术失效分布直接当自己的分布** —— 先确认你真的是多 Agent 系统。
 11. **拿 pre-production 案例当生产能力证据** —— 旗舰案例（如 ~750,000 行 / 11 天 / 测试 99.8% 通过的大规模重写）**官方明确标注 pre-production**。
-12. **把实验特性当 GA 用** —— 例如 Agent teams 默认关闭、官方标 experimental，已知限制包括不支持 `/resume` `/rewind`、一会话仅一个 team、不支持嵌套、lead 不可转移、权限在 spawn 时固定。**上生产前先查当前版本的能力矩阵。**
+12. **把实验特性当 GA 用** —— 例如 Agent teams 默认关闭、官方标 experimental，已知限制包括不支持 `/resume` `/rewind`、一会话仅一个 team、不支持嵌套、lead 不可转移、权限在 spawn 时固定。**上生产前先查当前版本的能力矩阵（capability matrix）。**
 13. **没有轨迹级 eval 就上多 Agent** —— outcome-only eval 看不见错工具、参数畸形、死循环、10 倍成本。
 
 ---

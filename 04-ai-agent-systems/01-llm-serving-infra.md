@@ -7,13 +7,13 @@
 
 ## 1. 两个阶段，本质上是两台不同的机器
 
-Transformer 自回归推理分成两段，它们的硬件特征相反：
+Transformer 自回归推理（autoregressive inference）分成两段，它们的硬件特征相反：
 
 | | **Prefill**（处理输入） | **Decode**（逐 token 生成） |
 |---|---|---|
 | 一次前向处理的 token 数 | 整个 prompt（数千） | 每个序列 1 个 |
 | 瓶颈 | **算力**（compute-bound） | **访存带宽**（memory-bound） |
-| 算术强度（FLOP/byte） | ≈ 2 × prompt 长度 → 数千 | ≈ 2 × batch size |
+| 算术强度（arithmetic intensity，FLOP/byte） | ≈ 2 × prompt 长度 → 数千 | ≈ 2 × batch size |
 | 典型 MFU | 35–55% | **1–10%**（小批时） |
 | 延迟指标 | TTFT | TPOT / ITL |
 | 加卡的收益 | 近线性 | 需要**加批**才有收益 |
@@ -82,13 +82,13 @@ KV 预算                    ≈  78 GB
 
 那条流传的"KV cache 约 1 MB/token"经验值（[PROMPTPEEK, NDSS 2025](https://www.ndss-symposium.org/wp-content/uploads/2025-1772-paper.pdf) 口径）反映的是 MHA 时代。**2026 年请自己按上面的公式算，模型之间能差 30 倍。**
 
-⚠️ **撞墙信号**：`vllm:num_preemptions_total` 持续 > 0，或 `gpu_cache_usage_perc` 长期贴 100%。这意味着调度器在抢占并**重算**已生成的请求——吞吐会阶跃式塌陷，而 GPU 利用率图上看起来还很"忙"。
+⚠️ **撞墙信号**：`vllm:num_preemptions_total` 持续 > 0，或 `gpu_cache_usage_perc` 长期贴 100%。这意味着调度器在抢占（preemption）并**重算**（recompute）已生成的请求——吞吐会阶跃式塌陷，而 GPU 利用率图上看起来还很"忙"。
 
 ---
 
 ## 3. 分页、连续批处理、chunked prefill
 
-**PagedAttention**（[arXiv 2309.06180](https://arxiv.org/abs/2309.06180)）：把 KV cache 按固定块（典型 16 token）管理，用块表做逻辑→物理映射，像 OS 的虚拟内存。收益是消灭外部碎片，内部碎片 < 4%（对比预分配 max_len 的 60–80% 浪费），并让 beam/并行采样零拷贝共享前缀。
+**PagedAttention**（[arXiv 2309.06180](https://arxiv.org/abs/2309.06180)）：把 KV cache 按固定块（典型 16 token）管理，用块表（block table）做逻辑→物理映射，像 OS 的虚拟内存。收益是消灭外部碎片（external fragmentation），内部碎片（internal fragmentation）< 4%（对比预分配 max_len 的 60–80% 浪费），并让 beam/并行采样零拷贝共享前缀。
 
 ⚠️ **不要误读 release note**：[vLLM v0.25.0](https://github.com/vllm-project/vllm/releases/tag/v0.25.0) 写了 "PagedAttention has been removed"——删掉的是 **V0 时代的 legacy attention kernel 路径**，分页块管理本身仍是 V1/MRv2 的地基。这是 2026 年最常见的一条读错。
 
@@ -139,7 +139,7 @@ throughput 会一路涨到 GPU 打满，goodput 会在某个批大小之后**崩
                       ╭───╯         ╰────────  → 0（吞吐仍在涨，但全部超时）
 ```
 
-**这条曲线的实操含义**：容量规划必须在 goodput 峰值的**左侧**取工作点，留出 20–30% 余量应对流量抖动。跑在峰值右侧的系统，一次小流量尖峰就会让全部请求同时违约。
+**这条曲线的实操含义**：容量规划（capacity planning）必须在 goodput 峰值的**左侧**取工作点（operating point），留出 20–30% 余量（headroom）应对流量抖动。跑在峰值右侧的系统，一次小流量尖峰就会让全部请求同时违约。
 
 **真实反例**：同样满足 TTFT ≤ 1.5s 的两个配置，P95 TPOT 一个约 50 ms、另一个约 494 ms——**10× 差异，单指标 SLO 完全看不出来**。
 
@@ -221,17 +221,17 @@ NVIDIA 官方文档罕见地明确反驳了自家方案："**It is not automatic
 
 ### RadixAttention
 
-[SGLang](https://arxiv.org/abs/2312.07104) 把所有请求的 KV 块组织成一棵**基数树（radix tree）**，新请求沿树匹配最长公共前缀，命中部分直接跳过 prefill。淘汰按 LRU 在树上做。vLLM 的 APC（Automatic Prefix Caching）是同类机制，V1 默认开启。
+[SGLang](https://arxiv.org/abs/2312.07104) 把所有请求的 KV 块组织成一棵**基数树（radix tree）**，新请求沿树匹配最长公共前缀（longest common prefix），命中部分直接跳过 prefill。淘汰（eviction）按 LRU 在树上做。vLLM 的 APC（Automatic Prefix Caching）是同类机制，V1 默认开启。
 
-**收益（一手实测区间）**：共享系统提示场景命中率 70–90%，聚合吞吐 +30–50%，某租户 TTFT 480 ms → 110 ms。
+**收益（一手实测区间）**：共享系统提示（system prompt）场景命中率（hit rate）70–90%，聚合吞吐 +30–50%，某租户 TTFT 480 ms → 110 ms。
 
 ### 但命中率是 workload 属性，不是框架能力
 
-同一套 vLLM，另一个租户命中率 **0.3%**，完全没有改善——因为它每次动态拼 prompt。更要命的是 **agentic 多轮场景**：工具输出和中间推理插在上下文中间，把共享前缀打碎，stock prefix cache 命中率可跌破 20%。
+同一套 vLLM，另一个租户命中率 **0.3%**，完全没有改善——因为它每次动态拼 prompt。更要命的是 **agentic 多轮（multi-turn）场景**：工具输出和中间推理插在上下文中间，把共享前缀打碎，stock prefix cache 命中率可跌破 20%。
 
-另有实测报告开启 prefix caching 后吞吐 **−36.7%**、TPOT **+25.0%**（前缀重叠率低时，哈希与查表纯属开销）。**这两组结论可能都对，取决于前缀重叠率。上线前必须先量出重叠率，不要按框架 feature 承诺收益。**
+另有实测报告开启 prefix caching 后吞吐 **−36.7%**、TPOT **+25.0%**（前缀重叠率（prefix overlap ratio）低时，哈希与查表纯属开销）。**这两组结论可能都对，取决于前缀重叠率。上线前必须先量出重叠率，不要按框架 feature 承诺收益。**
 
-### 缓存感知路由：比缓存本身更值钱
+### 缓存感知路由（cache-aware routing）：比缓存本身更值钱
 
 有了缓存还不够——请求必须被路由到**已经持有那份 KV 的实例**上。[llm-d 的对照实验](https://llm-d.ai/blog/kvcache-wins-you-can-see)（8 pod / 16× H100，Qwen-32B，150 租户 × 6k 上下文，KV 需求占集群 73%）：
 
@@ -247,20 +247,20 @@ K8s 侧的事实标准入口是已 GA 的 [Gateway API Inference Extension (GAIE
 
 **这对网关架构的约束是硬的**：
 
-1. LLM 网关**必须是有状态路由器**，不能是无状态 L7 LB。它要维护"哪个实例持有哪些前缀"的视图。
-2. 缓存亲和性与负载均衡**直接冲突**。纯亲和会让热租户压垮单个 pod；纯均衡会让命中率归零。生产做法是**打分函数**：`score = w1 × prefix_match_len − w2 × queue_depth − w3 × kv_usage`，`w1` 权重最大但不是无穷。
-3. 实例扩缩容会让缓存视图失效，**扩容后短期内 TTFT 会变差**——这与"扩容改善延迟"的直觉相反，必须写进 runbook。
+1. LLM 网关**必须是有状态路由器**（stateful router），不能是无状态 L7 LB。它要维护"哪个实例持有哪些前缀"的视图。
+2. 缓存亲和性（cache affinity）与负载均衡**直接冲突**。纯亲和会让热租户（hot tenant）压垮单个 pod；纯均衡会让命中率归零。生产做法是**打分函数**（scoring function）：`score = w1 × prefix_match_len − w2 × queue_depth − w3 × kv_usage`，`w1` 权重最大但不是无穷。
+3. 实例扩缩容（autoscaling）会让缓存视图失效，**扩容后短期内 TTFT 会变差**——这与"扩容改善延迟"的直觉相反，必须写进 runbook。
 
 ### 与安全的正面冲突（必须显式写出）
 
-同一份共享 KV cache 是**最大的跨租户泄露面**。PROMPTPEEK（NDSS 2025）利用 KV 共享导致的服务顺序/时序侧信道，逐 token 重建他人 prompt：已知模板时成功率 **99%**，反推模板本身 98%，**无任何背景知识 95%**；已知模板时约 **60 次请求**就能套出受害者的性别/年龄/体重/身高。攻击面覆盖 vLLM、SGLang、LightLLM、DeepSpeed，ByteDance 已确认该侧信道。
+同一份共享 KV cache 是**最大的跨租户泄露面**（cross-tenant leakage surface）。PROMPTPEEK（NDSS 2025）利用 KV 共享导致的服务顺序/时序侧信道（side channel），逐 token 重建他人 prompt：已知模板时成功率 **99%**，反推模板本身 98%，**无任何背景知识 95%**；已知模板时约 **60 次请求**就能套出受害者的性别/年龄/体重/身高。攻击面覆盖 vLLM、SGLang、LightLLM、DeepSpeed，ByteDance 已确认该侧信道。
 
 > **面试金句**：
-> "前缀缓存是我手里收益最大的一个旋钮，也是唯一一个开了就有跨租户泄露风险的旋钮。我的默认策略是**同租户内共享、跨租户默认关闭**——代价是多租户场景下最大的性能杠杆被削掉一半。要拿回来，只能在**共享的那部分是我自己写死的系统提示、不含任何租户数据**这个前提下开白名单。密钥和 PII 绝不进可缓存前缀。"
+> "前缀缓存是我手里收益最大的一个旋钮，也是唯一一个开了就有跨租户泄露风险的旋钮。我的默认策略是**同租户内共享、跨租户默认关闭**——代价是多租户（multi-tenancy）场景下最大的性能杠杆被削掉一半。要拿回来，只能在**共享的那部分是我自己写死的系统提示、不含任何租户数据**这个前提下开白名单。密钥和 PII 绝不进可缓存前缀。"
 
 ---
 
-## 7. KV cache 分层卸载
+## 7. KV cache 分层卸载（tiered offloading）
 
 链路（[LMCache](https://github.com/lmcache/lmcache) 的形态）：
 
@@ -286,7 +286,7 @@ GPU HBM  →  CPU DRAM  →  本地 NVMe SSD  →  远端（Redis / S3 / Mooncak
 
 ---
 
-## 8. 投机解码：一个会随并发反转符号的优化
+## 8. 投机解码（speculative decoding）：一个会随并发反转符号的优化
 
 用小 draft 模型（或 MTP 头）一次猜 K 个 token，target 模型一次前向并行验证，接受前缀。
 
@@ -311,7 +311,7 @@ AL (accept length) = 每个 target 前向步平均接受的 token 数
 
 **工程结论**：
 - **PD 分离后 decode 池天然是大批 ⇒ decode 池默认不开投机解码。** GLM-5.2 提 TPOT 用的是 speculative padding（40→22 ms），不是纯 spec decode。
-- 正确形态是**按队列深度动态开关 + 动态调 draft 树深度**。2026 SOTA 是置信度调度（SGLang DSpark：DeepSeek-V4-Pro / B300 / TP8 单用户 383.7 tok/s，AL ≈ 5）。
+- 正确形态是**按队列深度（queue depth）动态开关 + 动态调 draft 树深度**。2026 SOTA 是置信度调度（confidence-based scheduling；SGLang DSpark：DeepSeek-V4-Pro / B300 / TP8 单用户 383.7 tok/s，AL ≈ 5）。
 - 低并发的**内部/单租户/交互式**场景（IDE 补全、单人 agent）是投机解码的正确战场。
 
 ---
@@ -327,7 +327,7 @@ AL (accept length) = 每个 target 前向步平均接受的 token 数
 | **KV cache 量化** | FP8 e4m3 已是长上下文默认起点 | 长上下文 AUC 恢复 94–98%；输出吞吐 +5–15%；decode 延迟斜率降到 BF16 的 54% |
 | **硬件对应** | Ampere/Ada（A100/L40S/4090）→ AWQ INT4；Hopper → FP8；Blackwell → NVFP4 | AWQ 相对 GPTQ 约 +1–2 分且 kernel 更快 |
 
-**唯一需要背的规则**：**参数量越小，每个权重承载的信息越密，量化损失越大。≤10B 的模型不要上 FP4。** 把 671B 的 −0.1 pt 和 8B 的 −2.2 pt 放在同一句话里做论据，是常见的错误引用。
+**唯一需要背的规则**：**参数量越小，每个权重承载的信息越密，量化损失（quantization loss）越大。≤10B 的模型不要上 FP4。** 把 671B 的 −0.1 pt 和 8B 的 −2.2 pt 放在同一句话里做论据，是常见的错误引用。
 
 ---
 
@@ -335,11 +335,11 @@ AL (accept length) = 每个 target 前向步平均接受的 token 数
 
 | 并行方式 | 切什么 | 通信 | 何时选 |
 |---|---|---|---|
-| **TP**（张量并行） | 每层的矩阵按列/行切 | 每层 2 次 all-reduce，**极重** | 单卡放不下；**必须在 NVLink 域内**，跨节点 TP 是灾难 |
-| **PP**（流水并行） | 按层切到不同节点 | 层边界 P2P，**轻** | 跨节点扩展、模型极大；代价是流水气泡，**decode 阶段气泡尤其难填** |
-| **EP**（专家并行） | MoE 的专家切到不同卡 | all-to-all dispatch/combine | MoE 模型的默认；专家数 ≥ 卡数时才划算 |
-| **SP**（序列并行） | 序列维切 | ring/all-gather | 超长上下文 prefill；配合 TP 省激活显存 |
-| **DP**（数据并行/多副本） | 整模型多份 | 无 | 放得下就优先——**没有通信就是最好的通信** |
+| **TP**（张量并行，tensor parallelism） | 每层的矩阵按列/行切 | 每层 2 次 all-reduce，**极重** | 单卡放不下；**必须在 NVLink 域内**，跨节点 TP 是灾难 |
+| **PP**（流水并行，pipeline parallelism） | 按层切到不同节点 | 层边界 P2P，**轻** | 跨节点扩展、模型极大；代价是流水气泡（pipeline bubble），**decode 阶段气泡尤其难填** |
+| **EP**（专家并行，expert parallelism） | MoE 的专家切到不同卡 | all-to-all dispatch/combine | MoE 模型的默认；专家数 ≥ 卡数时才划算 |
+| **SP**（序列并行，sequence parallelism） | 序列维切 | ring/all-gather | 超长上下文 prefill；配合 TP 省激活显存 |
+| **DP**（数据并行/多副本，data parallelism） | 整模型多份 | 无 | 放得下就优先——**没有通信就是最好的通信** |
 
 **决策顺序**：能 DP 就 DP → 放不下就在单节点内 TP → 还放不下才跨节点 PP 或 EP。
 
@@ -355,7 +355,7 @@ AL (accept length) = 每个 target 前向步平均接受的 token 数
 
 **wide-EP 的天花板就在这里。** 跨节点扩专家数是"用 8× 慢的链路换更大的模型容量"，必须靠计算/通信重叠（Two-Batch Overlap，prefill +27–35%）和专家负载均衡撑住。
 
-**EPLB（专家负载均衡）不是锦上添花**：单独贡献 prefill **1.49×** / decode **2.54×**（[LMSYS 96× H100 DeepSeek 实测](https://www.lmsys.org/blog/2025-05-05-large-scale-ep/)）。专家负载天然倾斜——没有均衡的 wide-EP 会被最热的那几个专家拖死，表现为"大部分卡在等，少数卡 100%"。
+**EPLB（专家负载均衡，expert load balancing）不是锦上添花**：单独贡献 prefill **1.49×** / decode **2.54×**（[LMSYS 96× H100 DeepSeek 实测](https://www.lmsys.org/blog/2025-05-05-large-scale-ep/)）。专家负载天然倾斜（load skew）——没有均衡的 wide-EP 会被最热的那几个专家拖死，表现为"大部分卡在等，少数卡 100%"。
 
 ⚠️ 弹性专家并行（vLLM Elastic EP）2026 年仍是 **beta，且只支持 `tensor_parallel_size=1` + 单 API server + Ray DP backend**，官方博客没给任何扩缩容耗时数字。别写进架构图当既成事实。
 
@@ -363,9 +363,9 @@ AL (accept length) = 每个 target 前向步平均接受的 token 数
 
 ## 11. GPU 多租户与调度
 
-| 共享方式 | 显存隔离 | 故障隔离 | 适用 |
+| 共享方式 | 显存隔离（memory isolation） | 故障隔离（fault isolation） | 适用 |
 |---|---|---|---|
-| **整卡独占** | ✅ | ✅ | 跨租户默认答案 |
+| **整卡独占**（whole-GPU exclusive） | ✅ | ✅ | 跨租户默认答案 |
 | **MIG** | ✅ 硬件级 | ✅ | 跨租户；但仅限支持的卡，**profile 必须静态规划**，碎片浪费 10–30% |
 | **MPS** | ❌ | ❌ 单 client 崩溃影响同卡其他 client | **仅同租户内**的可信 CUDA 负载 |
 | **time-slicing** | ❌ | ❌ | 开发/测试环境；**绝不跨租户** |
@@ -374,9 +374,9 @@ AL (accept length) = 每个 target 前向步平均接受的 token 数
 
 K8s 侧：**DRA（Dynamic Resource Allocation）核心已在 [Kubernetes v1.34（2025-09）GA 并默认开启](https://kubernetes.io/blog/2025/09/01/kubernetes-v1-34-dra-updates/)**，正在取代 device-plugin；NVIDIA 已把 DRA Driver for GPUs 捐给 CNCF（它负责把通用 DRA 请求翻译成 MIG 分区、NVLink 拓扑、time-slicing、MPS 和 GB200/GB300 的 ComputeDomains）。注意 GA 的只有核心 API，`DRAConsumableCapacity` 等子特性仍在 beta/alpha —— 落地前按你要用的具体子特性查当版 release notes。
 
-**公平性的正确单位是 token 而不是请求。** 一个 100k 上下文的请求消耗的资源是 500-token 请求的 200 倍。限流器必须按 `input_tokens + α × output_tokens` 扣配额（α 取 3–10，反映 decode 更贵）。按 QPS 限流的多租户网关一定会被长上下文租户打穿。
+**公平性（fairness）的正确单位是 token 而不是请求。** 一个 100k 上下文的请求消耗的资源是 500-token 请求的 200 倍。限流器（rate limiter）必须按 `input_tokens + α × output_tokens` 扣配额（quota）（α 取 3–10，反映 decode 更贵）。按 QPS 限流的多租户网关一定会被长上下文租户打穿。
 
-⚠️ **未找到公开数据**：vLLM / SGLang / Dynamo 在 2026 年**均未提供请求级抢占的公开 SLO 保障指标**。想做"高优请求插队"，目前只能在网关层做队列，不能指望引擎。实用形态是**分池**：给高优流量单独的实例池，用容量而非调度器保证优先级。
+⚠️ **未找到公开数据**：vLLM / SGLang / Dynamo 在 2026 年**均未提供请求级抢占的公开 SLO 保障指标**。想做"高优请求插队"，目前只能在网关层做队列，不能指望引擎。实用形态是**分池**（pool isolation）：给高优流量单独的实例池，用容量而非调度器保证优先级。
 
 ---
 
@@ -437,16 +437,16 @@ P:D 副本比 ≈ 5:2
 | 拉容器镜像（含 CUDA/引擎，10–30 GB） | 1–5 分钟 |
 | 加载模型权重到 HBM（70B FP8 = 70 GB） | 30 s – 3 分钟 |
 | CUDA graph 捕获 / kernel 自动调优 | 30 s – 2 分钟 |
-| **前缀缓存预热到稳态命中率** | **数分钟到数十分钟** |
-| **合计冷启动** | **5–15 分钟** |
+| **前缀缓存预热（warm-up）到稳态命中率** | **数分钟到数十分钟** |
+| **合计冷启动（cold start）** | **5–15 分钟** |
 
 **HPA 那套"CPU > 70% 就扩容"在 GPU 上是不成立的。** 正确形态：
 
 1. **预热池（warm pool）**：常驻 15–25% 的空闲容量，接受这笔成本。
-2. **排队而非弹性**：过载时进入准入队列 + 明确的 429 与 `Retry-After`，而不是指望扩容救场。
-3. **按预测扩容**：用 T-15min 的流量趋势和日历（工作日 09:00 尖峰、批处理窗口）提前拉起。
-4. **缩容要慢**：缩容窗口 ≥ 30 分钟，否则缓存反复冷启动，你会看到"缩容后延迟变差"。
-5. 溢出到托管 API 作为兜底通道——这是自建 + API 混合部署的主要理由之一。
+2. **排队而非弹性**：过载（overload）时进入准入队列（admission queue） + 明确的 429 与 `Retry-After`，而不是指望扩容救场。
+3. **按预测扩容**（predictive scaling）：用 T-15min 的流量趋势和日历（工作日 09:00 尖峰、批处理窗口）提前拉起。
+4. **缩容要慢**：缩容（scale-down）窗口 ≥ 30 分钟，否则缓存反复冷启动，你会看到"缩容后延迟变差"。
+5. 溢出（spillover）到托管 API 作为兜底（fallback）通道——这是自建 + API 混合部署的主要理由之一。
 
 ---
 
@@ -472,11 +472,11 @@ API （对标 Claude Haiku 4.5：$1/M 输入、$5/M 输出）：
 盈亏平衡 = 120 / 23.4 ≈ 5.1 QPS，7×24 稳定负载
 ```
 
-**读法**：需要**全天候** 5 QPS（≈ 44 万请求/天）才打平。如果流量是白天 10 QPS、夜里 0（日均利用率 40%），实际需要峰值约 13 QPS 才打平。**利用率从 100% 掉到 20%，单位成本涨 5 倍**——这才是自建的真实风险。
+**读法**：需要**全天候** 5 QPS（≈ 44 万请求/天）才打平（break even）。如果流量是白天 10 QPS、夜里 0（日均利用率 40%），实际需要峰值约 13 QPS 才打平。**利用率从 100% 掉到 20%，单位成本涨 5 倍**——这才是自建的真实风险。
 
 ⚠️ **这个结论有真实的公开分歧（写进你的答案里）**：一派算出 70B 单 H100 约 400 tok/s、对标 $5/M 的旗舰模型约 12M token/天回本；另一派实测 8×H100 跑 671B MoE 满载约 **$10/M 输出**，比廉价开源托管 API（约 $0.87/M）**贵 11 倍**。**两边都没算错，是对标基线不同**（溢价旗舰 vs 廉价开源托管）。引用任何自建 ROI 之前，先钉死你对标的是哪个模型的哪个档位。
 
-**自建的正当理由通常不是省钱**：数据驻留/合规、延迟确定性（不受厂商限流影响）、模型定制（微调/LoRA 热插）、供应商中断的兜底。**如果理由只有"省钱"，先把利用率曲线画出来再说。**
+**自建的正当理由通常不是省钱**：数据驻留（data residency）/合规、延迟确定性（latency determinism，不受厂商限流影响）、模型定制（微调 fine-tuning / LoRA 热插）、供应商中断的兜底。**如果理由只有"省钱"，先把利用率曲线画出来再说。**
 
 ---
 
@@ -484,7 +484,7 @@ API （对标 Claude Haiku 4.5：$1/M 输入、$5/M 输出）：
 
 | 手段 | 典型收益 | 代价 / 撞墙条件 |
 |---|---|---|
-| 连续批处理 | 吞吐 2–10× | 默认必开；批内超长请求拖尾 |
+| 连续批处理 | 吞吐 2–10× | 默认必开；批内超长请求拖尾（straggler） |
 | 分页 KV（PagedAttention） | 碎片 <4%，并发 2–4× | 块表索引开销、kernel 复杂度 |
 | Chunked prefill | 混合负载吞吐提升，TTFT 毛刺消失 | **拉长同批 decode 的 TPOT**；TPOT 是硬 SLO 时需限 chunk 或改分离 |
 | 前缀缓存 | 命中 70–90% 时 TTFT 降数倍；极端场景 46× | 命中率是 workload 属性；低重叠下净吞吐可 **−36.7%**；**跨租户共享 = 泄露面** |
@@ -501,7 +501,7 @@ API （对标 Claude Haiku 4.5：$1/M 输入、$5/M 输出）：
 
 ---
 
-## 15. 什么时候不要做这些（反模式）
+## 15. 什么时候不要做这些（反模式，anti-pattern）
 
 1. **QPS < 1 就自建推理栈**。你付的是工程人力，不是 GPU 钱。托管 API + prompt caching + Batch（50% off）的组合在这个规模上不可战胜。
 2. **没有 RDMA 就上 PD 分离**。KV 传输回落到 TCP 时会主导端到端延迟——这是最常见的失效模式。
@@ -511,7 +511,7 @@ API （对标 Claude Haiku 4.5：$1/M 输入、$5/M 输出）：
 6. **用 MPS/time-slicing 做跨租户隔离**。MPS 无故障隔离，time-slicing 连显存都不隔离。
 7. **只写一个 SLO 指标**。TTFT 和 TPOT 必须同时约束，否则 P95 TPOT 能在你不知情的情况下漂 10×。
 8. **横向比较单卡 tok/s**。同一批 288 卡半年内软件涨 2.7×；prefill-only 口径与混合口径差 7×。没有 ISL/OSL/并发/量化/版本标注的数字一律作废。
-9. **跟 latest 版本**。vLLM 两周一个 minor 且 v0.25.0 直接删了 legacy attention 路径；SGLang 一个月三个版本。**生产必须锁版本 + 有回归基线**。
+9. **跟 latest 版本**。vLLM 两周一个 minor 且 v0.25.0 直接删了 legacy attention 路径；SGLang 一个月三个版本。**生产必须锁版本（version pinning） + 有回归基线（regression baseline）**。
 10. **信"博客里的 GA"**。2026 年大量能力仍是实验态：AFD 明确 experimental、Mooncake 集成未合入主干、Elastic EP 只支持 TP=1、多层 MTP 未稳定。逐项核对 release note。
 11. **用 CPU/GPU 利用率驱动 HPA**。decode 阶段 GPU 利用率读数很高而 MFU 只有 5%——这个指标对 LLM 服务几乎没有信息量。用 goodput、队列深度、`gpu_cache_usage_perc` 和抢占计数。
 
@@ -528,7 +528,7 @@ API （对标 Claude Haiku 4.5：$1/M 输入、$5/M 输出）：
 7. 投机解码在你的生产系统里为什么可能是负收益？什么场景该开？
 8. 跨租户共享 KV cache 有什么风险？你的默认策略是什么，代价是什么？
 9. 从 QPS = 10、ISL = 4k、OSL = 500 推到要几张卡，把过程讲一遍。
-10. 流量突增 3×，GPU 冷启动要 10 分钟——你的降级剧本是什么？
+10. 流量突增 3×，GPU 冷启动要 10 分钟——你的降级（graceful degradation）剧本是什么？
 
 ---
 

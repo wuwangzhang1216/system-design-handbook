@@ -1,4 +1,4 @@
-# 02 · 计量与计费
+# 02 · 计量（metering）与计费（billing）
 
 > 计量系统的误差是**有方向的**：丢事件永远是你少收钱，重复事件永远是客户投诉。
 > 所以架构目标不是"准确"，是"**在两个方向上都有可审计的收敛机制**"。
@@ -7,17 +7,17 @@
 
 ## 1. 为什么 2026 年这件事变难了
 
-传统 SaaS 按席位收费：计量 = `SELECT count(*) FROM users`，一个月跑一次，错了也没人发现。AI 产品把三件事同时打破了：
+传统 SaaS 按席位收费（per-seat pricing）：计量 = `SELECT count(*) FROM users`，一个月跑一次，错了也没人发现。AI 产品把三件事同时打破了：
 
 | 变化 | 后果 |
 |---|---|
-| **推理成本进了 COGS** | AI 产品平均毛利约 **52%**，传统成熟 SaaS 是 **80–90%**（[ICONIQ 2026 State of AI](https://www.iconiq.com/growth/reports/2026-state-of-ai-bi-annual-snapshot)，n≈300）。毛利薄 ⇒ 计量误差直接吃掉利润 |
+| **推理成本进了 COGS** | AI 产品平均毛利（gross margin）约 **52%**，传统成熟 SaaS 是 **80–90%**（[ICONIQ 2026 State of AI](https://www.iconiq.com/growth/reports/2026-state-of-ai-bi-annual-snapshot)，n≈300）。毛利薄 ⇒ 计量误差直接吃掉利润 |
 | **单位从"人"变成"事件"** | 事件量从 10³/月 变成 10⁹/月，计量管道从财务后台变成**实时数据基础设施** |
-| **成本方差极大** | 同一个"用户提问"，成本可以差 1,000 倍（一次 Haiku 单轮 vs 一次 Opus 多 Agent 长任务） |
+| **成本方差（cost variance）极大** | 同一个"用户提问"，成本可以差 1,000 倍（一次 Haiku 单轮 vs 一次 Opus 多 Agent 长任务） |
 
-行业用并购给这件事投了票：一年内 **Stripe 收 Metronome（2026-01-14 完成）**、**Adyen 收 Orb（$335M，2026-07-01 完成）**、**[Kong 收 OpenMeter](https://konghq.com/blog/news/kong-acquires-openmeter)（2025-09）**。剩下的主要独立开源选项是 [Lago](https://getlago.com/)。定价模式分布（可多选，ICONIQ 2026）：订阅/平台费 **58%**、消费型 **35%**、结果型 **18%**；**37%** 的公司计划在未来 12 个月改定价。
+行业用并购给这件事投了票：一年内 **Stripe 收 Metronome（2026-01-14 完成）**、**Adyen 收 Orb（$335M，2026-07-01 完成）**、**[Kong 收 OpenMeter](https://konghq.com/blog/news/kong-acquires-openmeter)（2025-09）**。剩下的主要独立开源选项是 [Lago](https://getlago.com/)。定价模式分布（可多选，ICONIQ 2026）：订阅/平台费 **58%**、消费型（consumption-based）**35%**、结果型 **18%**；**37%** 的公司计划在未来 12 个月改定价。
 
-⚠ **别把"改成用量计费"当成毛利解药。** 52% 这个数字是在大量公司**已经转 UBP 之后**测出来的。真正拉毛利的是模型路由、缓存、蒸馏和规模效应；定价只是把成本方差转移给客户。
+⚠ **别把"改成用量计费（usage-based pricing, UBP）"当成毛利解药。** 52% 这个数字是在大量公司**已经转 UBP 之后**测出来的。真正拉毛利的是模型路由（model routing）、缓存、蒸馏（distillation）和规模效应（economies of scale）；定价只是把成本方差转移给客户。
 
 ---
 
@@ -45,16 +45,16 @@
 | # | 步骤 | 失败模式 | 方向 | 对策 |
 |---|---|---|---|---|
 | 0 | 事件产生 | 进程崩溃、事件还在内存 | **少收钱** | **先落本地 WAL 再返回用户**；异步刷入总线 |
-| 0 | 事件产生 | 客户端重试生成新 UUID | **多收钱** | 幂等键必须由**业务语义派生**，见 §4 |
-| 1 | 投递 | 总线不可用 | 少收钱 | 本地磁盘缓冲 + 有界队列 + **反压到业务路径的开关必须存在但默认关** |
-| 2 | 去重 | 重复超出去重窗口 | 多收钱 | 去重窗口 = 你能容忍的客户端重放延迟上限 |
-| 3 | 聚合 | 迟到事件晚于窗口关闭 | 少收钱 | 允许迟到期 + true-up，见 §5 |
-| 4 | 富化 | 用了**出账时**的价格而不是**事件时**的价格 | 双向 | 价格表按 `effective_from` 版本化，评级时按事件时间取版本 |
-| 5 | 评级 | 阶梯/包量计算浮点误差累积 | 双向 | 全程整数（最小计费单位），**绝不用 float 存金额** |
-| 6 | 出账 | 重复出账 | 多收钱 | `(tenant, period, invoice_version)` 唯一约束 |
+| 0 | 事件产生 | 客户端重试生成新 UUID | **多收钱** | 幂等键（idempotency key）必须由**业务语义派生**，见 §4 |
+| 1 | 投递 | 总线不可用 | 少收钱 | 本地磁盘缓冲 + 有界队列（bounded queue）+ **反压（backpressure）到业务路径的开关必须存在但默认关** |
+| 2 | 去重（deduplication） | 重复超出去重窗口 | 多收钱 | 去重窗口 = 你能容忍的客户端重放延迟上限 |
+| 3 | 聚合 | 迟到事件（late-arriving events）晚于窗口关闭 | 少收钱 | 允许迟到期 + true-up，见 §5 |
+| 4 | 富化（enrichment） | 用了**出账时**的价格而不是**事件时**的价格 | 双向 | 价格表按 `effective_from` 版本化，评级时按事件时间取版本 |
+| 5 | 评级 | 阶梯（tiered pricing）/包量计算浮点误差累积 | 双向 | 全程整数（最小计费单位），**绝不用 float 存金额** |
+| 6 | 出账 | 重复出账 | 多收钱 | `(tenant, period, invoice_version)` 唯一约束（unique constraint） |
 | 7 | 对账 | 与上游 provider 账单对不上 | 少收钱 | 三方对账，见 §9 |
 
-**两条结构性原则：** ① **计量必须与业务写路径解耦** —— 绝不在同步请求路径里做去重查询或调用计费 SaaS，那等于把计费系统的可用性绑进产品可用性；API 层只负责可靠投递到 log，去重与聚合放流处理层。② **原始事件湖是唯一真相源，聚合结果是可重算的派生物** —— 任何口径变更、价格追溯、客户争议都靠 replay 解决。**没有事件湖的计费系统无法处理争议**，最后只能靠客服送额度。
+**两条结构性原则：** ① **计量必须与业务写路径解耦** —— 绝不在同步请求路径里做去重查询或调用计费 SaaS，那等于把计费系统的可用性绑进产品可用性；API 层只负责可靠投递到 log，去重与聚合放流处理层。② **原始事件湖是唯一真相源（source of truth），聚合结果是可重算的派生物** —— 任何口径变更、价格追溯、客户争议（dispute）都靠 replay 解决。**没有事件湖的计费系统无法处理争议**，最后只能靠客服送额度。
 
 ---
 
@@ -67,23 +67,23 @@
 | `id` | uuid | 幂等键。与 `source` 组成去重主键（[CloudEvents](https://cloudevents.io/) 惯例） |
 | `source` | string | 产生方，如 `gateway-cell3-pod7`。**去重是 `(source, id)` 而不是单 `id`** |
 | `type` | enum | `llm.completion` / `tool.call` / `sandbox.session` / `search.query` / `storage.gb_hour` |
-| `time` | ts(µs) | **事件时间**，用于窗口聚合与价格版本选取 |
+| `time` | ts(µs) | **事件时间（event time）**，用于窗口聚合（windowed aggregation）与价格版本选取 |
 | `ingest_time` | ts | 到达时间。`ingest_time - time` = 迟到程度，必须监控其 p99 |
-| `tenant_id` | string | 分区键 |
-| `workspace_id` / `user_id` | string | 二级归因维度 |
+| `tenant_id` | string | 分区键（partition key） |
+| `workspace_id` / `user_id` | string | 二级归因（attribution）维度 |
 | `feature` | string | **业务功能**（`code_review` / `chat` / `batch_index`）。没有这个维度就无法回答"哪个功能在烧钱" |
 | `session_id` / `run_id` / `agent_id` | string | Agent 场景的成本归因与**单会话硬上限**依据 |
 | `provider` / `model` | string | `anthropic` / `claude-opus-5` |
 | `model_version` | string | 快照版本。价格和 tokenizer 都跟版本走 |
 | `tokenizer_version` | string | ⚠ **必须有**。Claude 4.7+ 对同样文本约多产生 **+30% token**（Opus 4.7/4.8/5、Sonnet 5、Fable 5；Sonnet 4.6 及更早为旧 tokenizer）。没记版本，历史重算一定错 |
 | `input_tokens` | int64 | **未命中缓存**的输入 |
-| `cache_read_tokens` | int64 | 缓存读，单价约为输入的 **10%** |
+| `cache_read_tokens` | int64 | 缓存读（cache read），单价约为输入的 **10%** |
 | `cache_write_5m_tokens` | int64 | 5 分钟 TTL 缓存写，**1.25×** 基础输入价 |
 | `cache_write_1h_tokens` | int64 | 1 小时 TTL 缓存写，**2×** 基础输入价 |
 | `output_tokens` | int64 | 输出 |
-| `reasoning_tokens` | int64 | 思考 token。通常按输出计价，但**产品上是否向客户暴露是独立决策** |
+| `reasoning_tokens` | int64 | 思考 token（reasoning tokens）。通常按输出计价，但**产品上是否向客户暴露是独立决策** |
 | `service_tier` | enum | `standard` / `batch`（**50% off**）/ `fast`（Opus 5 为 **2× 标准价**，换 ≤2.5× 输出 tok/s，**不能与 batch 同用**）/ `priority` |
-| `inference_geo` | string | 数据驻留。Anthropic `inference_geo:"us"` 为 **1.1×** 全项；OpenAI 区域化处理 **+10%** |
+| `inference_geo` | string | 数据驻留（data residency）。Anthropic `inference_geo:"us"` 为 **1.1×** 全项；OpenAI 区域化处理 **+10%** |
 | `outcome` | enum | `success` / `client_error` / `provider_error` / `client_disconnect` |
 | `billable` | bool | 由 §8 的策略计算得出，**必须显式存**，不要在出账时临时判断 |
 | `upstream_cost_micros` | int64 | 你付给 provider 的成本（微分单位整数）。毛利分析的地基 |
@@ -170,7 +170,7 @@ event_id = uuidv5(NS, f"{tenant_id}:{request_id}:{attempt_semantic_step}")
 
 1. **金额全程用整数最小单位**（micros，10⁻⁶）。float 在阶梯定价上累积误差，且不同语言的舍入行为不一致。
 2. **价格表按 `effective_from` 版本化**，评级时按**事件时间**取版本。租户升级套餐时用**按比例分摊（proration）**，不要按出账时的套餐重算整个月。
-3. **评级必须是纯函数**：`rate(usage_snapshot, price_version) → line_items`。同样输入永远同样输出，才能在争议时复现三个月前的账单。
+3. **评级必须是纯函数（pure function）**：`rate(usage_snapshot, price_version) → line_items`。同样输入永远同样输出，才能在争议时复现三个月前的账单。
 
 **出账的幂等模型：**
 
@@ -188,7 +188,7 @@ CREATE TABLE invoices (
 );
 ```
 
-**"恰好一次计费"的真相**：它不存在于传输层，只存在于**应用层的幂等收敛** —— 工程等价物是 `至少一次投递 + 幂等应用 + 可对账的最终收敛`。面试时说"我们做到了 exactly-once 计费"会被追问到崩溃。**支付环节**必须带幂等键（就是 `invoices.idem_key`），且**先落"支付意图"再调用**，绝不先调用后记账 —— 否则网络超时时你不知道钱扣没扣。
+**"恰好一次计费"（exactly-once billing）的真相**：它不存在于传输层，只存在于**应用层的幂等收敛** —— 工程等价物是 `至少一次投递 + 幂等应用 + 可对账的最终收敛`。面试时说"我们做到了 exactly-once 计费"会被追问到崩溃。**支付环节**必须带幂等键（就是 `invoices.idem_key`），且**先落"支付意图"再调用**，绝不先调用后记账 —— 否则网络超时时你不知道钱扣没扣。
 
 ---
 
@@ -198,16 +198,16 @@ CREATE TABLE invoices (
 
 | 类型 | 语义 | 算法 | 典型 |
 |---|---|---|---|
-| **速率**（rate） | 单位时间的量 | 令牌桶 / 滑窗 | RPM、TPM |
+| **速率**（rate） | 单位时间的量 | 令牌桶（token bucket）/ 滑窗（sliding window） | RPM、TPM |
 | **累计量**（counter） | 周期内总量 | 分布式计数 + 租约 | 月 token 额度、预算 $ |
-| **并发**（gauge） | 同时在跑的数量 | **信号量 + 租约 + TTL 心跳** | 并发沙箱数、并发 Agent 数 |
+| **并发**（gauge） | 同时在跑的数量 | **信号量（semaphore）+ 租约（lease）+ TTL 心跳（heartbeat）** | 并发沙箱数、并发 Agent 数 |
 | **绝对上限**（cap） | 单个实体的硬顶 | 本地即可判定 | 单会话最大 token、单请求最大输出 |
 
 ⚠ **并发配额不能用令牌桶。** 并发是 gauge 不是 counter：进程崩溃会让计数永久泄漏。必须用带 TTL 的租约 + 心跳续期，崩溃后租约自动过期归还。这是配额系统里最常见的实现错误。
 
-### 分布式近似计数：本地令牌桶 + 周期同步（伪代码）
+### 分布式近似计数（approximate distributed counting）：本地令牌桶 + 周期同步（伪代码）
 
-核心思想：**每个实例向中心"租"一段额度，本地扣减，周期归还与续租。** 用有界的过量发放换掉每请求一次的远程调用。
+核心思想：**每个实例向中心"租"一段额度，本地扣减，周期归还与续租。** 用有界的过量发放（over-issuance）换掉每请求一次的远程调用。
 
 ```python
 class LeasedQuota:
@@ -301,7 +301,7 @@ LLM 的输出长度**在请求发出时未知**，所以配额扣减必须分两
 | Batch 模式 | **全项 ×0.5** | 输入 $2.50 / 输出 $12.50 |
 | Fast 模式 | **全项 ×2**，不可与 Batch 叠加 | 输入 $10 / 输出 $50 |
 
-**叠加极值**：Batch + 缓存读 = `$5 × 0.1 × 0.5 = $0.25/M`，是同步未缓存价的 **1/20**。你的计费系统必须能表达这个组合，否则你会把成本优化的收益全部漏算。
+**叠加极值（stacked discounts）**：Batch + 缓存读 = `$5 × 0.1 × 0.5 = $0.25/M`，是同步未缓存价的 **1/20**。你的计费系统必须能表达这个组合，否则你会把成本优化的收益全部漏算。
 
 三个跨厂商的坑：**① 缓存读折扣按代际不同** —— OpenAI GPT-5.x 是输入价的 10%，gpt-4.1/o3/o4-mini 是 25%，gpt-4o 是 50%；价格表必须按 `(provider, model, generation)` 三元组索引。**② 缓存写从免费变成收费** —— OpenAI GPT-5.6+ 的缓存写是 1.25× 未缓存输入价（此前免费），老代码里"缓存写不计费"的假设会静默漏计。**③ Gemini 有持有成本** —— $1.00 / 百万 token / 小时的缓存存储费是三家里唯一按时间收的，你的成本模型里因此多了一个 `∫ cached_tokens dt` 项而不是一个事件。
 
@@ -317,9 +317,9 @@ LLM 的输出长度**在请求发出时未知**，所以配额扣减必须分两
   cache_*     → "缓存命中率是多少"               → 最大的单点优化杠杆
 ```
 
-**Agent 场景的方差是关键**：单 Agent 的 token 用量约为 chat 的 **4×**，多 Agent 系统约 **15×**（Anthropic，2025-06-13）。参考量级：Claude Code 官方口径 **$13 / 开发者 / 活跃日**、**$150–250 / 月**，P90 < $30/活跃日（⚠ 另有二手来源称 $6/日，口径不同，以官方现行文档为准）。**这个方差决定了你不能只做租户级预算** —— 一个失控的 Agent 循环可以在 20 分钟内烧掉一个租户一个月的额度，而月度预算只会在事后报警。
+**Agent 场景的方差（variance）是关键**：单 Agent 的 token 用量约为 chat 的 **4×**，多 Agent 系统约 **15×**（Anthropic，2025-06-13）。参考量级：Claude Code 官方口径 **$13 / 开发者 / 活跃日**、**$150–250 / 月**，P90 < $30/活跃日（⚠ 另有二手来源称 $6/日，口径不同，以官方现行文档为准）。**这个方差决定了你不能只做租户级预算** —— 一个失控的 Agent 循环可以在 20 分钟内烧掉一个租户一个月的额度，而月度预算只会在事后报警。
 
-### c) 成本护栏：三层，缺一不可
+### c) 成本护栏（cost guardrail）：三层，缺一不可
 
 ```
 L1  单请求/单会话绝对上限（本地即可判定，零延迟）
@@ -337,7 +337,7 @@ L3  硬预算（100%）
     ⇒ 硬熔断必须是 fail-closed 的（见 §7 的 mode=HARD）
 ```
 
-**单层预算是反模式**：单层硬限额会让大租户在月中直接停服（销售会来找你）；单层软限额挡不住失控 Agent 循环（财务会来找你）。**必须双层 + L1 的绝对上限。**
+**单层预算是反模式**：单层硬限额（hard limit）会让大租户在月中直接停服（销售会来找你）；单层软限额（soft limit）挡不住失控 Agent 循环（财务会来找你）。**必须双层 + L1 的绝对上限。**
 
 ### d) 必须显式决策的一条策略：失败请求是否计费
 
@@ -358,13 +358,13 @@ L3  硬预算（100%）
 
 它把计量难度提高了一个量级，因为要回答三个**主观**问题：**什么算一个 outcome**（用户没再回复算解决吗）、**谁来判定**（规则 / LLM-as-judge / 人工抽检 —— judge 的偏差会直接变成收入偏差，见 [06-evaluation-and-observability.md](../04-ai-agent-systems/06-evaluation-and-observability.md)）、**判错了怎么争议**。
 
-**工程结论**：结果型定价的账单必须**可解释到单条 outcome**，每条能点开看到触发它的完整轨迹。做不到就不要卖结果型定价 —— 第一次大客户争议会让你手工重算整个月。
+**工程结论**：结果型定价的账单必须**可解释到单条 outcome**，每条能点开看到触发它的完整轨迹（trace）。做不到就不要卖结果型定价 —— 第一次大客户争议会让你手工重算整个月。
 
 ---
 
 ## 9. 对账（Reconciliation）
 
-**三方比对，缺一不可：**
+**三方比对（three-way reconciliation），缺一不可：**
 
 ```
         ① Provider 侧账单/用量 API（真金白银的口径）
@@ -388,7 +388,7 @@ L3  硬预算（100%）
 | ② vs ③ | 实时（分钟级） | 事件投递链路丢事件 | < 0.05% |
 | ③ vs ④ | 月度 + 账期关闭时 | 评级/出账逻辑 bug | **0**（差异必须能逐笔解释） |
 
-**为什么 0.5% 的丢失率不可接受**：token 计费下，0.5% 的事件丢失在 $10M ARR 上就是 **$50k/年**的无声漏损，**且方向永远对你不利**（丢事件 = 少收钱；重复事件会被客户投诉纠正 —— 系统性偏差是单向的）。**对账的产物必须是差异明细而不是一个百分比**，超阈值时自动开工单并附样本事件 ID；只报总数的对账等于没有对账。
+**为什么 0.5% 的丢失率不可接受**：token 计费下，0.5% 的事件丢失在 $10M ARR 上就是 **$50k/年**的无声漏损（revenue leakage），**且方向永远对你不利**（丢事件 = 少收钱；重复事件会被客户投诉纠正 —— 系统性偏差（systematic bias）是单向的）。**对账的产物必须是差异明细而不是一个百分比**，超阈值时自动开工单并附样本事件 ID；只报总数的对账等于没有对账。
 
 ---
 
@@ -396,12 +396,12 @@ L3  硬预算（100%）
 
 | 机制 | 会计语义 | 实现要点 |
 |---|---|---|
-| **信用额度（credit）** | 预付余额，先于计费扣减 | 有优先级（促销额度先扣、有到期日）；扣减顺序必须确定且可解释 |
+| **信用额度（credit）** | 预付余额（prepaid balance），先于计费扣减 | 有优先级（促销额度先扣、有到期日）；扣减顺序必须确定且可解释 |
 | **调整（adjustment）** | 对已出账单的**追加行项** | 用于 true-up。**不改原发票**，加一行 |
 | **贷记单（credit memo）** | 冲销已开发票的一部分 | 税务上是独立单据，不能靠"改发票金额"实现 |
-| **退款（refund）** | 真实资金流出 | 必须幂等（带 `refund_idem_key`），且与支付网关对账 |
+| **退款（refund）** | 真实资金流出 | 必须幂等（带 `refund_idem_key`），且与支付网关（payment gateway）对账 |
 
-**两条不能省的规则**：① 发票一旦 `finalized` 就**不可变**，所有修正走新单据（调整/贷记单/新版本发票）—— 可变发票的系统在审计时会被直接判死。② 信用额度扣减必须记录在事件流里、和用量事件一样可 replay；手工改余额必须走 break-glass 通道并留审计。
+**两条不能省的规则**：① 发票一旦 `finalized` 就**不可变（immutable）**，所有修正走新单据（调整/贷记单/新版本发票）—— 可变发票的系统在审计时会被直接判死。② 信用额度扣减必须记录在事件流里、和用量事件一样可 replay；手工改余额必须走 break-glass 通道并留审计。
 
 ---
 
@@ -410,12 +410,12 @@ L3  硬预算（100%）
 | 情况 | 别做 | 做什么 |
 |---|---|---|
 | 事件 < 100/s，只做订阅制 | 不要自建流式计量管道 | 直接用计费 SaaS 的 API，每天批量推送 |
-| **> ~1k events/s** | 不要直发计费 SaaS | 自己这一侧做**预聚合**（按 `tenant × meter × 时间桶`），原始事件留在自己的数据湖。参考量级：[Stripe Billing](https://docs.stripe.com/api/billing/meter-event) Meter Event 端点 live mode **1,000 calls/s**，Meter Event Stream API 单流 **10k events/s**、单商户可到 **100k events/s** |
+| **> ~1k events/s** | 不要直发计费 SaaS | 自己这一侧做**预聚合（pre-aggregation）**（按 `tenant × meter × 时间桶`），原始事件留在自己的数据湖。参考量级：[Stripe Billing](https://docs.stripe.com/api/billing/meter-event) Meter Event 端点 live mode **1,000 calls/s**，Meter Event Stream API 单流 **10k events/s**、单商户可到 **100k events/s** |
 | 计费口径还在每月改 | 不要固化聚合层 | 只固化**原始事件 schema**，聚合和评级保持可重算。口径没稳定前，聚合层是负债 |
 | 只有 3 个大客户 | 不要做实时配额系统 | 月度对账 + 人工沟通。配额系统的复杂度只在客户数 > 100 时回本 |
 | 内部平台，成本内部分摊 | 不要做发票和支付 | 只做计量 + 归因报表（chargeback / showback） |
 
-**反模式速查：**
+**反模式（anti-pattern）速查：**
 
 1. **在同步请求路径里查去重表。** 把计费系统的可用性绑进了产品可用性。
 2. **"幂等键 = 不会重复计费"。** 真正的失效模式是客户端每次重试生成新 UUID。键必须由业务语义派生。
