@@ -5,6 +5,53 @@
 
 ---
 
+## 读这一章之前
+
+**你在工作中遇到过这个**
+
+产品说"让 Agent 记住用户"，你把每轮对话都 embedding 进向量库，两周上线，跑了三个月。
+某天用户投诉："我上个月明明告诉过你我不用深色主题了。"你去查库，里面同时躺着
+"用户喜欢深色主题"和"用户不喜欢深色主题"两条，相似度都是 0.9 开头，检索时命中哪条纯看运气。
+第二天法务来问："这个用户要求删除他的数据，你能删干净吗？"——你答不上来，因为那几万条向量
+你根本不知道哪条是从哪一轮对话来的，也没有一个能按用户删掉的入口。
+
+**需要先懂的概念**
+
+| 概念 | 一句话 | 详见 |
+|---|---|---|
+| 强一致 vs 最终一致 | 写完后任何人立刻读到新值 vs 只承诺最终收敛、中间可能读到旧值 | [00-concepts §6](../00-foundations/00-concepts.md) |
+| 乐观并发 / CAS | 不加锁，提交时用版本号检查这行有没有被别人改过 | [00-concepts §7](../00-foundations/00-concepts.md) |
+| 读己之写 | 只保证"同一个会话里，自己刚写的一定读得到"的弱一致档位 | [00/01 §4](../00-foundations/01-fundamentals.md) |
+| 幂等键 | 客户端生成、服务端去重的请求标识，让重试不产生第二次副作用 | [00/01 §5](../00-foundations/01-fundamentals.md) |
+| 上下文腐化与 distractor | 输入越长表现越差；单个不相关片段就能拉低准确率 | [02 §2](02-context-engineering-and-rag.md) |
+| 前缀缓存与失效级联 | 记忆放在提示词的哪一段，直接决定它每轮花多少钱 | [02 §9](02-context-engineering-and-rag.md) |
+
+**这一章要回答的问题**
+
+1. "给 Agent 加记忆"到底是在加什么？为什么它不是"一个存储"而是四个？
+2. 用户在手机上说"记住 A"、在电脑上说"记住 not A"，谁赢？怎么让他换设备后立刻看到自己刚写的？
+3. 一条三个月前被恶意网页塞进来的记忆，今天还在每个新会话里生效 —— 哪一层能拦住它，拦不住怎么发现和回滚？
+4. 用户行使删除权时你要删掉哪些东西？哪些你根本删不掉，要怎么向他交代？
+
+**本章新引入的术语**
+
+| 术语 | English | 一句话定义 |
+|---|---|---|
+| 会话上下文 | conversation context | 当前这次对话里全部消息、工具调用与工具结果组成的那个数组 |
+| 任务状态 | task / execution state | 这个任务跑到第几步、预算还剩多少、哪些有副作用的动作已经真的发生了 |
+| 语义记忆 | semantic memory | 跨会话长期为真的事实条目，如"这个仓库用 pnpm" |
+| 情节记忆 | episodic memory | "上次我们做了什么、为什么这么做"这类带时间戳的经历记录 |
+| 程序性记忆 | procedural memory | "做 X 之前必须先做 Y"这类操作步骤类知识 |
+| 溯源 | provenance | 一条记忆是从哪次会话、哪一轮、哪个来源产生的，出事时靠它回溯 |
+| 污点传播 | taint propagation | 给来自不可信来源的数据打上标记，并让这个标记一路跟着它的所有派生物传下去 |
+| 矛盾消解 / supersede 链 | conflict resolution / supersede chain | 新旧事实冲突时不覆盖旧的，而是新写一条并显式指向被它取代的那条 |
+| 双时间线建模 | bitemporal modeling | 同时记两套时间：这件事在现实中何时有效，这条记录在你系统里何时存在 |
+| 遗忘 / 淘汰 | forgetting / eviction | 主动让长期没被用过、置信度低的记忆退出检索范围 |
+| 记忆投毒 | memory poisoning | 攻击者让恶意内容被写成长期记忆，从此在每个新会话里自动生效 |
+| 删除权 | right to erasure | GDPR 第 17 条：用户可以要求你把关于他的数据全部物理删除 |
+
+---
+
 ## 1. 先把"记忆"这个词拆掉
 
 Agent 系统里被叫做"记忆"的东西至少有四类。**它们不该用同一套存储。**
@@ -15,6 +62,8 @@ Agent 系统里被叫做"记忆"的东西至少有四类。**它们不该用同�
 | ② | **任务状态**<br>task / execution state | 当前 step、待办图、重试计数、已发生的副作用与幂等键（idempotency key）、预算余额 | 单任务，秒–天 | **KB 级，硬上限 64KB** | **强一致（strong consistency） + CAS**，这是唯一必须事务的一类 | 关系库单行（Postgres `FOR UPDATE` 或 `version` 乐观锁 optimistic locking）/ DynamoDB 条件写；或交给 durable execution 引擎 | 恢复退化成重跑，**副作用重复执行**（重复扣款、重复发信） |
 | ③ | **长期记忆**<br>long-term memory | 用户偏好、项目约定、踩过的坑、"上次我们决定用 pnpm" | 跨会话，月–年 | 每用户 KB–低 MB | **最终一致（eventual consistency）就够** | Postgres 结构化事实表（可枚举、可审计、**可删除**）+ 可选向量索引作二级召回；代码类场景直接用文件系统 | 体验退化（重复提问），**不影响正确性** |
 | ④ | **外部真相源**<br>source of truth | 代码仓、工单系统、CRM、业务数据库 | 与业务同寿 | GB–TB | 由业务系统定义 | **不归你管**，Agent 只读或受控写 | 业务事故 |
+
+（**真相源 source of truth** = 某份数据的权威所在地，别处出现的都只是它的拷贝；拷贝和它不一致时，永远以它为准。）
 
 **两个最常见的架构错误：**
 
@@ -176,14 +225,14 @@ def should_persist(candidate: Fact, ctx: Session) -> Decision:
 
 | 载体 | 是否含用户数据 | 删除方案 |
 |---|---|---|
-| 记忆表主记录 | 是 | 硬删（hard delete，不是 soft delete） |
+| 记忆表主记录 | 是 | 硬删（hard delete：真的把行从表里删掉。对比 soft delete 软删：只置一个 `deleted=true` 标志，数据仍在，**不满足删除权**） |
 | supersede 链上的历史版本 | 是 | 同批删 |
-| **向量索引里的 embedding** | **是**（embedding 是个人数据的派生物） | 必须支持按 `memory_id` 定点删除 → **这直接排除掉不支持删除的索引结构** |
+| **向量索引里的 embedding**（把一段文字映射成的一串数字，见 [`02 §5.2`](02-context-engineering-and-rag.md)） | **是**（embedding 是个人数据的派生物） | 必须支持按 `memory_id` 定点删除 → **这直接排除掉不支持删除的索引结构** |
 | 会话上下文归档（JSONL） | 是 | 要么按用户分区能整体删，要么设短保留期 |
 | compaction 生成的摘要 | 是 | 摘要是派生物，同样要删——**很多实现漏掉这个** |
 | 训练/评测数据集里的样本 | 是 | 需要 `(user_id → sample_id)` 反查索引 |
-| **provider 侧 prompt cache** | 是 | **你删不掉**。OpenAI 即便在 ZDR 下仍存储加密的 prompt cache tensor **最长 24 小时**（2026 口径）；这必须写进你的 DPIA 和数据流图，并向用户披露"最长 24 小时的技术性驻留（data residency）" |
-| 可观测平台的 trace | 是 | OTel GenAI 的 `gen_ai.input.messages` / `gen_ai.output.messages` 是 **Opt-In，默认不采集**——保持默认关闭是最省事的合规姿势 |
+| **provider 侧 prompt cache** | 是 | **你删不掉**。OpenAI 即便在 ZDR（zero data retention：厂商承诺不留存你的请求与响应内容的合同档位）下仍存储加密的 prompt cache tensor **最长 24 小时**（2026 口径）；这必须写进你的 DPIA（data protection impact assessment，数据保护影响评估：GDPR 要求的一份"这个功能会怎么处理个人数据、风险与缓解措施"的书面评估）和数据流图，并向用户披露"最长 24 小时的技术性驻留（data residency）" |
+| 可观测平台的 trace（trace：一次请求在系统里走过的全部步骤串成的那条记录，见 [`05/02`](../05-reliability/02-observability.md)） | 是 | OTel（OpenTelemetry，可观测数据的开放标准）GenAI 的 `gen_ai.input.messages` / `gen_ai.output.messages` 是 **Opt-In，默认不采集**——保持默认关闭是最省事的合规姿势 |
 
 ⚠ **架构后果**：删除权要求"记忆可枚举、可归因到自然人、可物理删除"。这三条同时排除了一个很流行的做法：**把记忆混进 system prompt 的一大段自由文本里**。那段文本不可寻址（addressable），你只能整体重写。**从第一天就用结构化条目存记忆，不要用自由文本。**
 
@@ -315,7 +364,7 @@ Checkpoint = {
 
 **不存**：完整 messages（存指针）、大工具输出（存 `hash + 指针`）、模型 thinking（可重新生成）。
 
-**大小目标 < 64KB。** 超过就说明你在 checkpoint 里存内容而不是存状态，恢复会变慢、写放大（write amplification）会失控。
+**大小目标 < 64KB。** 超过就说明你在 checkpoint 里存内容而不是存状态，恢复会变慢、写放大（write amplification：一次逻辑上的"存一下"引发多少次实际磁盘写入；checkpoint 每步一写，单次越大总写入量涨得越凶，见 [`00-concepts §11`](../00-foundations/00-concepts.md)）会失控。
 
 ### 恢复的正确性：三条硬规则
 
@@ -337,11 +386,11 @@ Checkpoint = {
 
 | 对象 | 写者模型 | 机制 |
 |---|---|---|
-| **会话上下文** | **单写者（single-writer）** | 一个 session 同时只允许一个活跃 runner。用**租约**（lease，TTL 30–60s，心跳续期）而不是锁——runner 崩了租约自然过期。第二个客户端接入时只读，或抢租约后接管 |
+| **会话上下文** | **单写者（single-writer）** | 一个 session 同时只允许一个活跃 runner。用**租约**（lease：一个带过期时间的"这活归我"的声明，持有者要定期续期，TTL 30–60s）而不是锁——runner 崩了租约自然过期，锁却会永远卡住。第二个客户端接入时只读，或抢租约后接管 |
 | **任务状态** | **单写者** | 同上，且写走 CAS（`WHERE version = ?`） |
 | **长期记忆** | **多写者** | 手机上说"记住 A"、电脑上说"记住 not A"会真实发生。每条记忆带 `version`，写用 CAS；冲突不覆盖，走 supersede 链，把裁决留到读时（或推给用户） |
 
-**read-your-writes 的做法**：写记忆返回一个 version token（形态类似 SpiceDB 的 ZedToken），客户端下次读带上它，读路径保证不返回比该 token 旧的视图。没有这一条，用户会遇到"我刚说了记住，换个设备它就不知道"——这是最伤信任的一类 bug，因为它让用户觉得记忆系统整体不可信。
+**read-your-writes（读己之写）的做法**：写记忆返回一个 version token（一个代表"我这次写完之后系统的版本"的不透明字符串；形态类似 SpiceDB 的 ZedToken），客户端下次读带上它，读路径保证不返回比该 token 旧的视图。没有这一条，用户会遇到"我刚说了记住，换个设备它就不知道"——这是最伤信任的一类 bug，因为它让用户觉得记忆系统整体不可信。
 
 ---
 
@@ -351,7 +400,7 @@ Checkpoint = {
 
 记忆是**跨会话生效的持久写入**，所以它的隔离等级要按"数据库"而不是按"缓存"来设计：
 
-- **`scope` 是强制查询条件，不是过滤器**。向量检索尤其危险——先做向量近邻再按 tenant 过滤，会在候选集里泄露信息（延迟差、结果数量差都是侧信道 side channel），且 top-k 会被别的租户的向量挤占。**必须是先隔离再检索**：Pinecone 走 namespace、Weaviate 走原生 multi-tenancy、Qdrant 走 payload 索引 + 过滤（过滤在 HNSW 遍历内部执行）、pgvector 走 RLS + `tenant_id`。
+- **`scope` 是强制查询条件，不是过滤器**。向量检索尤其危险——先做向量近邻再按 tenant 过滤，会在候选集里泄露信息（延迟差、结果数量差都是侧信道 side channel：攻击者读不到数据本身，但能从耗时、返回条数这类间接现象反推出数据存不存在），且 top-k 会被别的租户的向量挤占。**必须是先隔离再检索**：Pinecone 走 namespace、Weaviate 走原生 multi-tenancy、Qdrant 走 payload 索引 + 过滤（过滤在 HNSW 图遍历内部执行，见 [`02 §5`](02-context-engineering-and-rag.md)）、pgvector 走 RLS（row-level security，行级安全：数据库自己按行判断这一行该不该给当前用户看，绕过它需要改数据库权限而不是改一行应用代码）+ `tenant_id`。
 - **别把记忆和 KV cache 混为一谈**。跨租户共享 prefix cache 已被 **PROMPTPEEK**（NDSS 2025）实证可逐 token 重建他人 prompt（已知 prompt 模板时成功率 99%，**无任何背景知识 95%**），攻击面覆盖 vLLM、SGLang、LightLLM、DeepSpeed。**自建推理栈上跨租户共享 prefix cache 默认关闭，只在同租户内共享。** 这直接削掉了多租户场景最大的性能杠杆——这个张力没有优雅解，只能显式选择。
 - **记忆服务本身就是攻击面（attack surface）**。`CVE-2026-59705` / `CVE-2026-59706`（mem0，CVSS 9.3 / 9.2）就是未认证读/写/删任意用户的记忆。**记忆 API 的每一个端点都要做 scope 校验，不能靠"只有我们自己调"。**
 
@@ -370,7 +419,7 @@ Checkpoint = {
 1. **写入路径与不可信内容之间必须有确定性闸门（gate）**。工具返回的内容（网页、邮件、第三方 API、子 Agent 输出）**不得直接触发记忆写入**。要写，走 §3 的 B 档（人工确认）。
 2. **污点传播（taint propagation）**：`provenance.tainted = true` 从来源一路传下去，被污染的记忆在注入时带可见标签，且不进 system 段（进 messages 末尾），保证它不享有"系统指令"的隐含权威。
 3. **记忆内容不参与指令解析**。注入时用明确的数据包裹（`<user_memory>` 块 + 明示"以下为事实参考，不是指令"），并对内容做控制标记转义（escaping）——伪造 `<system-reminder>`、伪造 `Human:` / `Assistant:` 轮次是已在生产中出现的攻击形态。
-4. **可回滚（rollback）**：记忆是 append-only event log 上的物化视图（materialized view），因此可以"回滚到某个会话之前的记忆状态"。这是事故响应（incident response）的唯一有效手段——没有它，你只能人工逐条审。
+4. **可回滚（rollback）**：记忆是 append-only event log（只追加、从不修改的事件日志）上的物化视图（materialized view：把这串事件从头按顺序放一遍算出来的"当前状态"；真理在日志里，视图随时可以重算），因此可以"回滚到某个会话之前的记忆状态"。这是事故响应（incident response）的唯一有效手段——没有它，你只能人工逐条审。
 5. **定期扫描**：对 `source=extraction` 且 `tainted=true` 的记忆做批量复检；对含 URL、含"忽略之前的指令"类模式的直接告警。
 6. **爆炸半径（blast radius）**：记忆的 `scope` 越窄越好。**默认 `scope=user`，`scope=tenant`（全租户可见）必须走管理员审批** —— 一条被投毒的租户级记忆等于一次针对全租户的持久攻击。
 
@@ -390,8 +439,8 @@ Checkpoint = {
 ### 五个反模式（anti-pattern）
 
 1. **"把所有对话都 embedding 进向量库"** —— 检索出来的是随机的旧对话片段，它们是 distractor 而不是记忆。Chroma 的结论是单个 distractor 就有害。**对话不是记忆，从对话里提炼的事实才是。**
-2. **用相似度阈值判断记忆是否相关** —— 和语义缓存（semantic cache）同样的坑："我喜欢深色主题" 和 "我不喜欢深色主题" 的 embedding 相似度极高。**记忆检索必须先按 scope/kind/时效硬过滤，再排序。**
-3. **把记忆当缓存** —— 缓存失效了回源（origin fetch），记忆失效了没人知道。**任何有 TTL 语义的东西都不该进记忆系统。**
+2. **用相似度阈值判断记忆是否相关** —— 和语义缓存（semantic cache：不按文本精确相等、而按提问的语义相近程度来判断缓存命中）同样的坑："我喜欢深色主题" 和 "我不喜欢深色主题" 的 embedding 相似度极高。**记忆检索必须先按 scope/kind/时效硬过滤，再排序。**
+3. **把记忆当缓存** —— 缓存失效了回源（origin fetch：缓存里没有或已过期时，去后面的权威数据源真正取一次），记忆失效了没人知道，因为记忆没有"源"可回。**任何有 TTL 语义的东西都不该进记忆系统。**
 4. **compaction 之后不外部化** —— 压缩掉的信息如果没有落到 `progress.md` / git commit / feature list 里，它就是**永久丢失**。Anthropic 的官方姿态是"外部化状态"优先于"更聪明的压缩"，理由正在于此。
 5. **记忆写入没有 eval 门禁** —— 上线三个月后你会有一个装满矛盾事实的库，而且没有任何指标下降来告诉你。**最低限度要监控：记忆条数增长率、`use_count == 0` 的占比（健康值 < 30%）、supersede 率（突增 = 抽取器坏了）。**
 
@@ -402,7 +451,7 @@ Checkpoint = {
 OTel GenAI 语义约定已经给记忆操作留了位置（⚠ 但**全部条目仍是 Development，0 项 GA**，2026-07-30 一手核实）：`gen_ai.operation.name` 的取值枚举里包含 `create_memory` / `update_memory` / `upsert_memory` / `search_memory` / `delete_memory` / `create_memory_store` / `delete_memory_store`。
 
 务必注意两点：
-- **官方 `gen_ai.*` 命名空间里没有 cost 属性，也没有 tenant / user 属性**（新仓库 registry 原文明确提到这两类"notably absent"）。你要按租户归因（attribution）记忆成本，得自己加属性，跨平台不保证被识别。
+- **官方 `gen_ai.*` 命名空间里没有 cost 属性，也没有 tenant / user 属性**（新仓库 registry 原文明确提到这两类"notably absent"）。你要按租户归因（attribution：把一笔成本或一次调用准确算到具体某个租户/用户头上）记忆成本，得自己加属性，跨平台不保证被识别。
 - **内容类属性默认不采集**（`gen_ai.input.messages` 等是 Opt-In）。保持默认——一旦开了，你的 trace 平台就变成了一个需要执行删除权的个人数据副本。
 
 必须上的四个指标：
@@ -413,6 +462,14 @@ OTel GenAI 语义约定已经给记忆操作留了位置（⚠ 但**全部条目
 | `use_count == 0` 的记忆占比 | < 30% | 高 = 写入判据太松 |
 | supersede 率（新增中带 supersedes 的比例） | 稳定 | 突增 = 抽取器退化 或 正在被投毒 |
 | compaction 后的 cache 重建成本 / 节省 | > 1 | < 1 = 压得太频繁，见 §7 的账 |
+
+---
+
+## 这一章的三句话
+
+1. **"记忆"是四类要求完全不同的状态被一个词绑架了，第一步永远是拆词而不是选存储。** 任务状态是唯一必须强一致加 CAS 的一类，长期记忆最终一致就够，会话上下文只要能持久追加，而外部真相源根本不该被"记住" —— 能在 200 ms 内查到的东西写进记忆，只是在给自己制造一份会过期的错误副本。
+2. **能变成脚本、工具、lint 规则或 CI 检查的记忆，就不该留在记忆系统里。** 一条"记得先 build 再 test"的自然语言记忆，命中率取决于检索；一个把 `build && test` 写死的 Makefile，命中率是 100% —— 这是把非确定性换成确定性的免费午餐，也是判断一条记忆值不值得存的第一个筛子。
+3. **记忆是跨会话生效的持久写入，所以它的隔离等级要按数据库来设，不能按缓存来设。** 一次成功的记忆投毒会在此后每个新会话里自动生效，而当时那个注入源早已不在上下文里、排查时根本看不见；能救你的只有三样东西：写入路径上有确定性闸门、每条记忆都能溯源到具体某一轮、以及事件日志让你能整体回滚到投毒之前。
 
 ---
 

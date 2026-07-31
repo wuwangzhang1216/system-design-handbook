@@ -5,6 +5,36 @@
 
 ---
 
+## 读这道题之前
+
+**如果你是直接翻到这道题的**：正文里的 outbox、幂等键、watermark、租约都是当已知用的 —— 案例篇不再解释构件。第 2 题答不出，§3 那句"用两种完全不同的机制"你只会读成一句口号。
+
+**先确认你能回答这三个问题**
+
+1. 双写问题（dual-write）是什么？"先写业务库，再往 Kafka 发一条计量事件"，进程恰好死在两步之间会怎样？Outbox 是怎么把它变成一次写的？
+   答不出 → 先读 [`03-messaging-and-streams.md`](../01-building-blocks/03-messaging-and-streams.md) §4
+2. at-least-once 投递保证"不丢"，幂等键保证"不重"。那么漏计和重计分别该由这两件里的哪一件负责？为什么一个 exactly-once 同时解决两个，最后两个都保证不了？
+   答不出 → 先读 [01-fundamentals §5 幂等](../00-foundations/01-fundamentals.md)、[`03-messaging-and-streams.md`](../01-building-blocks/03-messaging-and-streams.md) §3
+3. 事件时间（event time）和处理时间（processing time）差在哪？watermark 判定的到底是什么，它一旦推过去，迟到的事件会怎么样？
+   答不出 → 先读 [`03-messaging-and-streams.md`](../01-building-blocks/03-messaging-and-streams.md) §6
+
+**这道题会用到的构件**
+
+| 构件 | 用在哪 | 详见 |
+|---|---|---|
+| Outbox、at-least-once、DLQ、背压 | §5 为什么日志不能当计费依据、Kafka 写不进去时返回 429 | [`03-messaging-and-streams.md`](../01-building-blocks/03-messaging-and-streams.md) §4、§5 |
+| 流处理窗口、watermark、迟到事件 | §6 迟到事件三选一、§7 聚合必须幂等可重跑 | [`03-messaging-and-streams.md`](../01-building-blocks/03-messaging-and-streams.md) §6 |
+| 幂等键的派生规则与去重窗口 | §6 幂等键由业务语义派生、32 天窗口那笔 154 GB 的账 | [01-fundamentals §5](../00-foundations/01-fundamentals.md)、[`02-billing-and-metering.md`](../03-saas-platform/02-billing-and-metering.md) §4 |
+| 租约（lease）与本地令牌 | §10 实时配额：超支上界 = 实例数 × MAX_LEASE | [`05-consensus-and-coordination.md`](../01-building-blocks/05-consensus-and-coordination.md) §4 |
+| 不可变原始层与重算 | §2 推论 2 永久保留原始事件、§9 出账重算的输入 | [`05-data-platform.md`](../02-architecture-patterns/05-data-platform.md) §2、§3 |
+
+**这道题的一句话本质**
+
+> **计费的正确性目标是不对称的，所以它必须由两套互不依赖的机制分别保证。**
+> 漏计靠 outbox + at-least-once 保证"一定送到"，重计靠业务语义派生的幂等键保证"不会算两次"。带着这句话往下读 —— 每见到一个组件就问一次："它在守漏计，还是在守重计？"两个都不守的，就是这道题的装饰品。
+
+---
+
 ## 1. 需求澄清（前 5 分钟）
 
 | 问题 | 为什么决定架构 |

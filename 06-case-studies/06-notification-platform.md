@@ -5,6 +5,36 @@
 
 ---
 
+## 读这道题之前
+
+**如果你是直接翻到这道题的**：这题的战场在扇出的速率控制上，正文默认你已经知道背压和重试放大是什么。第 1 题答不出，§4.2 那段 credit-based pull 你会看成一个写法偏好 —— 案例篇不再解释构件。
+
+**先确认你能回答这三个问题**
+
+1. 背压（backpressure）是什么？"worker 照常拉消息，被供应商 429 了就退避重试"，为什么反而会把下游打得更死？重试放大倍数怎么算？
+   答不出 → 先读 [01-fundamentals §6 背压](../00-foundations/01-fundamentals.md)、[`03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) §3
+2. 排队论：利用率 ρ 从 0.5 升到 0.9，排队后的总时长变成几倍？为什么"平均流量 926/s 就按 926/s 配容量"必然违反 p95 < 5 s？
+   答不出 → 先读 [`02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §3
+3. 写扩散和读扩散各把成本放在写路径还是读路径？"订阅者超过 10 万就换一种"的判据从哪来？
+   答不出 → 先读 [03-tradeoff-framework §3 常见取舍的量化表](../00-foundations/03-tradeoff-framework.md)
+
+**这道题会用到的构件**
+
+| 构件 | 用在哪 | 详见 |
+|---|---|---|
+| 背压、重试放大、重试预算 | §4.2 先要令牌再拉消息、§4.7 重试量 > 原始量 10% 即熔断 | [01-fundamentals §6](../00-foundations/01-fundamentals.md)、[`03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) §3 |
+| 隔板（bulkhead）与负载卸载 | §4.5 队列 / worker / 供应商子账号 / IP 池四层全分开 | [`03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) §5、§6 |
+| 排队论与利用率上限 | §4.5 交易类 ρ < 0.5 是 SLO 的价格 | [`02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §3 |
+| 幂等键、at-least-once、DLQ | §4.3 三种"重复"三种解法、扇出块 `(campaign_id, chunk_idx)` | [01-fundamentals §5](../00-foundations/01-fundamentals.md)、[`03-messaging-and-streams.md`](../01-building-blocks/03-messaging-and-streams.md) §5 |
+| 写扩散 vs 读扩散的成本交点 | §4.2 3,000 万人的广播不该产生 3,000 万行收件箱 | [03-tradeoff-framework §3](../00-foundations/03-tradeoff-framework.md) |
+
+**这道题的一句话本质**
+
+> **扇出速率不由你的 worker 数决定，由下游供应商的配额决定；而交易类和营销类必须在物理层面隔离。**
+> 前半句让"加 100 个 worker"在这题里变成最没用的一种扩容，后半句让"一个队列加优先级字段"变成错的。带着这句话往下读 —— 每见到一个组件就问一次："它是在给谁让路，还是在被谁挤掉？"
+
+---
+
 ## 1. 需求澄清：我会问的 12 个问题
 
 | # | 问题 | 假设答案 | 为什么这个答案改变架构 |

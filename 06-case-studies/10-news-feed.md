@@ -5,6 +5,36 @@
 
 ---
 
+## 读这道题之前
+
+**如果你是直接翻到这道题的**：这题的全部推导都从"写可以异步、读不行"这一条长出来。第 1 题答不出，正文那个成本交点公式你只能背，不能用 —— 而面试里被追问的恰好是怎么用它。
+
+**先确认你能回答这三个问题**
+
+1. 写扩散（fan-out on write）和读扩散（fan-out on read）分别把成本压在哪一端？为什么"写可以异步、削峰、排队，读不行"？
+   答不出 → 先读 [`00-foundations/00-concepts.md` §1 §8](../00-foundations/00-concepts.md)（关键路径、同步 vs 异步）
+2. 并发扇出到 15 个后端并等全部返回，单后端 p99 = 5 ms，"至少撞上一个慢的"概率是多少？
+   答不出 → 先读 [`00-foundations/01-fundamentals.md` §7](../00-foundations/01-fundamentals.md)（尾延迟放大）
+3. 什么叫"读模型（read model）"？"这份数据丢了可以从真相源完整重建"这句话，会松掉它的哪些设计约束？
+   答不出 → 先读 [`02-architecture-patterns/02-event-driven-and-cqrs.md` §5](../02-architecture-patterns/02-event-driven-and-cqrs.md)
+
+**这道题会用到的构件**
+
+| 构件 | 用在哪 | 详见 |
+|---|---|---|
+| 峰谷比、写放大 / 读放大、成本建模 | §2 同时算出 34 万写/s 与 1,400 万读/s —— 混合方案的全部依据 | [`00-foundations/02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §1 §2 §6 |
+| 读模型 / 物化视图 / CQRS 的滞后 | §3 "收件箱是读模型，不是真相源" | [`02-architecture-patterns/02-event-driven-and-cqrs.md`](../02-architecture-patterns/02-event-driven-and-cqrs.md) §5 |
+| 队列的优先级、consumer lag、背压 | §3 fast / normal / bulk 三条扇出车道；§5 队列被大 V 堵死 | [`01-building-blocks/03-messaging-and-streams.md`](../01-building-blocks/03-messaging-and-streams.md) §1 §5 §8 |
+| 缓存分层、热 Key、cache stampede | §4.3 内容对象缓存 95% 命中；爆款帖击穿 | [`01-building-blocks/02-caching.md`](../01-building-blocks/02-caching.md) §3 §4 |
+| 尾延迟放大、超时与部分结果、优雅降级 | §4.3 归并 80 ms 硬超时 + `partial=true`；§5 降级到纯 pull | [`05-reliability/03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) §2 §7 |
+
+**这道题的一句话本质**
+
+> **收件箱是一个可以随时丢弃并重建的读模型，不是真相源。**
+> 它只存 `(post_id, author_id, score)` 二十四个字节，所以删帖、编辑、改隐私、封禁全都是 O(1)；而大 V 之所以必须走一条独立的物理路径，理由不是成本（成本交点里粉丝数会被约掉），是**一条帖的扇出会吃掉所有其他人的新鲜度预算**。
+
+---
+
 ## 0. 45 分钟怎么分配这道题
 
 | 分钟 | 做什么 | 这一段的得分点 |
@@ -50,7 +80,8 @@
     峰谷比（peak-to-average ratio）3× → 约 7 万 QPS 峰值
     每次返回 20 条 → 内容对象读 = 140 万 次/s（这才是真正的读压力）
 写：5,000 万 帖/天 = 578 QPS 均值 × 3 = 约 1,700 QPS 峰值
-    ⇒ 发帖本身不是容量问题。容量问题全部来自它引发的扇出（fan-out）
+    ⇒ 发帖本身不是容量问题。容量问题全部来自它引发的扇出
+      （fan-out：一次写触发 N 次下游写，这里 N = 作者的粉丝数）
 ```
 
 ### 2.2 两个极端的写放大 / 读放大（这一步是整道题的支点）
@@ -117,6 +148,10 @@
                                                       │
                                               ZADD inbox:{follower_id} score post_id
  读 ─▶ Feed Svc ─▶ ZREVRANGE inbox:{uid} 0 19 ─▶ MGET 内容 ─▶ 返回
+
+ （ZADD / ZREVRANGE：Redis 有序集合 ZSET 的写入与倒序范围读 —— 每个成员带一个
+   score，集合永远按 score 排好序，取"最新 20 条"就是一次 O(log N) 的范围读；
+   MGET：一次取多个 key，把 20 次往返压成 1 次）
 ```
 
 这个版本 p95 约 20 ms，代码两百行，**在 5,000 万用户以下完全正确**。它的死法只有一个，但足够致命：`1.5 亿粉 ÷ 10 万写/s = 1,500 秒`。一个账号发一条推文，普通用户的时间线停更 25 分钟。
@@ -142,7 +177,8 @@
                         ZADD inbox:{fid} + 概率裁剪到 200 条
 
                         ┌──────────────── 读路径 ────────────────┐
- 读 ─▶ Feed Svc ─┬─▶ ① ZREVRANGEBYSCORE inbox:{uid} (cursor -inf LIMIT 0 30   ← over-fetch 1.5×
+ 读 ─▶ Feed Svc ─┬─▶ ① ZREVRANGEBYSCORE inbox:{uid} (cursor -inf LIMIT 0 30
+                 │      ↑ 要 20 条却取 30 条 = over-fetch 1.5×，多取的 50% 是留给读时过滤的余量
                  ├─▶ ② 关注的 pull 源（p50 3 个 / p95 15 / p99 60）并发取 20 条
                  │      超时 80 ms，超时即返回部分结果并置 partial=true
                  ├─▶ ③ 归并（按 score 降序）+ 按 post_id 去重 + 转发折叠
@@ -201,7 +237,7 @@ pull 成本/天 = αF × R × C_r        C_r = 一次"取该作者最近 20 条"
 > "大 V 的阈值我不拍数字，我从两个互相独立的闸门算出来。成本闸：把 push 和 pull 的成本写成等式，粉丝数会从两边同时消掉 —— 交点只取决于发帖频率和读频率的比值，实测落在 60 帖/天。毒性闸：单帖扇出不能占用超过 20% 的扇出吞吐超过 5 秒，反推是 30 万活跃粉丝，按 20% 活跃率就是 150 万总粉丝。**粉丝数管的不是成本，是队列公平性** —— 这就是为什么一个判据不够。"
 > "I don't hand-pick the celebrity threshold — I derive it from two independent gates. The cost gate: write out push cost equals pull cost, and follower count cancels from both sides. The crossover only depends on the ratio of posting rate to read rate, and it lands around sixty posts a day. The toxicity gate: no single post's fan-out may hold more than twenty percent of fan-out throughput for more than five seconds, which works back to three hundred thousand active followers, or one and a half million total at a twenty percent active rate. Follower count doesn't govern cost — it governs queue fairness. That's exactly why one criterion isn't enough."
 
-**这个阈值对应多少个账号？** 用 Zipf（`followers(rank) ≈ 1.5 亿 / rank^0.8`）拟合：`rank^0.8 = 100 → rank ≈ 316`。**只有约 316 个账号越线**，它们吃掉 16.2 亿条关注边（占全部的 1.6%）。所以人均 200 个关注里命中大 V 的是 `200 × 1.6% ≈ 3.2 个` —— 这就是读路径 p50 只有 3 个 pull 源的来源。
+**这个阈值对应多少个账号？** 用 Zipf 分布（第 k 名的量 ≈ 头名 ÷ k^α —— 粉丝数、访问热度这类"头部极重、尾部极长"的量都近似服从它）拟合（`followers(rank) ≈ 1.5 亿 / rank^0.8`）：`rank^0.8 = 100 → rank ≈ 316`。**只有约 316 个账号越线**，它们吃掉 16.2 亿条关注边（占全部的 1.6%）。所以人均 200 个关注里命中大 V 的是 `200 × 1.6% ≈ 3.2 个` —— 这就是读路径 p50 只有 3 个 pull 源的来源。
 
 **什么条件下改选另一个**：如果直方图头部更重（短视频平台常见：头部 2% 的账号吃掉 40% 关注边），p95 的 pull 源会从 15 涨到 80，归并会退化。那时的正确动作**不是调阈值**（调高会让毒性闸失效），而是给重度用户加**预归并缓存**：把 `merged_celeb:{uid}` 缓存 30 s。命中率取决于会话内翻页次数，实测 40–60%。
 
@@ -282,7 +318,9 @@ cursor = base64( score_ms : post_id )   单调、无状态、可跨源共用
                                                           │
    ⑤ 读时过滤 ◀───────────────────────────────────────────┘
      ├─ viewer 的取关 / 拉黑 / 静音集合（请求开始时一次拉取，缓存 60 s，p99 < 500 条）
-     ├─ 全局封禁作者（Bloom filter 广播，100 万账号 ≈ 1.2 MB，本地驻留，秒级更新）
+     ├─ 全局封禁作者（Bloom filter：位数组，只回答"肯定没被封"或"可能被封"，
+     │                 有误判无漏判，误判的那条再查一次权威表即可
+     │                 广播，100 万账号 ≈ 1.2 MB，本地驻留，秒级更新）
      ├─ 帖子 deleted_at / privacy_level（随内容 MGET 一起返回，不额外查）
      └─ 输出 < 20 条 → 回到 ① 再取一页，**最多 2 轮**，之后返回不足并标记 partial
                                                           │
@@ -371,7 +409,7 @@ cursor = base64( score_ms : post_id )   单调、无状态、可跨源共用
 
 | 变更 | 收件箱要动吗 | 读时怎么处理 | 生效延迟 | 生效延迟由谁决定 |
 |---|---|---|---|---|
-| 删帖 | ❌ 不动 | MGET 返回墓碑（tombstone）→ 跳过并补位 | < 1 s | 内容缓存的主动 purge，不是 TTL |
+| 删帖 | ❌ 不动 | MGET 返回墓碑（tombstone：内容已被清空、只剩"这条已删"标记的占位对象）→ 跳过并补位 | < 1 s | 内容缓存的主动 purge，不是 TTL |
 | 编辑帖 | ❌ 不动 | MGET 拿到的天然是最新版 | < 内容缓存 TTL（60 s） | 写后 delete 缓存键 |
 | 改隐私（公开 → 仅粉丝） | ❌ 不动 | 读时按 viewer 与当前 ACL 判定 | < 1 s | 隐私字段随内容对象一起失效 |
 | 作者被封禁 | ❌ 不动 | 全局封禁 Bloom filter 本地驻留 → 整块跳过 | < 5 s | Bloom 广播周期 |
@@ -469,7 +507,7 @@ v3 ── 多路召回 + 算法排序 ──────────────
 | 读模型 / 物化视图 / CQRS | [`02-architecture-patterns/02-event-driven-and-cqrs.md`](../02-architecture-patterns/02-event-driven-and-cqrs.md) | §3 "收件箱是读模型，不是真相源" |
 | 超时、部分结果、优雅降级、熔断 | [`05-reliability/03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) | §4.3 归并超时；§5 降级到纯 pull |
 | 撞墙信号与演进节奏；SLO 与新鲜度预算 | [`05-reliability/05-scaling-playbook.md`](../05-reliability/05-scaling-playbook.md)、[`01-slo-and-error-budget.md`](../05-reliability/01-slo-and-error-budget.md) | §6 触发条件；§4.1 用 5 s SLO 反推阈值 |
-| 推送通知与预生成；本题的压缩版 | [`06-notification-platform.md`](06-notification-platform.md)、[`07-classic-canon.md` §3](07-classic-canon.md) | §4.3 通知触发的 feed 预生成；复习用 |
+| 推送通知与预生成；本题的压缩版 | [`06-notification-platform.md`](06-notification-platform.md)、[`07-classic-canon.md` 第 3 题](07-classic-canon.md) | §4.3 通知触发的 feed 预生成；复习用 |
 
 ---
 

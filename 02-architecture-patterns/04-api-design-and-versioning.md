@@ -5,6 +5,50 @@
 
 ---
 
+## 读这一章之前
+
+**你在工作中遇到过这个**
+
+你给订单状态加了一个新的枚举值 `chargeback`，评审会上所有人都同意"只是加个取值，不算破坏性变更"。
+灰度 20 分钟后，某个大客户的告警群炸了：他们的 SDK 用穷举 `switch` 匹配状态、没有兜底分支，收到未知值直接抛异常，整条对账链路停摆。
+你回滚了，可那 20 分钟里没被处理的回调得你写脚本一条条补回去 —— 更糟的是，你现在不知道还有哪几个客户是同样的写法。
+
+**需要先懂的概念**
+
+| 概念 | 一句话 | 详见 |
+|---|---|---|
+| 幂等 | 同一个操作执行多次，效果和执行一次相同 | [00-concepts §12](../00-foundations/00-concepts.md)、[00/01 §5](../00-foundations/01-fundamentals.md) |
+| 超时 / 重试 / 退避 | 网络超时后你分不清"请求丢了"还是"响应丢了"，所以一定会重试 | [00/01 §9](../00-foundations/01-fundamentals.md) |
+| 复制延迟与最终一致 | 刚写进主库的数据，从副本上可能还读不到 | [00-concepts §6](../00-foundations/00-concepts.md) |
+| 分位数 p99 | 排序后第 99% 位置的那个耗时，决定"最倒霉那批用户"的体验 | [00-concepts §3](../00-foundations/00-concepts.md) |
+| 背压与限流 | 处理不过来时要往上游反向施压，而不是无限排队 | [00/01 §6](../00-foundations/01-fundamentals.md) |
+
+**这一章要回答的问题**
+
+1. 已经有几百个客户在用的 API，怎么在不打断任何一个人的前提下改它的形状？
+2. 客户端超时后重发了同一笔支付，我凭什么保证不会扣两次钱？
+3. 分页翻到第 10,000 页为什么会又慢又漏行？公开 API 该给客户端什么形式的"下一页"？
+4. 流式响应已经把 HTTP 200 发出去了，中途模型服务过载，我要怎么告诉客户端？
+
+**本章新引入的术语**
+
+| 术语 | English | 一句话定义 |
+|---|---|---|
+| 破坏性变更 | breaking change | 一次服务端改动，让不改代码的已有客户端从"能工作"变成"报错或行为不对" |
+| 不透明游标 | opaque cursor | 服务端生成、客户端只能原样回传的"下一页位置"字符串，内部结构不对外承诺 |
+| keyset 分页 | keyset / seek pagination | 用"上一页最后一行的排序键值"作为下一页起点，而不是"跳过前 N 行" |
+| 全序 | total order | 一种排序方式，任意两行都能分出先后，不存在两行完全并列 |
+| Problem Details | problem+json (RFC 9457) | HTTP 错误响应的标准 JSON 结构，固定含 type / title / status / detail 四个成员 |
+| 可重试性标注 | retryability | 服务端在错误响应里显式告诉客户端"这个错误再试一次有没有意义" |
+| 枚举炸弹 | enum bomb | 服务端给枚举加了一个新取值，把所有做了穷举分支的客户端打崩 |
+| 日期版本头 | dated version header | 用 `2023-06-01` 这样的日期做 API 版本号、放在请求头里，可按账号单独固定 |
+| brownout | brownout | 下线一个旧版本之前，每天故意让它在固定的几分钟里返回错误，逼没迁移的客户暴露出来 |
+| 长任务 | long-running operation | 立刻返回一个任务 ID、让客户端随后自己查状态的接口形态，用于耗时几十秒以上的操作 |
+| 带内错误 | in-band error | HTTP 状态码和响应头已经发出去之后，只能把错误当作流里的一条数据再发给客户端 |
+| 瘦载荷 / 胖载荷 | thin / fat payload | webhook 里只带资源 ID 让消费者回读 / 直接带上资源的完整状态 |
+
+---
+
 ## 1. 协议选型：三分钟决策
 
 | 维度 | REST / JSON | gRPC | GraphQL |
@@ -14,9 +58,9 @@
 | 可缓存性（cacheability）/ 调试 | **HTTP 缓存全套可用** / curl | 基本无（都是 POST）/ grpcurl | 差 / playground |
 | 适用 | 公开 API、合作伙伴 | **内部东西向（east-west traffic）**、移动端长连接 | BFF、字段需求高度可变的前端 |
 
-**默认选择**：公开/合作伙伴 API → REST + OpenAPI；内部东西向 → gRPC；前端聚合 → BFF 或 GraphQL；LLM 推理 → REST + SSE（§10）；异步见 [messaging](../01-building-blocks/03-messaging-and-streams.md)。
+**默认选择**：公开/合作伙伴 API → REST + OpenAPI；内部东西向（**east-west** = 服务与服务之间的内部调用，区别于用户从外面打进来的**南北向 north-south**）→ gRPC；前端聚合 → **BFF**（backend for frontend：为某一个前端形态专门做的聚合层，一个前端一份）或 GraphQL；LLM 推理 → REST + **SSE**（Server-Sent Events：服务端在一条长连接上单向、持续地推文本事件，下面 §10 展开）；异步见 [messaging](../01-building-blocks/03-messaging-and-streams.md)。
 
-**反直觉的一条**：GraphQL 不是"更好的 REST"，它是**把查询规划的责任从服务端转移给了客户端**。代价是 N+1 跑到 resolver 层（必须上 DataLoader）、限流单位从"请求数"变成"查询复杂度（query complexity）"（你要先写复杂度计算器，典型上限深度 ≤ 10 / 复杂度分 ≤ 1000）、HTTP 缓存基本失效。只有当「前端形态高度可变 + 后端数据源多 + 前端团队比后端团队大」三条同时成立时才值。
+**反直觉的一条**：GraphQL 不是"更好的 REST"，它是**把查询规划的责任从服务端转移给了客户端**。代价是 N+1（取回 N 条记录后又为每条各发一次查询，一共 N+1 次）跑到 resolver 层（必须上 DataLoader）、限流单位从"请求数"变成"查询复杂度（query complexity）"（你要先写复杂度计算器，典型上限深度 ≤ 10 / 复杂度分 ≤ 1000）、HTTP 缓存基本失效。只有当「前端形态高度可变 + 后端数据源多 + 前端团队比后端团队大」三条同时成立时才值。
 
 ---
 
@@ -33,7 +77,7 @@
 **七条硬规则**：
 
 1. **嵌套不超过两层**。再深就用顶层资源 + 过滤：`/items?order_id=7`。
-2. **ID 用带前缀的不透明字符串（opaque ID）**：`msg_01J8XQ...`（ULID/UUIDv7 + 类型前缀）。自增整数（auto-increment integer）会泄露业务量（竞对注册两个账号就能算出你的日增），也让分库分表（sharding）变难；前缀让误传的参数在校验层就被拒。
+2. **ID 用带前缀的不透明字符串（opaque ID）**：`msg_01J8XQ...`（ULID/UUIDv7 + 类型前缀。这两种 ID 的共同点是**前缀是时间戳**，所以既全局唯一又能按生成时间排序，可以直接当主键而不打散索引）。自增整数（auto-increment integer）会泄露业务量（竞对注册两个账号就能算出你的日增），也让分库分表（sharding）变难；前缀让误传的参数在校验层就被拒。
 3. **动作用子资源 POST**，不要发明 `PUT /orders/7?action=cancel`。
 4. **标量约定**：时间一律 RFC 3339 UTC 带毫秒（`2026-07-30T11:02:03.412Z`）；金额用最小单位整数（minor units）+ 币种（`{"amount":1250,"currency":"USD"}`）或字符串 decimal，**永远不要用浮点表示钱**。
 5. **枚举（enum）全小写下划线**，并在契约（contract）里写死"客户端 MUST 把未知枚举当 `unknown` 处理"（见 §7 枚举炸弹）。
@@ -74,12 +118,12 @@ request-id: req_01J8XQ7YB3F0KJ2M
 |---|---|---|
 | 400 / 422 参数错 | ❌ | 重试只浪费配额 |
 | 401 / 403 认证授权 | ❌ | 例外：token 过期（用 `code` 区分 `auth.token_expired`，可重试一次） |
-| 404 不存在 | ❌ | 例外：**读己之写（read-your-writes）场景可重试 1 次**（复制延迟 replication lag） |
-| 409 冲突 | ⚠️ 分情况 | 乐观锁（optimistic locking）版本冲突 → 重读后重试；幂等键（idempotency key）冲突 → **绝不重试** |
+| 404 不存在 | ❌ | 例外：**读己之写（read-your-writes：自己刚写完的东西，自己再读一定读得到）场景可重试 1 次** —— 写落在主库、读打到了从副本，从副本还没追上，这段差距叫**复制延迟（replication lag）**，见 [00-concepts §6](../00-foundations/00-concepts.md) |
+| 409 冲突 | ⚠️ 分情况 | 乐观锁（optimistic locking：不加锁，提交时用版本号检查有没有被别人改过，见 [00-concepts §7](../00-foundations/00-concepts.md)）版本冲突 → 重读后重试；**幂等键**（idempotency key：客户端生成、服务端拿它给重试去重的请求标识，见 [00/01 §5](../00-foundations/01-fundamentals.md)，本篇 §5 展开）冲突 → **绝不重试** |
 | 408 / 499 超时或断开 | ✅ | **必须带幂等键**，否则可能重复扣款 |
 | 429 超配额 | ✅ | 必须遵守 `Retry-After` |
 | 500 内部错误 | ✅ | 必须带幂等键 |
-| 502 / 503 / 504 上游或容量 | ✅ | 退避 + 抖动（backoff + jitter） |
+| 502 / 503 / 504 上游或容量 | ✅ | 退避 + 抖动（backoff + jitter：每次重试等得更久，且等待时间随机打散，防止所有客户端同一刻一起回来，见 [00/01 §9](../00-foundations/01-fundamentals.md)） |
 | 529 服务过载（Anthropic 用此码） | ✅ | 与 429 的区别：**不是你的错，是我们容量不够** |
 
 > **面试金句**：
@@ -155,7 +199,7 @@ payload = {
 响应里给 `next` 的**完整 URL**（不是让客户端自己拼参数），这样你以后换分页参数名不用改客户端：
 `{"data":[...], "has_more":true, "next":"https://api.acme.dev/v1/events?...&cursor=eyJ2..."}`
 
-**不要返回 `total_count`。** 千万行表上带同样 WHERE 的 `COUNT(*)` 是一次全索引扫描（full index scan，几百 ms 到几秒），而 99% 的客户端只是把它渲染成一个没人看的数字。真要给就给 `total_count_estimate`（`pg_class.reltuples` 或采样）并标注是估算。
+**不要返回 `total_count`。** 千万行表上带同样 WHERE 的 `COUNT(*)` 是一次全索引扫描（full index scan：把整个索引从头到尾读一遍才能数清有多少行，几百 ms 到几秒），而 99% 的客户端只是把它渲染成一个没人看的数字。真要给就给 `total_count_estimate`（`pg_class.reltuples` 或采样）并标注是估算。
 
 ---
 
@@ -210,6 +254,8 @@ delay = min(cap, base * 2**attempt) * random.uniform(0.5, 1.0)   # 全抖动
 delay = max(delay, retry_after_from_header)                       # 服务端说了算
 # 总重试预算：retries / requests < 10%，超了就熔断（见 05-reliability/03）
 ```
+
+（**熔断 circuit breaker**：错误率超过阈值后的一段时间内，客户端**直接快速失败、一个请求都不发给下游**，冷却期过了再试探性放几个过去。它和限流的区别是：限流说的是"我只让你发这么多"，熔断说的是"我现在一个都不发"。）
 
 ---
 
@@ -297,6 +343,8 @@ Link: <https://docs.acme.dev/migrate/v1-to-v2>; rel="deprecation"; type="text/ht
 4. **三种通知方式全都要有**：webhook 是主路径，轮询是兜底（webhook 端点挂了也能拿到结果），SSE 给 UI。只做一种都会被投诉。
 5. **`/cancel` 必须幂等**，且要区分 `cancelling` 与 `cancelled`。取消是异步的。
 
+（图里那个 `result_url` 用的是**预签名 URL**（presigned URL）：一条带签名和过期时间的临时下载链接，拿到它的人在有效期内不需要再带任何凭证就能下载 —— 所以有效期要短，且链接本身要当敏感信息对待。）
+
 **注意**：MCP 在 [2026-07-28 规范](https://modelcontextprotocol.io/specification/2026-07-28/changelog)里把长任务从阻塞式 `tasks/result` 改成轮询 `tasks/get`，并把 Tasks 移出核心变成扩展。方向和上面一致：**长耗时操作不要押在长连接上**。
 
 ---
@@ -333,7 +381,7 @@ signature      = base64(HMAC-SHA256(secret, signed_payload))
 | 你的读流量 / 泄露面 | 无额外 / 大（端点被劫持即泄露数据） | **+1 次/事件** / 小（回读要鉴权） |
 
 金融/合规选瘦载荷，其余选胖载荷 + 版本号。**两个必做项**：
-- **SSRF 防护**：用户注册的端点 = 允许用户让你的服务器向任意地址发 POST。解析后校验 IP，拒绝 RFC 1918 / 169.254.169.254 / ::1（防 DNS rebinding：解析一次后直连该 IP）；禁止跟随重定向；走独立出口代理，超时 3–5 秒。
+- **SSRF 防护**（server-side request forgery：诱使**你的服务器**去访问它本不该访问的地址 —— 通常是内网服务或云厂商的元数据接口）：用户注册的端点 = 允许用户让你的服务器向任意地址发 POST。解析后校验 IP，拒绝 RFC 1918 / 169.254.169.254 / ::1（防 DNS rebinding：同一个域名第一次解析出公网 IP 骗过校验、真正连接时再解析成内网 IP —— 所以要解析一次后直连该 IP）；禁止跟随重定向；走独立出口代理，超时 3–5 秒。
 - **投递日志（delivery log）是一等资源**：`GET /v1/webhook_deliveries?status=failed` + `POST /v1/webhook_deliveries/{id}/replay`。没有它，每次客户说"我没收到"都要你去查日志。这是投入产出比最高的一个端点。
 
 ---
@@ -393,7 +441,7 @@ data: {"type":"message_stop"}
 2. **工具参数是分片的 JSON 字符串**（`input_json_delta.partial_json`），只有 `content_block_stop` 之后才是合法 JSON。**不要对半截 JSON 做增量解析然后触发副作用** —— 你会渲染出 `{"tenant`，更糟的是可能用错误参数提前触发工具执行。
 3. **用量分两处回传**：`message_start` 给输入侧（含缓存读/写），`message_delta` 给输出侧 —— 因为开始时还不知道会输出多少。
 4. **HTTP 200 一旦刷出就不能再改状态码。** 中途失败只能发带内错误（in-band error）事件（`event: error` + `{"type":"error","error":{...}}`）。推论：**限流、鉴权、参数校验必须在开流之前完成**；开流后才发现超配额，你只能发一个客户端多半没处理的事件。
-5. **`: keepalive` 注释行是必须的，不是可选优化。** ALB/Cloudflare/企业代理的空闲超时在 60–100 s，而长 prefill 有几秒到几十秒完全无输出。
+5. **`: keepalive` 注释行是必须的，不是可选优化。** ALB/Cloudflare/企业代理的空闲超时在 60–100 s，而长 prefill（模型吐出第一个 token 之前，先把整段输入上下文完整过一遍的阶段；输入越长它越久）有几秒到几十秒完全无输出。
 6. **断流即丢。** 除非实现了 `Last-Event-ID` 恢复，否则连接断了整个请求作废。MCP 在 2026-07-28 规范里**主动删除了** SSE 断线续传（stream resumption），要求客户端用新 request id 重发 —— 这是明确的"不要在流协议里做可靠性"信号。可靠性属于长任务 API（§8），不属于流。
 
 ### b) 工具调用的形状对称性
@@ -430,13 +478,13 @@ data: {"type":"message_stop"}
 
 **`request-id` 必须出现在所有响应上**（包括错误与流式响应，在 header 里、body 之前）。可复现的最小记录集：`request_id, model_version, prompt_template_version, tool_schema_hash, temperature, top_p, seed, 上下文 token 数, 检索到的文档 ID 列表`。
 
-⚠️ **不要承诺"相同输入 → 相同输出"**（浮点非结合性 + 批处理组成变化 + MoE 路由，即使 temperature=0 也做不到）。承诺"**相同 request_id → 相同的已记录响应**"，即从日志回放（replay）而非重新推理。这个区别在合规场景要写进合同。
+⚠️ **不要承诺"相同输入 → 相同输出"**（浮点非结合性 + 批处理组成变化 + MoE 路由 —— MoE 指模型内部按每个 token 动态挑一小部分"专家"子网络来算，而挑的结果会受同一批次里其他请求的影响；即使 temperature=0 也做不到）。承诺"**相同 request_id → 相同的已记录响应**"，即从日志回放（replay）而非重新推理。这个区别在合规场景要写进合同。
 
 ### e) 把性能旋钮做进契约的代价
 
 Anthropic 的 `cache_control: {"type":"ephemeral"}` 把"在哪里切缓存断点"变成了 API 字段。收益是客户端能精确控制成本；代价是"**最多 4 个 breakpoint、每个只回看 20 个 content block**"这类实现细节成了公开契约，以后想换实现就是破坏性变更。
 
-MCP 2026-07-28 规范把同一类东西做成了服务端声明：`tools/list` 等结果必须带 `ttlMs` 与 `cacheScope`（`public`/`private`），POST 必须带 `Mcp-Method` / `Mcp-Name` 头**让网关不解 body 就能路由**，且建议 `tools/list` 返回确定性顺序（顺序一变，下游的 prompt cache 全废）。三条可迁移的原则：
+MCP 2026-07-28 规范把同一类东西做成了服务端声明：`tools/list` 等结果必须带 `ttlMs` 与 `cacheScope`（`public`/`private`），POST 必须带 `Mcp-Method` / `Mcp-Name` 头**让网关不解 body 就能路由**，且建议 `tools/list` 返回确定性顺序（**prompt cache**：把请求里重复的那段前缀上下文在服务端缓存住，命中就不必重算、也少收一份钱；判定命中靠的是**前缀逐字节相同** —— 所以顺序一变，下游的 prompt cache 全废）。三条可迁移的原则：
 
 > **① 路由信息放头里，不放 body 里** —— 否则每一层代理都要解析并信任 body。
 > **② 缓存性由服务端声明，不由客户端猜** —— 客户端猜错的代价是脏数据。
@@ -456,12 +504,20 @@ MCP 2026-07-28 规范把同一类东西做成了服务端声明：`tools/list` �
 | **在同步请求里做超过 10 s 的事** | 会被 LB 静默切断，客户端无法区分"超时"和"失败"。用 202 + 状态资源 |
 | **webhook 端点不验签** | 任何人都能伪造事件。HMAC + 时间戳容差 + 恒定时间比较 |
 | **枚举穷举 switch** | 服务端加一个值就崩。未知值走 `unknown` 分支 + canary 枚举提前暴露 |
-| **公开 GraphQL 不限复杂度** | 一个嵌套查询打爆你。深度/复杂度上限 + persisted query 白名单（allowlist） |
+| **公开 GraphQL 不限复杂度** | 一个嵌套查询打爆你。深度/复杂度上限 + persisted query 白名单（allowlist；persisted query = 客户端只能提交服务端事先登记过的查询、用哈希来引用，于是你重新知道了"每个查询要花多少钱"） |
 | **对 LLM API 承诺 deterministic output** | 物理上做不到。承诺"可回放"，不承诺"可复算" |
 
 **最后一条，也是最重要的一条**：
 
 > 不要为"未来可能的需求"设计通用性。一个能表达任意查询的 `POST /v1/query` 端点在设计评审上很好看，在生产上会变成：无法限流（不知道代价）、无法缓存（不知道键）、无法弃用（不知道谁在用什么）、无法演进（任何行为改变都可能破坏某个组合）。**API 的表达力上限，应该等于你能承诺 SLO 的上限。**
+
+---
+
+## 这一章的三句话
+
+1. **API 的兼容性不由规范定义，由最粗心的那个客户端定义。** "新增一个枚举值"在规范上是纯加法，在对方的穷举 `switch` 里是一次崩溃 —— 所以判断破坏性变更时，问的不是"我删东西了吗"，而是"有没有一种合理的客户端写法会因此挂掉"。
+2. **幂等失效几乎从来不是服务端的锅，是客户端在重试循环里重新生成了 key。** 幂等键必须由业务语义派生、在第一次尝试之前就持久化，而这件事只能由 SDK 替客户端做 —— 写在文档里等于没做。
+3. **弃用一个版本时，只有 brownout 真正起作用。** 邮件、`Deprecation` 头、控制台横幅都不会进对方的告警系统，"每天固定 5 分钟报错"会；而关门的判据永远是"过去 30 天用过它的独立客户端数"，不是流量占比。
 
 ---
 

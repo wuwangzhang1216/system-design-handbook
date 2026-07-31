@@ -5,6 +5,38 @@
 
 ---
 
+## 读这道题之前
+
+🔶 **这道题属于 AI 岗方向**：通用 full-stack / 后端面试路径（[README 路径 A / B](../README.md#学习路径)）可以整题跳过 —— 判断依据和 [`04-ai-agent-systems/`](../04-ai-agent-systems/) 一致：JD 里出现「LLM / Agent / 推理 / RAG / GPU」中任意一个词，它才从"可跳过"变成"面试官的主场"（路径 C）。
+
+**如果你是直接翻到这道题的**：这题是一道披着 ANN 外衣的多租户存储题。答不出第 1 题，你会拿均值去做容量规划，然后正文里"长尾"这个词从头到尾都落不了地 —— 案例篇不再解释构件。
+
+**先确认你能回答这三个问题**
+
+1. 重尾（heavy-tailed）分布下，"平均每租户 5.6 万向量"这个均值为什么完全不能用来做容量规划？p50、均值、p99 在这里各自意味着什么？
+   答不出 → 先读 [00-concepts §3 p50 / p90 / p99](../00-foundations/00-concepts.md)、[02-capacity-estimation §7 估算中最常见的 6 个错误](../00-foundations/02-capacity-estimation.md)
+2. 多租户的四种隔离级别分别是什么？"共享一张表 + 查询里带 tenant_id"这一档，在向量检索里为什么比在 OLTP 里危险得多？
+   答不出 → 先读 [03-multi-tenancy §1 四种隔离级别](../02-architecture-patterns/03-multi-tenancy.md)、[§9 AI 场景的多租户新问题](../02-architecture-patterns/03-multi-tenancy.md)
+3. HNSW 的内存占用由哪几个参数决定？RAG 链路里召回（recall）和 rerank 各在补什么？没有 ground truth 的时候，你凭什么调这两个旋钮？
+   答不出 → 先读 [01-storage-engines §6 向量索引](../01-building-blocks/01-storage-engines.md)、[02-context-engineering-and-rag §5 检索流水线](../04-ai-agent-systems/02-context-engineering-and-rag.md)、[§12 检索评测](../04-ai-agent-systems/02-context-engineering-and-rag.md)
+
+**这道题会用到的构件**
+
+| 构件 | 用在哪 | 详见 |
+|---|---|---|
+| 向量索引（HNSW / IVF）、量化与内存账 | §2 内存账决定一切、§4 索引组织的核心分叉 | [`01-storage-engines.md`](../01-building-blocks/01-storage-engines.md) §6 |
+| 四种隔离级别、租户路由、巨型租户逃生舱 | §4 租户物理分组、§8 跨租户泄露的七条路径 | [`03-multi-tenancy.md`](../02-architecture-patterns/03-multi-tenancy.md) §1、§3、§8、§9 |
+| LSM 结构、三种放大、墓碑与 compaction | §6 增量插入 LSM 化、删除与 over-fetch | [`01-storage-engines.md`](../01-building-blocks/01-storage-engines.md) §2、§3 |
+| 检索流水线：混合检索、rerank、分层评测 | §7 延迟预算分解、混合检索是默认不是加分项 | [`02-context-engineering-and-rag.md`](../04-ai-agent-systems/02-context-engineering-and-rag.md) §5、§12 |
+| 冷启动、预热与惊群（thundering herd） | §5 把冷启动写进 SLO、预热与惊群 | [`02-caching.md`](../01-building-blocks/02-caching.md) §3、[`01-slo-and-error-budget.md`](../05-reliability/01-slo-and-error-budget.md) |
+
+**这道题的一句话本质**
+
+> **考的不是 ANN 算法，是长尾：1% 的租户装了 85.6% 的向量，99% 的租户贡献 99% 的索引对象、元数据行和固定成本。**
+> 所以架构必须按档位分治 —— 用同一套机制服务这两端，一定在某一端翻车。带着这句话往下读，每见到一个设计就问一次："它服务的是哪一档？另一档怎么办？"
+
+---
+
 ## 1. 需求澄清（前 5 分钟必须问出来的东西）
 
 | 问题 | 为什么决定架构 |

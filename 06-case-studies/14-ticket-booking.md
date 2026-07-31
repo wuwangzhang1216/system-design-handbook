@@ -5,6 +5,36 @@
 
 ---
 
+## 读这道题之前
+
+**如果你是直接翻到这道题的**：这题从头到尾在用三个构件（条件更新、边缘缓存、准入控制）。正文默认你知道它们是什么。
+
+**先确认你能回答这三个问题**
+
+1. 为什么"先 SELECT 查余量、判断够不够、再 UPDATE 扣减"放进事务里**仍然**会超卖？数据库的默认隔离级别挡住了什么、没挡住什么？
+   答不出 → 先读 [00-concepts §7 事务与隔离级别](../00-foundations/00-concepts.md)
+2. 缓存的 TTL 是什么？"允许数据陈旧 1–3 秒"为什么能把 10 Gbps 的回源变成 1 QPS？
+   答不出 → 先读 [`02-caching.md`](../01-building-blocks/02-caching.md) §1、§6
+3. Little's Law：等待室放行 2,000 人/s，你前面排了 10 万人，你要等多久？这个数字为什么必须给用户看见？
+   答不出 → 先读 [00-concepts §2 延迟 / 吞吐 / 并发](../00-foundations/00-concepts.md)
+
+**这道题会用到的构件**
+
+| 构件 | 用在哪 | 详见 |
+|---|---|---|
+| 条件更新 vs 分布式锁、fencing token | §4.1 占座语句、§4.2 三种实现、§4.3 为什么不用锁 | [`05-consensus-and-coordination.md`](../01-building-blocks/05-consensus-and-coordination.md) §3、§4 |
+| 隔离级别与并发扣减 | §4.2 悲观锁 / 乐观 CAS / 唯一约束的吞吐差 | [00-concepts §7](../00-foundations/00-concepts.md) |
+| CDN、缓存键、`stale-while-revalidate` | §4.4 第 0 层静态化：座位图与等待室位次 | [`02-caching.md`](../01-building-blocks/02-caching.md) §6 |
+| 负载卸载与准入控制 | §4.4 虚拟等待室 + 令牌准入 = 第 1、2 层漏斗 | [`03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) §6、§7 |
+| 幂等键与对账 | §4.5 支付回调迟到时的"复活"与三方比对 | [01-fundamentals §5](../00-foundations/01-fundamentals.md)、[`02-billing-and-metering.md`](../03-saas-platform/02-billing-and-metering.md) §4、§9 |
+
+**这道题的一句话本质**
+
+> **97% 的请求在物理上不可能成功，所以真正的战场在准入层，不在库存层。**
+> 而库存层要同时守住三个约束 —— 不超卖、不锁死、超时自动释放 —— 它们需要三个互不依赖的机制。读正文时随时问："这一段在守哪一条？"
+
+---
+
 ## 0. 45 分钟怎么分配这道题
 
 | 分钟 | 做什么 | 这一段的得分点 |
@@ -120,7 +150,7 @@
 
 1. **库存的唯一裁决者是数据库的一条条件语句**。应用层永不 `check-then-act`，永不加分布式锁。
 2. **正确性只依赖读时判定**。任何"必须有后台任务活着才正确"的设计，都是把可用性问题伪装成正确性问题。
-3. **准入层 fail-close**。它挂了就停售，不能放开 —— 见 §5。
+3. **准入层 fail-close**（依赖不可用时选择**拒绝**服务；反面是 fail-open —— 放行，见 [`03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) §6）。它挂了就停售，不能放开 —— 见 §5。
 4. **座位状态允许陈旧，座位归属不允许错**。这两件事走两条路径：前者走 CDN，后者走数据库。
 
 ---
@@ -218,7 +248,7 @@ RETURNING hold_id;
 > "分布式锁在这道题上是一个自我否定的方案。要让它安全，你必须配 fencing token；而 fencing token 的安全性来自**存储端的单调性检查**。你得先让存储层能做条件写 —— 可一旦它能做条件写，那把锁就没用了。锁在这里只贡献三样东西：一次额外的网络往返、一个新的单点故障、以及一个我答不上来的追问。"
 > "A distributed lock is self-defeating here. To make it safe you need a fencing token, and the fencing token's safety comes from a monotonicity check on the storage side. So you first have to give storage the ability to do a conditional write — and the moment storage can do conditional writes, the lock is redundant. All the lock adds is one extra round trip, one new single point of failure, and one interview question I can't answer."
 
-**什么条件下我会改口**：互斥必须**跨异构存储**成立 —— 座位在 Postgres、场馆通行证在另一个团队的服务里、两者必须同生共死，而你无法把它们合进一个事务。那时你需要的也**不是锁**，是 **Saga + 预留（reservation / TCC）**，见 [`02-event-driven-and-cqrs.md §2`](../02-architecture-patterns/02-event-driven-and-cqrs.md)。锁在这道题的任何版本里都不是答案。
+**什么条件下我会改口**：互斥必须**跨异构存储**成立 —— 座位在 Postgres、场馆通行证在另一个团队的服务里、两者必须同生共死，而你无法把它们合进一个事务。那时你需要的也**不是锁**，是 **Saga + 预留（reservation / TCC = Try-Confirm-Cancel：先在每个系统里"试占"一份，全部试占成功再统一确认，任一失败则各自取消）**，见 [`02-event-driven-and-cqrs.md §2`](../02-architecture-patterns/02-event-driven-and-cqrs.md)。锁在这道题的任何版本里都不是答案。
 
 ---
 
@@ -229,10 +259,12 @@ RETURNING hold_id;
 ```
 50 万人
  ├ 第 0 层 静态化（serve it from the CDN）TTL 1–3 s + stale-while-revalidate
+ │   （SWR：缓存过期后先把旧值返给用户、同时后台去回源刷新 —— 源站永远不被"过期瞬间"的并发打穿）
  │   挡掉 10 Gbps 座位图 + 10 万 QPS 位次轮询 → 源站只剩"取令牌"：50 万次
  ├ 第 1 层 虚拟等待室（virtual waiting room）全局 FIFO + 签名令牌 + 位次可见
  │   放行 2,000 人/s ← 阀门 → 累计 15 万人（= 库存 × 3），耗时 75 s
  ├ 第 2 层 令牌准入（token admission）令牌绑 user+event+admit_at+nonce，一次性
+ │   （nonce：一次性随机串，服务端用过即作废 —— 它让令牌不能被复制粘贴给第二个人用）
  │   → 到达库存层：15 万人 × 平均 1.5 次尝试 = 3,000 TPS，持续 75 s
  └ 第 3 层 库存条件更新：单主库上限 1–2 万 TPS ⇒ 余量 3–6 倍 ✅
      22.5 万次 UPDATE 里成功 5 万，其余全部返回"这个座位刚被选走"
@@ -245,7 +277,7 @@ RETURNING hold_id;
 
 1. **位次广播必须走 CDN**。50 万人每 5 s 问一次"轮到我了吗" = 10 万 QPS。做法：把"当前放行到第 N 号"写成 1 s TTL 的静态文件推到边缘，客户端拿自己的号本地比较，回源 1 QPS。
 2. **令牌必须签名并绑定身份**。不签名的令牌 = 黄牛直接构造请求跳过队列，整个准入层白做。
-3. **队列位次必须对用户可见**。看不见位次的队列会让用户疯狂刷新，正好抵消削峰。预计等待时间用 Little's Law 估：`等待 ≈ 前面的人数 / 放行速率`，见 [`02-capacity-estimation.md §3`](../00-foundations/02-capacity-estimation.md)。
+3. **队列位次必须对用户可见**。看不见位次的队列会让用户疯狂刷新，正好抵消削峰。预计等待时间用 Little's Law（并发 = 吞吐 × 停留时间，反解出停留时间）估：`等待 ≈ 前面的人数 / 放行速率`，见 [`02-capacity-estimation.md §3`](../00-foundations/02-capacity-estimation.md)。
 
 **自建还是买（2026）**：等待室的全部价值在于"位于你的源站之前"，而这正好是 CDN / 边缘厂商的位置。托管选项：[Cloudflare Waiting Room](https://developers.cloudflare.com/waiting-room/)、[Virtual Waiting Room on AWS](https://docs.aws.amazon.com/solutions/latest/aws-virtual-waiting-room/welcome.html)、[Queue-it](https://queue-it.com/)、Queue-Fair、CrowdHandler。
 ⇒ **自建虚拟等待室的 ROI 在多数场景下是负的。** 说"我会先用托管的，只在需要把队列语义和业务规则深度耦合时才自建"，比现场设计一个分布式队列更像 Staff。
@@ -333,7 +365,7 @@ sequenceDiagram
 
 | 维度 | 选座（reserved seating） | 不选座（general admission, GA） |
 |---|---|---|
-| 库存表示 | N 行，每行一个座位，**天然唯一键** | 1 行计数器，或 M 个**分桶计数器**（sharded counter） |
+| 库存表示 | N 行，每行一个座位，**天然唯一键** | 1 行计数器，或 M 个**分桶计数器**（sharded counter：把一个计数器拆成 M 行，写时随机挑一行扣、读时求和 —— 用"读变贵"换"写不再撞同一行"） |
 | 不超卖机制 | 条件更新 / 唯一约束 | `UPDATE ... SET remaining = remaining - :n WHERE remaining >= :n` |
 | 单点吞吐 | 5 万座位分散在 5 万行 → **没有单点** | 单行 500–2,000 TPS，**这就是全部** |
 | 座位图带宽 | 10 Gbps 级，必须 CDN | ≈ 0 |
@@ -364,7 +396,8 @@ sequenceDiagram
 ```
 限购三层，成本递增、有效性递增：
 ① 账号级：per (user_id, event_id) 限 4 张   成本 ≈ 0，黄牛用小号绕过
-② 身份级：实名 + 人证核验，一证一票        有效，代价是 PII 与合规成本
+② 身份级：实名 + 人证核验，一证一票        有效，代价是 PII（personally identifiable
+                                            information，个人身份信息）与合规成本
 ③ 行为级：设备指纹 + IP 段 + 行为模型      覆盖最广，误杀率就是它的全部代价
 ```
 

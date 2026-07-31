@@ -5,6 +5,51 @@
 
 ---
 
+## 读这一章之前
+
+**你在工作中遇到过这个**
+
+下单接口原本同步调用支付、库存、物流三个服务。某天物流那边超时 8 秒，你的下单接口跟着卡死，用户连点三次，产生了三个订单。
+你把这三个调用改成发 Kafka 事件，下单从 900 ms 降到 60 ms，皆大欢喜。
+两周后客服转来一个工单："这个订单显示已支付，但仓库说没收到出库指令。"你翻了三个服务的日志才拼出真相：库存那条消息进了死信队列，而没人看那个告警。
+钱已经扣了，货没有出，**系统里没有任何一个地方知道这一单卡在第几步** —— 这就是解耦的账单。
+
+**需要先懂的概念**
+
+| 概念 | 一句话 | 详见 |
+|---|---|---|
+| 事务与隔离级别 | 一组操作要么全做要么全不做；隔离性 I 是可调的旋钮，不是开关 | [00-concepts §7](../00-foundations/00-concepts.md) |
+| 最终一致 | 写完之后别处不一定立刻读到新值，只承诺"停止写入后最终收敛" | [00-concepts §6](../00-foundations/00-concepts.md) |
+| 幂等 | 同一操作执行多次，效果和执行一次相同 | [00-concepts §12](../00-foundations/00-concepts.md) |
+| 幂等键 | 客户端生成、服务端拿它去重的请求标识，让重试不产生第二次副作用 | [01-fundamentals §5](../00-foundations/01-fundamentals.md) |
+| 投递语义与 Outbox | 消息只保证"至少送到一次"；写库和发消息不是原子的（双写问题），Outbox 是标准解法 | [01-building-blocks/03](../01-building-blocks/03-messaging-and-streams.md) |
+| 服务边界 | 数据所有权，以及编排 vs 编舞的基本区别 | [02/01](01-microservices-vs-modular-monolith.md) |
+
+**这一章要回答的问题**
+
+1. 跨 3 个服务的下单流程，第 2 步成功、第 3 步失败了，怎么把前面已经做掉的事情退回去？
+2. 退不回去的那一步（钱已经扣了、邮件已经发出去了）怎么办？
+3. 事件里到底该放什么 —— 只放一个 ID，还是把整个对象塞进去？这个选择会在哪里反咬我一口？
+4. 用户点完保存跳回列表，看不到自己刚写的东西 —— 这是 bug 还是设计的代价？有几种解法？
+
+**本章新引入的术语**
+
+| 术语 | English | 一句话定义 |
+|---|---|---|
+| Saga | saga | 把一个跨多个服务的长流程拆成 N 个各自独立提交的本地事务，每步配一个"反向操作"，中途失败就按相反顺序执行这些反向操作 |
+| 补偿事务 | compensating transaction | 用来抵消前一步业务效果的**一笔新的正向操作**（例如"把预留的库存标记为已释放"），不是数据库层面的回滚 |
+| Pivot 步骤 | pivot step | Saga 里那个越过之后就回不了头的步骤；它之前的步骤可以补偿，它之后的步骤只允许重试到成功 |
+| 两阶段提交 | 2PC / two-phase commit | 由一个协调者先让所有参与者"准备好并锁住数据"，再统一通知提交；协调者一挂，参与者就一直持锁等着 |
+| 预留式补偿 | TCC / Try-Confirm-Cancel | 先占住资源但不产生对外效果、且带过期时间（Try），确认时才真正兑现（Confirm），放弃时释放占用（Cancel） |
+| 事件溯源 | event sourcing | 存进数据库的不是当前状态，而是按顺序发生过的每一条事件；当前状态是把这些事件从头折叠一遍算出来的 |
+| CQRS | Command Query Responsibility Segregation | 写入走一套模型，查询走另一套专为查询形状优化的模型，两者之间靠异步同步 |
+| 投影 / 读模型 | projection / read model | 由事件流推导出来、只服务于某一类查询的表或索引；它的定义性质是"可以删掉重建" |
+| 投影滞后 | projection lag | 一件事发生，到读模型更新完成之间的时间差 |
+| 加密粉碎 | crypto-shredding | 每个人的敏感字段用一把只属于他的密钥加密，"删除他的数据"就等于删掉那把密钥 |
+| 因果 ID | causation_id | 记在事件里的"直接导致我的上一条事件是谁"，靠它才能把一次请求产生的几十条事件还原成一棵因果树 |
+
+---
+
 ## 1. 事件的三种类型：延伸与选择判据
 
 三种基本形态在 [`01-building-blocks/03-messaging-and-streams.md`](../01-building-blocks/03-messaging-and-streams.md) 里已经定义过（事件通知（event notification）/ 携带状态转移 ECST / 领域事件（domain event））。这里补上真正决定选型的四个维度：
@@ -17,6 +62,8 @@
 | **PII 扩散** | 无 | **把 PII 复制到每个下游 + 每个 topic 的保留期** | 视字段而定 |
 | 可否做事件溯源 | 否 | 否（快照不是事实） | **是**，这是唯一能重建历史的形态 |
 | 顺序敏感度 | 低 | 低（后到的快照覆盖先到的即可，天然幂等） | **高**（漏一条就永久错） |
+
+（表里两个缩写：**PII** = personally identifiable information，个人可识别信息 —— 姓名、邮箱、手机号、地址这类能定位到某个具体自然人的字段；**GDPR** = 欧盟《通用数据保护条例》，它的 Art. 17 规定用户有权要求你删除关于他的全部个人数据，§4 会展开这条要求和"事件不可变"之间的冲突。）
 
 **判据（按优先级）：**
 
@@ -136,9 +183,9 @@ stateDiagram-v2
 
 **四条硬规则：**
 
-1. **补偿必须幂等（idempotent）**。补偿消息一定会重复投递（at-least-once），用 `WHERE state = 'HELD'` 这种条件更新（conditional update），而不是相对增量。
+1. **补偿必须幂等（idempotent）**。补偿消息一定会重复投递（at-least-once：消息系统只保证"至少送到一次"，超时重发会让同一条消息被消费两次以上，见 [`01-building-blocks/03`](../01-building-blocks/03-messaging-and-streams.md)），所以要用 `WHERE state = 'HELD'` 这种条件更新（conditional update），而不是相对增量。
 2. **补偿必须能重试到成功，不允许"补偿失败"这个终态**。补偿失败只能进 `NEEDS_HUMAN` 队列 + 告警，绝不能静默丢弃 —— 那是钱漏出去的地方。
-3. **补偿要能处理"还没执行就来补偿"**（正向请求超时但实际成功/失败未知）。用同一个幂等键（idempotency key）写一条 tombstone，让后到的正向请求被拒绝。
+3. **补偿要能处理"还没执行就来补偿"**（正向请求超时但实际成功/失败未知）。用同一个幂等键（idempotency key）写一条 tombstone（墓碑记录：一行"这件事已经作废"的标记，让后到的正向请求查到它就直接被拒），让后到的正向请求被拒绝。
 4. **补偿要留痕**：补偿本身是一个领域事件（`InventoryReleased`），不是一次 UPDATE。
 
 **状态机说明「能到哪」，这张时序图说明「按什么顺序发出去、每次带什么幂等键」—— 补偿的逆序和补偿自身的重试，只有摊在时间轴上才看得出来。场景取 pivot 那一步失败（T3 Capture 被拒），因为只有它会同时触发两条补偿。**
@@ -290,13 +337,15 @@ ORDER BY updated_at;
 -- 告警阈值：任何 saga 卡超过 p99 时长的 10 倍
 ```
 
-**撞墙条件（scaling wall）**：单表轮询编排器在 **~2,000 saga/s** 或 saga_instance 表超过千万活跃行时开始退化（`next_run_at` 索引膨胀、`FOR UPDATE SKIP LOCKED` 竞争）。信号是 tick 延迟 p99 上升而 CPU 不高。到这里换分区表 + 按 `hash(saga_id)` 分片 worker，或换成 durable execution 引擎（[Temporal](https://temporal.io/)、[Restate](https://restate.dev/)、DBOS）。
+**撞墙条件（scaling wall）**：单表轮询编排器在 **~2,000 saga/s** 或 saga_instance 表超过千万活跃行时开始退化（`next_run_at` 索引膨胀、`FOR UPDATE SKIP LOCKED` 竞争）。信号是 tick 延迟 p99 上升而 CPU 不高。到这里换分区表 + 按 `hash(saga_id)` 分片 worker，或换成 durable execution 引擎（持久化执行：引擎把每一步的输入和输出都记进日志，进程崩溃后照日志重放到崩溃点继续往下跑，重放过程中已经做过的外部调用不会再做第二次）—— [Temporal](https://temporal.io/)、[Restate](https://restate.dev/)、DBOS。
 
 ---
 
 ## 4. 事件溯源的真实成本
 
 **事件溯源（Event Sourcing）= 只存事件，当前状态是事件的折叠结果。** 它不是"加个审计表"，是把真相源（source of truth）换掉。
+
+下面反复出现的**聚合（aggregate）**指：一组必须一起保持一致的对象，对外只有一个入口（比如"一张订单和它的所有明细行"）。它是事件溯源里**顺序有保证的最小单位**，也是一致性边界 —— 同一个聚合内的事件严格有序，跨聚合无序。
 
 ### 成本清单（这是决策的全部依据）
 
@@ -305,7 +354,7 @@ ORDER BY updated_at;
 | **快照** | 每 100–500 个事件一次 | 目标：单聚合（aggregate）重建 < 50 ms。没有快照的 ES 系统在聚合活跃度上升后会突然变慢 |
 | **重放时长（replay time）** | 单线程投影（projection）1–5 万 events/s | 5 亿事件 ÷ 3 万 eps ≈ **4.6 小时**；按聚合 ID 哈希并行 16 路 ≈ **20 分钟** |
 | **存储** | 事件量是状态量的 10–100× | 且**永不删除**。1 KB/事件 × 5 亿 = 500 GB，还要算索引与副本 |
-| **Schema 演进** | 需要 upcaster 链 | 老事件永远在，代码里永远要能解析 v1。写 v5 时你还在维护 v1→v2→…→v5 的转换 |
+| **Schema 演进** | 需要 upcaster 链 | upcaster = 读取时把旧版本事件就地翻译成新版本结构的一小段代码。老事件永远在，代码里永远要能解析 v1；写 v5 时你还在维护 v1→v2→…→v5 的转换 |
 | **删除（GDPR）** | 与"事件不可变"直接冲突 | 见下 |
 | **人员** | 团队学习曲线 3–6 个月 | 且新人 onboard 成本长期高于 CRUD |
 
@@ -324,6 +373,8 @@ ORDER BY updated_at;
 | 重写日志 | 停机，过滤重写全部分区 | 破坏 offset、破坏下游 checkpoint，实践上不可行 |
 | PII 外置 | 事件里只存 `subject_id`，PII 存可删的独立表 | 事件失去自包含性，重放要 join 外部表（且历史值已丢） |
 | **Crypto-shredding** | **每个 data subject 一把 DEK，事件中的 PII 字段用它加密；删除 = 删 DEK** | key store 成为新的关键路径与单点 |
+
+（**data subject** = 数据主体，即这些个人数据所描述的那个自然人；**DEK** = data encryption key，真正拿来加解密内容的那把钥匙；**key store** = 专门存放这些钥匙的服务。删掉某人的 DEK 之后，所有副本里他那部分密文就永久变成乱码 —— 这就是"加密粉碎"。）
 
 ```json
 { "event_type": "CustomerRegistered", "subject_id": "cus_9f2a",
@@ -345,7 +396,9 @@ ORDER BY updated_at;
   □ 搜索索引 / 向量索引     → embedding 可被反演（inversion），向量本身即 PII 派生物
 ```
 
-⚠️ **最容易踩的坑：key store 自己开了 PITR**。你删了 DEK，但 KMS 的时间点恢复能把它找回来 —— 那删除就没发生。要么 key store 不开 PITR，要么 PITR 窗口严格短于删除 SLA（行业实践 30 天）。
+（**embedding** = 把一段文本映射成的一串浮点数向量，用来做相似度检索；**反演（inversion）**指已有研究能从向量反推出原文的相当一部分，所以向量必须当作个人数据本身来对待，不能当成"脱敏后的特征"。）
+
+⚠️ **最容易踩的坑：key store 自己开了 PITR**（point-in-time recovery，时间点恢复：把存储回滚到过去任意一个时刻的能力）。你删了 DEK，但 KMS（key management service，托管密钥服务）的时间点恢复能把它找回来 —— 那删除就没发生。要么 key store 不开 PITR，要么 PITR 窗口严格短于删除 SLA（行业实践 30 天）。
 
 ⚠️ 第二个坑：**crypto-shredding 不能用于需要按该字段聚合的场景**。密文无法 GROUP BY、无法建索引、无法做范围查询。所以"哪些字段进 DEK"是一个产品决策，不是加密决策。
 
@@ -362,7 +415,7 @@ ORDER BY updated_at;
 | L2 | 读模型在另一个存储（ES / ClickHouse / 物化视图 materialized view），异步投影 | 中 | 读写负载特征差异 10× 以上；读需要完全不同的索引形态 |
 | L3 | L2 + 事件溯源 | 高 | 需要时间旅行（time travel）、需要重建任意历史读模型 |
 
-**CQRS ≠ 事件溯源。** 可以只做 CQRS 不做 ES（从 CDC 建读模型），也可以只做 ES 不做 CQRS。混为一谈是这个话题最常见的误解。
+**CQRS ≠ 事件溯源。** 可以只做 CQRS 不做 ES（从 CDC 建读模型 —— change data capture，变更数据捕获：订阅数据库自己的变更日志，把每一行的增删改实时变成一条事件流，见 [`01-building-blocks/03`](../01-building-blocks/03-messaging-and-streams.md)），也可以只做 ES 不做 CQRS。混为一谈是这个话题最常见的误解。
 
 ### 读模型的构建
 
@@ -375,7 +428,7 @@ ORDER BY updated_at;
 ```
 
 **投影器的四个必备件：**
-1. **checkpoint**（消费到哪个 offset/LSN），且 checkpoint 与投影写入必须原子（同库事务，或投影表里带 offset 列）。
+1. **checkpoint**（消费位点：一个"我已经处理到事件流的哪个位置"的记号，重启后从这里继续；位置的表示形式在 Kafka 里是 offset，在 Postgres 逻辑复制里是 LSN——预写日志里的字节序号），且 checkpoint 与投影写入必须原子（同库事务，或投影表里带 offset 列）。
 2. **幂等 upsert**：`INSERT ... ON CONFLICT DO UPDATE WHERE view.version < excluded.version`，用事件里的聚合版本号做守卫，天然抗重复与乱序（out-of-order）。
 3. **重建脚本（rebuild / backfill）**：一条命令重放到一张新表，然后原子切换（atomic swap，改视图指向 / 改别名）。**没有重建能力的读模型是不可修复的。**
 4. **滞后指标**：`projection_lag_seconds`（事件 `occurred_at` 到投影写入的时间差）。
@@ -388,7 +441,7 @@ ORDER BY updated_at;
 |---|---|---|---|
 | **乐观 UI（optimistic UI）** | 前端本地先渲染写入结果 | 前端要维护"待确认"状态与回滚 | 单条记录的创建/编辑，**首选** |
 | **命令返回结果** | POST 直接返回投影后的完整对象，前端拿它填充 | 命令侧要能算出读侧形状 | 单对象场景，与乐观 UI 组合最好 |
-| **粘性读主（sticky read from primary）** | 写后 N 秒内，该用户的读走写侧/主库 | 主库承担读流量；需要会话粘性（session affinity） | N = 投影 p99 × 3，典型 2–5 秒 |
+| **粘性读主（sticky read from primary）** | 写后 N 秒内，该用户的读走写侧/主库 | 主库承担读流量；需要会话粘性（session affinity：同一个用户的后续请求在一段时间内固定落到同一个节点/同一个库） | N = 投影 p99 × 3，典型 2–5 秒 |
 | **版本水位（consistency token）** | 写返回一个 token，读带上，投影未追上就等 | 最正确，但把异步变回半同步 | 强需求场景（金额、权限变更） |
 | **同步投影关键路径** | 关键的那 1 个读模型在写事务内同步更新 | 放弃了 CQRS 的一半好处 | 只对"必须立刻可见"的那一张视图用 |
 
@@ -485,6 +538,14 @@ cmd:PlaceOrder (corr=req_a1b2)                         ← 重建出来的因果
 - **对策**：不可逆动作的清单必须**设计期静态定义**，运行时不能交给模型自判；这类动作统一走人在回路（human-in-the-loop）审批。按 Five Eyes 五国联合指南 [《Careful Adoption of Agentic AI Services》](https://www.cisa.gov/resources-tools/resources/careful-adoption-agentic-ai-services)（2026-05）的口径，这是**必需控制项**而非可选增强。
 - **幂等键规范化为 `(workflow_id, step_id)`**：与上面 Saga 的 `IDEM(saga_id, step_id)` 完全同构。Agent 重试/恢复时不会重复扣款。
 - ⚠️ **checkpoint ≠ durable execution**（这一点存在明确争议）：一派认为配了 checkpointer 就能任意点 pause/resume 即为 durable；另一派（如 Diagrid）认为状态快照恢复缺少确定性重放（deterministic replay）与精确一次副作用（exactly-once side effects），不足以支撑生产工作流。**分歧的根源是对 "durable" 的定义不同**：状态快照恢复 vs 执行历史重放。工程判据很简单：**你的恢复路径会不会重复执行外部副作用？** 会 → 你需要的是 journal + replay 或幂等键，不是 checkpoint。
+
+---
+
+## 这一章的三句话
+
+1. **Saga 不是"分布式事务的替代品"，它是明确放弃了隔离性（I）的补偿流程。** 中间状态一定会被别人看到，所以"订单已付款但还没发货时页面显示什么"是产品必须先回答的问题，不是等出事再解释的技术细节。
+2. **一个 Saga 里只能有一个回不了头的步骤，而且它必须尽可能靠后。** 做不到就用预留（TCC）把不可补偿的操作变成可补偿的 —— 把"发邮件"延迟 120 秒入队，就足以让它重新变得可撤销。
+3. **事件溯源和 CQRS 是两个独立决策，大多数团队两个都不该选。** 只想要审计就写一张 append-only 审计表，只想要读写分离就上只读副本，代价是它们的 1/50；ES 的真正价值只有一个 —— 从事件重建任意时刻的任意状态。
 
 ---
 

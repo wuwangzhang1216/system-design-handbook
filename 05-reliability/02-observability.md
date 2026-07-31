@@ -5,6 +5,52 @@
 
 ---
 
+## 读这一章之前
+
+**你在工作中遇到过这个**
+
+线上 p99 从 80 ms 涨到 900 ms。你打开监控：CPU 正常、内存正常、错误率 0，dashboard 上二十张图没有一张告诉你哪里慢。
+你去翻日志，两小时里有 4 亿行，你只能按时间范围搜，捞出来的全是无关请求。
+最后是靠一个客户截图里的订单号，手工 grep 出那条链路的 —— 花了六个小时，而真正的问题只是某个下游实例的连接池满了。
+你事后加了三块新面板，但下一次故障不会长成这个样子。
+
+**需要先懂的概念**
+
+| 概念 | 一句话 | 详见 |
+|---|---|---|
+| 分位数，以及"分位数不能取平均" | p99 是排序后第 99% 位置的值；两台机器的 p99 不能平均，要先合并桶 | [00-concepts §3](../00-foundations/00-concepts.md) |
+| 延迟 / 吞吐 / 并发 | 并发 = 吞吐 × 延迟；下游一慢，在途请求数立刻上涨 | [00-concepts §2](../00-foundations/00-concepts.md) |
+| 一个请求的旅程 | 从 DNS 到 LB 到应用到缓存到 DB，每一跳都可能是"慢"的那一跳 | [00-concepts §1](../00-foundations/00-concepts.md) |
+| 尾延迟与扇出放大 | 每个后端都很快，不代表用户觉得快 | [01-fundamentals §7](../00-foundations/01-fundamentals.md) |
+| 背压 | 处理不过来时向上游反压，而不是无限排队 | [01-fundamentals §6](../00-foundations/01-fundamentals.md) |
+| SLI / SLO / 错误预算 / 燃尽率 | `好事件 / 有效事件` 这个比值，以及"多久会把预算烧光" | [01-slo-and-error-budget.md §1、§5](01-slo-and-error-budget.md) |
+
+**这一章要回答的问题**
+
+1. 同样一句"变慢了"，什么时候该看指标、什么时候必须看 trace、什么时候只有 profile 答得上来？
+2. 给一个指标加上 `tenant_id` 标签，账单会变成多少？那想按租户看错误率到底该怎么做？
+3. 10 个实例各自 p99 都是 100 ms，整体 p99 是多少？为什么 `avg(p99)` 这块面板一直在骗你？
+4. 一次 Agent 会话产生 3,000 个 span、跨越 8 分钟，你的通用 trace 管道会发生什么？
+
+**本章新引入的术语**
+
+| 术语 | English | 一句话定义 |
+|---|---|---|
+| 可观测性 | observability | 不发新代码就能回答一个你事先没预想到的问题的能力（区别于"装了几个监控系统"） |
+| 活跃时间序列 | active series | 一个指标名 + 一组确定的标签取值，构成监控系统里被单独存储、单独计费的一条曲线 |
+| 基数 | cardinality | 一个指标上所有标签取值**组合**出来的时间序列条数；加一个标签是乘法不是加法 |
+| exemplar | exemplar | 挂在直方图某个桶上的少量样本指针（通常是 trace_id），让你从一根柱子直接跳到一个真实请求 |
+| RED / USE | RED / USE | 请求侧看 Rate、Errors、Duration；资源侧看 Utilization、Saturation、Errors |
+| 饱和度 | saturation | 排队的量（队列长度、队首等待时长），而不是资源被占用的比例 |
+| span / trace | span / trace | 一段带起止时间的操作记录 / 由同一个请求串起来的一组 span 构成的树 |
+| 上下文传播 | context propagation | 把 trace 标识随请求逐层传给下游，使各服务各自打的 span 能被拼回同一棵树 |
+| 头部采样 / 尾部采样 | head-based / tail-based sampling | 请求刚进来就决定这条 trace 留不留 / 等它全部结束、看清结果之后再决定 |
+| 持续 profiling / 火焰图 | continuous profiling / flame graph | 周期性对运行中的进程做调用栈采样，画出"时间花在哪些函数上"的图 |
+| 差分火焰图 | differential flame graph | 两份 profile 相减，直接高亮新增出来的那部分开销 |
+| 语义约定 | semantic conventions | OpenTelemetry 对属性该叫什么名字的统一约定（如错误类型固定叫 `error.type`） |
+
+---
+
 ## 1. 四种遥测的分工
 
 | | **Metrics** | **Logs** | **Traces** | **Profiles** |
@@ -14,7 +60,7 @@
 | 基数（cardinality）承受力 | **极差**（笛卡尔积爆炸） | 好（全文索引） | 好（每条 trace 独立） | 中 |
 | 回答什么 | "有问题吗？多严重？" | "这一次具体发生了什么？" | "慢在哪一跳？谁调了谁？" | "哪行代码/哪块内存？" |
 | 天然缺陷 | 看不到个体 | 关联全靠自己拼 | 采样后无法做统计 | 无请求上下文 |
-| 保留期（retention） | 13 个月（降采样后） | 7–30 天 | 7–15 天 | 30 天 |
+| 保留期（retention） | 13 个月（降采样 downsampling 后 —— 老数据只保留每 5 分钟 / 每小时一个聚合点，见 §7） | 7–30 天 | 7–15 天 | 30 天 |
 
 心智模型：`Metrics 告诉你「有事」→（exemplar 跳转）→ Traces 告诉你「在哪一跳」→（trace_id 关联）→ Logs 告诉你「为什么」→ Profiles 告诉你「哪行代码」`。
 
@@ -25,12 +71,12 @@
 | 整体错误率上升 | Metrics | Traces | 只翻日志 = 在 2 TB 里大海捞针 |
 | p99 变慢但 p50 正常 | **Traces（尾部采样）** | Profiles | Metrics 只说"慢了"，不说慢在哪跳 |
 | 所有请求都慢了 20% | **Profiles（差分火焰图）** | Metrics | Traces 显示每一跳都均匀变慢 = 无信息 |
-| 单个租户报错，其他人正常 | **Logs（按 tenant 过滤）** | Traces | 给 metric 打 tenant 标签 = 基数爆炸账单 |
+| 单个租户（tenant：多租户系统里彼此隔离的一个客户，见 [`02/03`](../02-architecture-patterns/03-multi-tenancy.md)）报错，其他人正常 | **Logs（按 tenant 过滤）** | Traces | 给 metric 打 tenant 标签 = 基数爆炸账单 |
 | 内存缓慢增长 / OOM | **Profiles（heap）** | Metrics | 日志和 trace 完全看不见 |
 | 偶发 5xx（万分之一） | **尾部采样（tail-based sampling） Traces** | Logs | 头部采样（head-based sampling） 1% 会把它采没 |
 | 一次部署后回归 | Metrics（版本维度） | 差分 Profiles | — |
 | 跨服务的因果（谁触发了谁） | **Traces** | — | 日志时间戳对不齐，永远拼不出来 |
-| 队列堆积 / 背压（backpressure） | Metrics（队列深度 + 队首等待） | Traces | 只看利用率会漏掉排队 |
+| 队列堆积 / 背压（backpressure：处理不过来时反向压制上游而不是无限排队，见 [`00/01 §6`](../00-foundations/01-fundamentals.md)） | Metrics（队列深度 + 队首等待） | Traces | 只看利用率会漏掉排队 |
 | 死锁（deadlock） / goroutine 泄漏（leak） | **Profiles（goroutine/mutex）** | — | 其他三支柱完全无能为力 |
 | 成本异常（某租户烧钱） | 低基数 Metrics + **离线明细表** | — | 做成高基数 metric = 拿 TSDB 当数据仓库 |
 
@@ -122,7 +168,7 @@ http_request_duration_seconds{endpoint(200), method(4), status(8), pod(30), regi
 
 | ✅ 必须记 | ❌ 不要记 |
 |---|---|
-| **决策点**："选了降级路径，因为 circuit_breaker=open" | 热路径（hot path）上的 `entering function X` |
+| **决策点**："选了降级路径，因为 circuit_breaker=open" | 热路径（hot path：每个请求都会走到、执行频率最高的那段代码）上的 `entering function X` |
 | **外部调用**：`(target, status, latency_ms, attempt, idempotency_key)` | 完整的 request/response body |
 | **状态转移**：`order 123: pending → paid` | 能从 metric 得到的计数（"处理了 1 条消息"） |
 | **异常的完整上下文**：stack + 触发参数 + trace_id | 每次循环迭代 |
@@ -142,7 +188,7 @@ DEBUG             → 生产默认关闭，按 tenant / 请求头动态开启，
 
 **"按 tenant 动态开 DEBUG + 自动过期"是 ROI 最高的可观测性功能之一**——它堵死了"为排查一个客户而全局开 DEBUG"这个最大的成本事故源头。
 
-PII 四条：**字段级 allowlist 而非 denylist**（未声明的字段默认 redact）；**在 Collector 侧再脱敏（redaction）一遍**（第三方库会绕过你的 logger）；保留期按类别分（审计 1–7 年 / 应用 7–30 天 / 带内容的调试日志 ≤ 24 小时）；LLM 系统里**最大的 PII 面是 prompt 与 response 全文**（见 §10）。
+PII（personally identifiable information，能定位到具体自然人的信息：姓名、邮箱、手机号、身份证号、精确位置……）四条：**字段级 allowlist 而非 denylist**（未声明的字段默认 redact）；**在 Collector 侧再脱敏（redaction）一遍**（第三方库会绕过你的 logger）；保留期按类别分（审计 1–7 年 / 应用 7–30 天 / 带内容的调试日志 ≤ 24 小时）；LLM 系统里**最大的 PII 面是 prompt 与 response 全文**（见 §10）。
 
 ---
 
@@ -184,7 +230,7 @@ Agent 的工具调用       工具执行的 span 必须挂在这一步推理的 
      = 50,000 spans/s × 600 B × 30 s × 2.5 = 2.25 GB   ← 单个 Collector 实例
 ```
 
-更麻烦的是：**同一条 trace 的所有 span 必须落到同一个 Collector 实例上**，否则实例 A 看不到实例 B 手里的 error span，做不出正确决策。这需要一层按 `trace_id` 哈希的负载均衡（OTel Collector 的 `loadbalancing` exporter）。**"尾部采样"实际上是"一个有状态、需要一致性哈希（consistent hashing）的分布式系统"**——很多团队在预算会上答应了它，在实施时才发现这一点。
+更麻烦的是：**同一条 trace 的所有 span 必须落到同一个 Collector 实例上**，否则实例 A 看不到实例 B 手里的 error span，做不出正确决策。这需要一层按 `trace_id` 哈希的负载均衡（OTel Collector 的 `loadbalancing` exporter）。**"尾部采样"实际上是"一个有状态、需要一致性哈希（consistent hashing：把节点和 key 映射到同一个环上，增删节点时只有相邻的一小段 key 需要换归属，见 [05-scaling-playbook.md](05-scaling-playbook.md) §5）的分布式系统"**——很多团队在预算会上答应了它，在实施时才发现这一点。
 
 **推荐的落地顺序（前四条覆盖 90% 场景，不够时才上尾部采样）**：① 头部按属性采样，默认 1%；② 应用侧发现 error 时直接把 trace flag 置为 sampled，错误 100% 留存；③ Exemplar 打通 metric → trace；④ 带鉴权与限流的 `x-debug-trace` 头做定向排查。
 
@@ -217,7 +263,7 @@ Agent 的工具调用       工具执行的 span 必须挂在这一步推理的 
 
 **GenAI 语义约定（semantic conventions）的真实状态（2026-07-30）**——这是必须写进架构决策的事实：
 
-- **全部 GenAI 专有的 span / metric / event / attribute 至今仍是 `Development`，没有任何一项 GA。** 只有跨域共享属性（`error.type`、`server.address`）是 Stable。
+- **全部 GenAI 专有的 span / metric / event / attribute 至今仍是 `Development`，没有任何一项 GA（generally available：被标记为稳定、承诺不再做破坏性变更）。** 只有跨域共享属性（`error.type`、`server.address`）是 Stable。
 - **仓库已在 2026-06 拆分**到 [`open-telemetry/semantic-conventions-genai`](https://github.com/open-telemetry/semantic-conventions-genai)。主 semconv 仓库 v1.42.0（2026-06-12）**弃用全部 `gen_ai.*`**，v1.43.0 **完全移除**。新仓库**尚无 release / 无 tag / 无 schema URL**（README 那一节写着 TODO）——你**拿不到一个可 pin 的版本化 schema**。
 - **破坏性改名历史**（这才是你会被咬的地方）：
 
@@ -304,7 +350,7 @@ Profile：30 天；每次发布的基线 profile 永久保留（用于差分）
 ✅ "工作区加载 SLO 燃尽率 14.4×"  → 用户正在受影响，且 50 小时会用完月度预算
 ```
 
-原因型指标应该出现在 **dashboard 和 runbook 里**，作为排查的下钻维度，**而不是作为 page 的触发条件**。
+原因型指标应该出现在 **dashboard 和 runbook（值班手册：针对某一条告警写好的、可直接复制粘贴执行的处置步骤）里**，作为排查的下钻维度，**而不是作为 page（把人从睡梦中叫起来的那一级告警，对应"发工单"那一级）的触发条件**。
 
 **② 每条 page 级告警必须能回答三个问题**，答不上来就降级成 ticket 或直接删除：**谁受影响**（哪条旅程、多少租户、什么比例）、**我现在能做什么**（runbook 链接存在且有具体的第一步）、**不处理会怎样**（多久用完错误预算 / 多久触发 SLA 赔付）。
 
@@ -366,12 +412,12 @@ Profile：30 天；每次发布的基线 profile 永久保留（用于差分）
 
 | 类别 | 指标 | 为什么它不能省 |
 |---|---|---|
-| **GPU** | SM 利用率、显存占用、SM occupancy、功耗、温度、ECC 错误（DCGM 采集） | **SM 利用率高 ≠ 在做有用功**：显存带宽打满或 all-to-all 阻塞时利用率同样很高 |
-| **KV cache** | KV 块使用率、被抢占（preempted）请求数、重算次数 | KV 满 → 请求被抢占 → 重新 prefill → TTFT 尖刺。**这是延迟毛刺最常见的根因，且从外部完全看不出来** |
+| **GPU** | SM（streaming multiprocessor，GPU 里真正执行计算的单元）利用率、显存占用、SM occupancy、功耗、温度、ECC 错误（DCGM 采集） | **SM 利用率高 ≠ 在做有用功**：显存带宽打满或 all-to-all 阻塞时利用率同样很高 |
+| **KV cache**（推理时缓存已处理 token 的注意力中间结果，省得每产出一个 token 就把整段输入重算一遍） | KV 块使用率、被抢占（preempted）请求数、重算次数 | KV 满 → 请求被抢占 → 重新 prefill（预填充：产出首 token 前把整段输入先过一遍）→ TTFT 尖刺。**这是延迟毛刺最常见的根因，且从外部完全看不出来** |
 | **队列** | running seqs / waiting seqs / 队首等待（head-of-line waiting）时长 | waiting 持续 > 0 = 已过拐点，加机器或限流，别再调参 |
 | **吞吐** | prefill tok/s 与 decode tok/s **分开** | 两者的瓶颈完全不同（算力 vs 显存带宽），合并成一个数字后不可用于容量规划 |
-| **前缀缓存（prefix caching）** | 命中率（hit ratio），**必须按租户/场景切分** | 见下方 ⚠ |
-| **延迟** | TTFT / TPOT 直方图，**按输入长度分桶** | 不分桶时一个长上下文请求就把曲线拉飞 |
+| **前缀缓存**（prefix caching：多个请求开头那一段完全相同时，直接复用它已经算好的 KV cache） | 命中率（hit ratio），**必须按租户/场景切分** | 见下方 ⚠ |
+| **延迟** | TTFT / TPOT 直方图（首 token 时间 / 首 token 之后每个 token 的平均间隔，见 [01-slo-and-error-budget.md](01-slo-and-error-budget.md) §9），**按输入长度分桶** | 不分桶时一个长上下文请求就把曲线拉飞 |
 | **goodput** | 每秒同时满足 TTFT 与 TPOT SLO 的请求数 | 唯一能做容量规划的指标 |
 | **Token** | `input` / `output` / `cache_read` / `cache_creation` / `reasoning` **五个分开** | 单价差 10–20 倍，合并计数就无法归因成本 |
 | **Agent** | 每会话步数、工具调用次数、重复调用次数、上下文占用比例 | 循环和步数爆炸是 Agent 系统独有的高频失效 |
@@ -394,7 +440,7 @@ Profile：30 天；每次发布的基线 profile 永久保留（用于差分）
 
 ### Trace 的形状变了
 
-传统请求 trace 是"扇出（fan-out） 3–5 跳、总时长 200 ms"。Agent 会话是"**串行 40 步、总时长 8 分钟、嵌套 3 层子代理**"。三个后果：
+传统请求 trace 是"扇出（fan-out：一个请求向下分发成 N 个并行子请求，见 [`00/01 §7`](../00-foundations/01-fundamentals.md)） 3–5 跳、总时长 200 ms"。Agent 会话是"**串行 40 步、总时长 8 分钟、嵌套 3 层子代理**"。三个后果：
 
 - **一条 trace 可能有数千个 span、几 MB 大小。** 默认 span 数上限（很多 SDK 是 1,000）会**静默截断**——你会得到一条"看起来正常结束了"的假 trace。必须显式配置并监控 `dropped_spans`。
 - **尾部采样的决策窗口要按会话时长设**（分钟级而非秒级），这会让 §4 的内存算例乘以 10–20。多数团队的正确选择是：**Agent 轨迹不走通用 trace 管道，走专门的轨迹存储**（Langfuse / LangSmith / Braintrust / 自建），通用管道只留一个汇总 span。
@@ -429,6 +475,14 @@ Profile：30 天；每次发布的基线 profile 永久保留（用于差分）
 **最后一条展开说：** 可观测性投资的正确顺序是 ① 3–7 条用户旅程的 SLI（低基数 counter，几乎免费）→ ② 症状告警（SLO 燃尽率）+ runbook → ③ Trace + exemplar → ④ 带 trace_id 的结构化日志 → ⑤ 持续 profiling。**这五项覆盖 90% 的排障需求，成本占比不到 30%。** 尾部采样、全量日志、dashboard 农场、Agent 轨迹平台都排在它们后面。
 
 **倒过来做的团队（先买一个大而全的平台，再想怎么用）会花 3 倍的钱，拿到一半的能力。**
+
+---
+
+## 这一章的三句话
+
+1. **可观测性的成本几乎完全由一个变量决定：基数。** 加一个标签是乘以它的取值个数，不是加 —— 所以"要不要给这个指标多打一个维度"是一个财务决定，不是技术偏好。高基数的正确归宿永远是 trace 属性和日志字段，metric 侧只留 exemplar。
+2. **分位数不能取平均，也不能相加。** 任何 `avg(p99) by (service)` 的面板都在骗你，而且骗的方向不固定：它可能让你去优化一个不存在的问题，也可能让你彻底看不见真实的慢。唯一正确的做法是先合并直方图的桶，再从合并后的分布算分位数；"把各跳 p99 加起来当端到端 p99"是同一个错误的变体。
+3. **告警必须基于症状，原因型指标只配出现在 dashboard 和 runbook 里。** 判据是：一条 page 级告警必须能同时回答"谁受影响、我现在能做什么、不处理会怎样"，答不上来就降级成工单或直接删掉 —— 因为一个班次超过 2 条 page，人就开始批量点确认，这时候告警系统已经不再是一种控制手段了。
 
 ---
 

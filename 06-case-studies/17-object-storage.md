@@ -5,6 +5,36 @@
 
 ---
 
+## 读这道题之前
+
+**如果你是直接翻到这道题的**：这题唯一的评分点是"字节和元数据是两个形状完全相反的系统"。第 1 题答不出，你会把它读成一道 QPS 题 —— 而它的 QPS 只有 510。
+
+**先确认你能回答这三个问题**
+
+1. 延迟、吞吐、并发三者什么关系？为什么一个只有 510 QPS 的服务，可能需要 65 台机器？
+   答不出 → 先读 [00-concepts §2 延迟 / 吞吐 / 并发](../00-foundations/00-concepts.md)、[§1 一个请求的旅程](../00-foundations/00-concepts.md)
+2. 强一致与最终一致的区别？"元数据说文件 ready、字节还没落地"属于哪一种不一致，谁负责让它收敛？
+   答不出 → 先读 [00-concepts §6 什么是一致性](../00-foundations/00-concepts.md)
+3. 客户端**一定**会在传完最后一片后崩溃、关标签页、换设备。为什么"只有一条兜底路径"等于没有兜底？
+   答不出 → 先读 [01-fundamentals §8 失败模型](../00-foundations/01-fundamentals.md)、[§5 幂等](../00-foundations/01-fundamentals.md)
+
+**这道题会用到的构件**
+
+| 构件 | 用在哪 | 详见 |
+|---|---|---|
+| 对象存储当"数据库"、条件写、首字节延迟 | §4.3 覆盖写与并发、§4.5 分层的物理下限 | [`01-storage-engines.md`](../01-building-blocks/01-storage-engines.md) §7 |
+| 出网流量成本、CDN、Anycast | §2.3 出网是存储的 3.2 倍、§4.6 下载路径 | [`04-networking-and-edge.md`](../01-building-blocks/04-networking-and-edge.md) §6、§7 |
+| 缓存键与失效、serve stale | §4.3 "覆盖写后 CDN 还是旧内容" | [`02-caching.md`](../01-building-blocks/02-caching.md) §6 |
+| Little's Law、峰谷比、成本建模 | §2.1 峰值字节速率、§2.4 并发连接不是瓶颈 | [00-concepts §2](../00-foundations/00-concepts.md)、[`02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §1、§3、§6 |
+| 事件驱动、双向对账 | §3 事件面（扫毒 / 缩略图 / 索引）、§4.3 三种不一致 | [`02-event-driven-and-cqrs.md`](../02-architecture-patterns/02-event-driven-and-cqrs.md) §1 |
+
+**这道题的一句话本质**
+
+> **元数据与字节是两个形状完全相反的系统：数据量差 10,000 倍、QPS 差 50 倍且方向相反、一致性要求一个强一致一个不可变。**
+> 所以它们必须是两个存储，而第一条推论就是：文件字节永远不经过应用服务器。分片、断点续传、去重、分层、可撤销分享 —— 全是这一个决策的推论。
+
+---
+
 ## 0. 45 分钟怎么分配这道题
 
 | 时间 | 做什么 | 这一段的得分点 |
@@ -30,7 +60,7 @@
 | 2 | **上传后需要服务端处理吗**（转码 / 扫毒 / 缩略图 / 提取文本）？ ⚠ | "要扫毒和缩略图" | **不问就会做错方向**：需要处理 = 对象在"传完"和"可用"之间有一个必经状态，整个一致性模型都不同 |
 | 3 | 读写比？下载是热点集中还是均匀？ | "读写 10:1，20% 的对象占 80% 的下载" | 决定 CDN 值不值、缓存分层怎么切 |
 | 4 | 访问控制粒度：公开 / 私有 / 可撤销的分享链接？ | "三种都要" | "可撤销"这三个字会否掉裸预签名 URL 方案，见 §4.6 |
-| 5 | 需要版本化（versioning）和回收站吗？ | "要 30 天回收站，版本化 v2 再说" | 决定删除是写 delete marker 还是真删，决定去重的引用计数怎么做 |
+| 5 | 需要版本化（versioning）和回收站吗？ | "要 30 天回收站，版本化 v2 再说" | 决定删除是写 delete marker（删除标记：新写一行"此 key 已删"的版本，字节和历史版本都还在）还是真删，决定去重的引用计数怎么做 |
 | 6 | 用户地理分布？有数据驻留（data residency）要求吗？ | "全球，欧盟数据要留在欧盟" | 决定单 region 还是多 region、CDN 还是多 bucket |
 | 7 | 存储成本有目标吗？留存期多长？ | "尽量低，合规要求留 7 年" | 7 年 = 分层和归档是必答项，不是优化项 |
 | 8 | 自建存储还是用托管对象存储？ | "用托管的" | 见 §6"什么时候这个方案是错的" |
@@ -59,14 +89,18 @@
 
 ```
 单台 4 vCPU 云主机做 TLS 终止 + 流式转发的实际上限 ≈ 100–200 MB/s，取 150
- （用户态拷贝 + HTTP 解析 + 运行时 GC。上 kTLS + splice 能到 500 MB/s+，
+ （TLS 终止 = 在这台机器上解密 HTTPS、明文再往后转发）
+ （用户态拷贝 + HTTP 解析 + 运行时 GC。上 kTLS + splice —— 把 TLS 加解密下沉到内核、
+   数据在内核里直接从一个 socket 转到另一个，全程不进用户态内存 —— 能到 500 MB/s+，
    但那时你写的已经是一个代理，不是应用服务器了）
 
 峰值合计 347 + 3,470 = 3,817 MB/s ÷ 150 = 26 台跑满
   ÷ 60% 目标利用率 = 43 台   （> 70% 时排队延迟非线性上升，见 02-capacity-estimation §3）
   × 1.5（跨 3 AZ 且要能挂掉一个）= 65 台
 
-预签名直传后：create ~500 B + complete（ETag 列表，通常 < 1 KB）
+预签名直传（presigned URL：应用用自己的凭证预先签好一个带有效期和限定条件的 URL，
+  客户端拿着它**直接**读写对象存储，全程不需要任何凭证，字节也不经过你）后：
+  create ~500 B + complete（ETag 列表，通常 < 1 KB）
   → 应用层字节流量 200 万次 × 1 KB ≈ 2 GB/天 = 23 KB/s
   → 退化成一个约 850 QPS 的纯 JSON API（每请求约 3 次元数据查询，
      即 §2.4 那 2,700 的 DB QPS）→ 3 台（还是为了跨 AZ 冗余）
@@ -74,7 +108,7 @@
 
 > **65 台 → 3 台。这是这道题唯一必须背下来的数字对。**
 
-**注意一个常见的错误论据**：直传**不省出网单价**。EC2 → Internet 与 S3 → Internet 都是 $0.09/GB 量级，同 region 的 EC2 ↔ S3 走 gateway endpoint 免费。省的是机器、部署耦合和失败面（§4.1 会拆开讲）。真正把出网费砍掉的是 CDN —— [S3 → CloudFront 的回源（origin fetch）流量免费](https://aws.amazon.com/cloudfront/pricing/)。
+**注意一个常见的错误论据**：直传**不省出网单价**。EC2 → Internet 与 S3 → Internet 都是 $0.09/GB 量级，同 region 的 EC2 ↔ S3 走 gateway endpoint（网关端点：让流量走云内部路由而不出公网的一条通道）免费。省的是机器、部署耦合和失败面（§4.1 会拆开讲）。真正把出网费砍掉的是 CDN —— [S3 → CloudFront 的回源（origin fetch）流量免费](https://aws.amazon.com/cloudfront/pricing/)。
 
 ### 2.3 存储与成本
 
@@ -144,7 +178,7 @@
        大文件 / 视频：客户端并发 8 个 Range 请求（见 §4.6）
 ```
 
-**数据流说明（一次 50 GB 上传）**：①② 应用查去重表未命中 → 建 `objects` 行（`pending`）+ 发起 multipart upload 拿 `upload_id` → 按 `size` 算出 `part_size=16 MB`、片数 3,200，**只批量签发前 100 个 part URL**（不是一次签 3,200 个）。③④ 客户端 8 并发 PUT，用完 100 个 URL 再要下一批；中断后调 `ListParts` 拿服务端视角、只补缺片。⑤ `complete` 校验片数与 ETag → `verifying` → 发事件 → 扫毒通过 → `ready`。
+**数据流说明（一次 50 GB 上传）**：①② 应用查去重表未命中 → 建 `objects` 行（`pending`）+ 发起 multipart upload 拿 `upload_id` → 按 `size` 算出 `part_size=16 MB`、片数 3,200，**只批量签发前 100 个 part URL**（不是一次签 3,200 个）。③④ 客户端 8 并发 PUT，用完 100 个 URL 再要下一批；中断后调 `ListParts` 拿服务端视角、只补缺片。⑤ `complete` 校验片数与 ETag（对象存储在每片上传成功时返回的内容指纹，客户端把它原样回传，服务端据此确认"这一片确实完整落地了"；细节见 §4.2）→ `verifying` → 发事件 → 扫毒通过 → `ready`。
 
 **四条不可动摇的边界**：
 
@@ -263,9 +297,9 @@ CREATE TABLE objects (
 
 | 不一致 | 怎么产生 | 检测 | 收敛方式 |
 |---|---|---|---|
-| **字节在、元数据 pending** | 客户端传完最后一片，`complete` 调用失败或用户直接关了页面 | 每日双向对账：存储侧 Inventory ⨝ `objects` | `pending` 超 24 h → 删元数据 + abort multipart；**同时**存储侧 lifecycle 兜底 |
+| **字节在、元数据 pending** | 客户端传完最后一片，`complete` 调用失败或用户直接关了页面 | 每日双向对账：存储侧 Inventory（对象存储按日产出的全量对象清单文件，用它代替昂贵的 `ListObjects` 遍历）⨝ `objects` | `pending` 超 24 h → 删元数据 + abort multipart；**同时**存储侧 lifecycle 兜底 |
 | **元数据 ready、字节不在** | 生命周期规则误配、人为误删、跨 region 复制未完成 | 同上，反向差集 | 标记 `corrupted` + 告警 + 从版本/副本恢复。**绝不静默返回 404** |
-| **覆盖写后 CDN 还是旧内容** | 同 key 覆盖 + CDN 已缓存 | 覆盖后 CDN 返回内容的 hash ≠ 元数据 `etag` | **根本解：key 里带内容哈希，让"覆盖"变成"写新 key"**；退一步用 surrogate key 定点 purge |
+| **覆盖写后 CDN 还是旧内容** | 同 key 覆盖 + CDN 已缓存 | 覆盖后 CDN 返回内容的 hash ≠ 元数据 `etag` | **根本解：key 里带内容哈希，让"覆盖"变成"写新 key"**；退一步用 surrogate key（代理键：给一批 URL 打上同一个缓存标签，之后按标签一次性失效，不用逐个 URL purge）定点 purge |
 
 #### 覆盖写与并发
 
@@ -407,7 +441,7 @@ Range: bytes=0-8388607  →  206 Partial Content + Content-Range: bytes 0-838860
   ⇒ 所有对象存储 SDK 默认做并行 range 下载的原因，和服务端快不快无关
 ```
 
-其他用途：视频拖动（先拉 moov atom 再按需拉 segment）、PDF 分页、断点续下（`Range: bytes=N-`）。**CDN 必须开启 range GET 支持**，否则一次拖动会触发整个大文件回源。
+其他用途：视频拖动（先拉 moov atom —— MP4 的索引块，记录每一帧在文件里的偏移，播放器拿到它才知道"第 30 秒"要请求哪个字节区间 —— 再按需拉 segment）、PDF 分页、断点续下（`Range: bytes=N-`）。**CDN 必须开启 range GET 支持**，否则一次拖动会触发整个大文件回源。
 
 #### 预签名 URL 的有效期与"可撤销"
 
@@ -437,7 +471,7 @@ Range: bytes=0-8388607  →  206 Partial Content + Content-Range: bytes 0-838860
 |---|---|---|---|
 | **未完成 multipart 堆积** | 每年 91 TB 的幽灵账单，且在对象列表里**完全不可见** | `ListMultipartUploads` 计数 / Storage Lens 的 incomplete-MPU 字节数 | 配 `AbortIncompleteMultipartUpload` 7 天规则；存量用批量 abort 脚本一次性清 |
 | **`complete` 调用丢失 → 孤儿对象** | 字节已计费，用户看不到，元数据无记录 | 每日双向对账：Inventory ⨝ `objects` 的两个方向差集 | 有对象无元数据 → lifecycle 清；有元数据无对象 → 标 `corrupted` + 告警，**绝不静默 404** |
-| **单前缀 QPS 超限**（约 3,500 PUT/s、5,500 GET/s 每分区前缀） | `503 SlowDown`，批量上传成片失败 | 503 率 > 0.1% | key 加 hash 前缀打散；客户端 full jitter 退避；大批量任务提前分散前缀 |
+| **单前缀 QPS 超限**（约 3,500 PUT/s、5,500 GET/s 每分区前缀） | `503 SlowDown`，批量上传成片失败 | 503 率 > 0.1% | key 加 hash 前缀打散；客户端 full jitter 退避（重试间隔在 `[0, 上限]` 里取随机值，否则所有客户端的重试时刻仍会对齐成第二波洪峰，见 [`03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) §3）；大批量任务提前分散前缀 |
 | **预签名 URL 泄漏** | 私有对象被公开下载，且**无法撤销** | 同一签名出现在多个 IP；单对象下载量突增 | TTL 压到分钟级；分享链接改走可撤销 token 端点；按 signature 聚合访问日志告警 |
 | **生命周期规则误配** | 热数据被降到 Deep Archive，用户点下载等 12 小时；批量取回 $20/TB | 规则生效后 24 h 内 restore 请求数突增 | 规则上线前用 Inventory 做 dry-run；判据只用 `last_access_at`；新规则先在单个 bucket 灰度 |
 | **CDN 缓存旧版本** | 覆盖写后用户看到旧文件，"刷新也没用" | CDN 返回内容 hash ≠ 元数据 `etag` | 根本解：内容寻址 key（§4.3）；过渡期用 surrogate key 定点 purge |

@@ -5,6 +5,52 @@
 
 ---
 
+## 读这一章之前
+
+**你在工作中遇到过这个**
+
+上线第一周，有一个 run 在凌晨跑了 4 个小时、烧掉 $180 —— 它在"改文件 → 跑测试 → 没过 → 改回去"这四步之间转了两百多圈，
+每一圈的思考文本都写着"我已经接近了"。同一周另一个 run 在第 38 轮把一封邮件发出去之后进程被 OOM 杀掉，
+你按设计从 checkpoint 恢复，它又把同一封邮件发了一遍。
+这两件事都不是模型不够聪明造成的 —— 一件是没有终止闸门，一件是写操作没有幂等键。
+
+**需要先懂的概念**
+
+| 概念 | 一句话 | 详见 |
+|---|---|---|
+| 幂等 | 同一个操作执行多次，效果和执行一次相同 | [00-concepts §12](../00-foundations/00-concepts.md) |
+| 幂等键 | 客户端生成、服务端去重的请求标识，让重试不产生第二次副作用 | [00/01 §5](../00-foundations/01-fundamentals.md) |
+| 背压 | 处理不过来时向上游反向施压（拒绝/阻塞），而不是无限排队 | [00/01 §6](../00-foundations/01-fundamentals.md) |
+| 超时预算传播 | 剩余时间随请求逐层传下去，每层只减不加 | [00/01 §9](../00-foundations/01-fundamentals.md) |
+| 有状态 vs 无状态 | 判据是"随机杀掉一台，有没有东西永久消失" | [00-concepts §9](../00-foundations/00-concepts.md) |
+| 前缀缓存与失效级联 | 改了靠前的内容，它后面所有内容的缓存一起作废 | [02 §9](02-context-engineering-and-rag.md) |
+
+**这一章要回答的问题**
+
+1. 一个自己不知道该在哪停的循环，怎么保证它一定会停？停的时候又该做什么？
+2. 模型生成的代码要在哪里执行，才能在"防注入的分类器 100% 失效"这个前提下依然安全？
+3. Agent 跑到第 40 轮进程崩了，怎么恢复到"不会重复扣款"的程度？checkpoint 里必须有什么？
+4. 用户点了取消，一个已经扇出到 5 个子 Agent、3 个沙箱的 run 要怎么真的停下来？
+
+**本章新引入的术语**
+
+| 术语 | English | 一句话定义 |
+|---|---|---|
+| Agent 循环 / 轮 | agent loop / step | 「调模型 → 模型说要调工具 → 你的代码去执行 → 把结果塞回消息里再调模型」，重复一次算一轮 |
+| 工具调用 | tool use / function calling | 模型不亲自执行动作，只输出一个"我要调 X、参数是 Y"的结构化请求，由你的代码决定执行不执行 |
+| 终止判据 | termination criteria | 决定这个循环什么时候必须停下来的那组条件 |
+| 无进展检测 | no-progress detection | 一组不依赖模型自述、只看外部可观测变化的信号，用来判断它是不是在原地打转 |
+| 沙箱 | sandbox | 一个隔离的执行环境；里面的代码即使是恶意的，也伤不到宿主机、别的租户和你的凭据 |
+| microVM | microVM | 每个负载单起一台极小的虚拟机、带自己独立的内核，冷启动约 125 ms |
+| 提示注入 | prompt injection | 攻击者把指令藏在模型会读到的数据里（网页、邮件、文件名、工具返回值），让模型把它当命令执行 |
+| MCP | Model Context Protocol | 工具提供方与 Agent 运行时之间的对接协议，用来消掉"N 个 Agent × M 个工具"份集成代码 |
+| 检查点 | checkpoint | 把一次运行的状态定期落盘，进程崩了能从这里接着跑而不是从头来 |
+| 租约 | lease | 一个带过期时间的"这活归我了"的声明，持有者要定期续期；持有者挂掉租约自然过期，活被别人接走 |
+| 人在回路 | human-in-the-loop (HITL) | 在特定动作执行前强制停下来等人批准 |
+| 取消传播 | cancellation propagation | 取消信号要能逐层送达在飞的模型请求、工具调用和子 Agent，并有强制兜底 |
+
+---
+
 ## 1. Agent 循环的最小正确实现
 
 ```
@@ -51,7 +97,7 @@ def agent_run(run_id, task, budget: Budget, deadline_ts):
 | 步骤 | 陷阱 | 后果 | 对策 |
 |---|---|---|---|
 | 1 组装 | 系统提示里塞 `now()`、动态排序工具、把检索结果插到前面 | prompt cache 全废，成本 ×10、TTFT ×5 | 前缀逐 token 稳定；变化内容只 append 到末尾 |
-| 1 组装 | 中途改工具定义 | Anthropic 失效级联是 **tools → system → messages**，改 tool 定义 = **全部缓存失效** | 工具定义版本化、按会话冻结，变更走灰度（canary rollout） |
+| 1 组装 | 中途改工具定义 | Anthropic 失效级联是 **tools → system → messages**，改 tool 定义 = **全部缓存失效** | 工具定义版本化、按会话冻结，变更走灰度（canary rollout：新版本先只对一小部分流量生效，观察无异常再逐步放大） |
 | 2 模型 | 只处理 `stop_reason=end_turn` | `max_tokens` 截断时 tool_call 的 JSON 是残缺的 | 显式分支处理 `max_tokens` / `refusal` / `pause_turn` |
 | 3 校验 | 校验失败就抛异常终止 | 单次幻觉参数杀死整个 run | 把错误当**工具结果**回填，给 1–2 次自纠（self-correction）机会再终止 |
 | 3 授权 | 在沙箱里判权限 | 沙箱内的判断可被注入影响 | 授权在**沙箱外**做，沙箱只是第二道 |
@@ -59,6 +105,8 @@ def agent_run(run_id, task, budget: Budget, deadline_ts):
 | 4 执行 | 并行写同一资源 | Agent PR 合并冲突率实测 **27.67%** | 写单线程，或分文件/分资源所有权 |
 | 5 回填 | 原样塞入几十 KB 输出；顺序随完成先后变 | 上下文最大污染源；前缀漂移（prefix drift） → 缓存不命中 | 截断（truncation） + 落盘只回引用（§3）；按 `tool_use_id` 定序 |
 | 6 终止 | 判据放在循环底部 | 恢复后会多跑一轮、多花一次钱 | 放顶部，恢复即重新判定 |
+
+（`stop_reason` 是模型 API 返回的"这次为什么停下来"标志：`end_turn` 是说完了，`max_tokens` 是被输出长度上限截断了 —— 此时最后那个 tool_call 的 JSON 很可能只写了一半，`refusal` 是模型拒绝作答，`pause_turn` 是长任务的中途暂停、需要你原样带着继续请求。）
 
 **伪代码是"从上往下"读的，看不出同一轮里时间怎么交错。下图把一轮拉到时间轴上：模型只被调用两次，夹在中间的那段并行工具执行才是这一轮墙钟时间的大头。**
 
@@ -96,7 +144,7 @@ sequenceDiagram
 
 ## 2. 终止条件：Agent 系统的第一大 bug 源
 
-MAST 分类（1600+ 标注 trace / 7 个框架 / κ=0.88）里终止与验证相关问题合计约 **1/3**：不知道终止条件 **12.4%**、过早终止 **6.2%**、无/不完整验证 **8.2%**、错误验证 **9.1%**。生产遥测更直接：**14.2% 的总花费烧在最终失败的 run 上**。
+MAST（Multi-Agent System Failure Taxonomy，一套对 Agent 失败模式的公开分类体系，本章多处引用它的占比数字）分类（1600+ 标注 trace / 7 个框架 / κ=0.88，κ 是标注者之间的一致性系数，0.88 属于很高）里终止与验证相关问题合计约 **1/3**：不知道终止条件 **12.4%**、过早终止 **6.2%**、无/不完整验证 **8.2%**、错误验证 **9.1%**。生产遥测更直接：**14.2% 的总花费烧在最终失败的 run 上**。
 
 **终止必须是多个独立闸门（gate）的 OR，任一触发即停：**
 
@@ -189,7 +237,7 @@ def truncate(result, budget):
 
 | 并发上限层级 | 参数 | 建议值 | 缺失后果 |
 |---|---|---|---|
-| 单轮扇出（fan-out） | `TOOL_FANOUT` | 5–10 | 一轮拉起 50 个子任务打爆下游 |
+| 单轮扇出（fan-out：一次请求向下分发出 N 个并行的下游调用；N 越大，整体延迟越接近最慢那个下游的高分位，见 [`00/01 §7`](../00-foundations/01-fundamentals.md)） | `TOOL_FANOUT` | 5–10 | 一轮拉起 50 个子任务打爆下游 |
 | 单 run 并发 | 子 Agent 并发 | 参考 Claude Code Dynamic Workflows 硬上限：**同时最多 16 个 Agent、单次运行总计 1,000 个**，>25 个或预计 >150 万 token 时预警 | 扇出失控（Anthropic 观察到简单 query 被拉起 50+ 子 Agent） |
 | 组织级 | spend limit / TPM 配额 | 按团队日预算 | 一次跑飞的 workflow 吃掉全团队当天配额 |
 
@@ -220,9 +268,9 @@ def truncate(result, budget):
 错误码重编号：`HeaderMismatch` −32001→**−32020**、`UnsupportedProtocolVersion` −32004→**−32022**；**−32000～−32019 留给实现自定义，−32020～−32099 保留给规范**。弃用窗口 **≥12 个月**（Active / Deprecated / Removed 三态）。
 
 **传输**：`stdio`（本地子进程，凭据走环境变量）与 **Streamable HTTP**（远程）。
-**授权**：MCP server 只做 **OAuth 2.1 Resource Server，不做 Authorization Server**；强制 PKCE，[RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728) 做资源发现，[RFC 8707](https://datatracker.ietf.org/doc/html/rfc8707) resource indicator 把 token 绑到具体 server。**Authorization 对 MCP 是 OPTIONAL：HTTP 传输 SHOULD 遵循，STDIO SHOULD NOT。** **DCR（RFC 7591）已弃用**，改用 **Client ID Metadata Documents（CIMD）**；三项加固：授权响应带 `iss` 且客户端 **MUST** 在兑换 code 前校验（防 mix-up）、DCR 时 MUST 指定 `application_type`、**客户端凭据必须按 issuer 作 key 存储且 MUST NOT 跨 AS 复用**。**Token passthrough 是 MUST NOT**：server 必须校验 audience。
+**授权**：MCP server 只做 **OAuth 2.1 Resource Server，不做 Authorization Server**；强制 PKCE，[RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728) 做资源发现，[RFC 8707](https://datatracker.ietf.org/doc/html/rfc8707) resource indicator 把 token 绑到具体 server。**Authorization 对 MCP 是 OPTIONAL：HTTP 传输 SHOULD 遵循，STDIO SHOULD NOT。** **DCR（RFC 7591）已弃用**，改用 **Client ID Metadata Documents（CIMD）**；三项加固：授权响应带 `iss` 且客户端 **MUST** 在兑换 code 前校验（防 mix-up）、DCR 时 MUST 指定 `application_type`、**客户端凭据必须按 issuer 作 key 存储且 MUST NOT 跨 AS 复用**。**Token passthrough（把客户端给你的 token 原样转发给下游）是 MUST NOT**：server 必须校验 audience（受众：token 里写明"这张票只对哪个服务有效"的那个字段；不校验它，一个为 A 服务签发的 token 就能拿来打 B 服务）。
 
-**生态规模三种口径不可互换**：官方 Registry **9,652** latest server（28,959 版本记录，2026-05-24，API 仍在 v0.1 freeze 非 GA）／第三方目录 Glama ~**19,831**（2026-03）／Anthropic 口径 10,000+ 活跃公共 server；SDK（Python+TS）月下载约 **9,700 万**。安全现状（Trend Micro，2025-11~2026-03）：**9,695** 个唯一 server 中 **5,832** 个有弱点，扣掉仅缺认证的 3,573 个后仍有 **2,259** 个确证问题、合计 **4,982** 条；分类 top 是任意文件访问 880、命令注入（command injection）476、SSRF 422、SQL 注入 211、提示注入（prompt injection）185（≈3.7%，注入类难自动检出，实际严重低估）。
+**生态规模三种口径不可互换**：官方 Registry **9,652** latest server（28,959 版本记录，2026-05-24，API 仍在 v0.1 freeze 非 GA）／第三方目录 Glama ~**19,831**（2026-03）／Anthropic 口径 10,000+ 活跃公共 server；SDK（Python+TS）月下载约 **9,700 万**。安全现状（Trend Micro，2025-11~2026-03）：**9,695** 个唯一 server 中 **5,832** 个有弱点，扣掉仅缺认证的 3,573 个后仍有 **2,259** 个确证问题、合计 **4,982** 条；分类 top 是任意文件访问 880、命令注入（command injection：参数被拼进 shell 命令里执行）476、SSRF 422（server-side request forgery，服务端请求伪造：诱导服务器去访问它本不该访问的地址，典型目标是云元数据端点和内网服务）、SQL 注入 211、提示注入（prompt injection）185（≈3.7%，注入类难自动检出，实际严重低估）。
 
 **最关键的一条认知——信任边界（trust boundary）在 tool description，不在 tool 调用**：`连接恶意 server → tools/list（到这一步已中招）→ 恶意描述进入 prompt → 模型按隐藏指令行事`，**全程不需要调用任何工具**。MCP 规范对工具描述投毒（tool poisoning） / rug pull / 跨 server shadowing **没有任何 MUST/SHOULD**，这是已知空白。补空白的是 [OWASP MCP Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/MCP_Security_Cheat_Sheet.html)（非规范）：**用密码学哈希 pin 住 tool 定义、任何变更告警**；**每个 MCP server 当作独立的不可信安全域**（独立凭证、独立 scope、绝不共享 token）；所有工具返回值视为不可信输入。
 
@@ -231,6 +279,8 @@ def truncate(result, budget):
 ## 6. 沙箱
 
 Agent 会执行模型生成的代码，而模型的输入里混着不可信内容。概率性防御（probabilistic defense）不能当边界——[arXiv 2510.09023](https://arxiv.org/abs/2510.09023)（OpenAI + Anthropic + GDM 联合）对 **12 个已发表防御**做自适应攻击（adaptive attack），多数 ASR **> 90%**，500 人红队（red team）后对全部 12 个达到 **100%** 成功；Anthropic 官方的表述是 **"Probabilistic defense has a non-zero miss rate"**。设计评审只有一条判据：**假设分类器 100% 失效，系统还剩什么？**
+
+读下表前先统一三个词：**syscall（系统调用）**是程序向操作系统内核请求服务的入口，读文件、发网络包、起进程都要走它；隔离方案的强弱基本等于"它对 syscall 的拦截有多彻底"。**冷启动**是从零把一个执行环境拉起来到能跑第一条命令所需的时间，Agent 每次调工具都可能付一次。**逃逸（escape）**指沙箱里的代码突破隔离、拿到宿主机上的能力。
 
 | 方案 | 隔离强度 | 冷启动（厂商口径，**不可跨厂商比**） | 开销 | 任意二进制 | 适用 |
 |---|---|---|---|---|---|
@@ -266,7 +316,7 @@ Anthropic 在自己的[容器化复盘](https://www.anthropic.com/engineering/ho
 
 ## 7. 长任务与可恢复执行
 
-| checkpoint 粒度 | 写放大（write amplification） | 崩溃损失 | 适用 |
+| checkpoint 粒度 | 写放大（write amplification：一次逻辑上的"存一下"引发多少次实际磁盘写入，见 [`00-concepts §11`](../00-foundations/00-concepts.md)） | 崩溃损失 | 适用 |
 |---|---|---|---|
 | 每轮循环后 | 中 | ≤1 轮（一次模型调用 + 一批工具） | **默认选择** |
 | 每个工具调用后 | 高 | ≤1 个工具 | 工具昂贵（长跑构建、付费 API） |
@@ -285,11 +335,11 @@ LangGraph 的 `durability` 三档正是这个谱系：`"exit"` 只在图退出�
   "code_version":"runtime@2.4.1|prompt@v7|tools@sha256:…" }  // 恢复时必须校验
 ```
 
-`code_version` 最容易漏：**用新版本的 prompt / 工具定义恢复旧 run，行为不可预测。** 升级要用 rainbow deployment 灰度切流，因为不能把正在跑的 Agent 一次性换版本。
+`code_version` 最容易漏：**用新版本的 prompt / 工具定义恢复旧 run，行为不可预测。** 升级要用 rainbow deployment（彩虹发布：新旧多个版本同时在线，已经开跑的 run 一直留在它启动时那个版本上直到跑完，新 run 才进新版本）灰度切流，因为不能把正在跑的 Agent 一次性换版本。
 
 ### checkpoint ≠ durable execution
 
-这一点**存在争议**：Diagrid 主张 LangGraph / CrewAI / Google ADK 的 checkpoint 模型对生产 Agent workflow 不够（缺确定性重放（deterministic replay）、跨服务编排、精确一次（exactly-once）副作用）；LangChain 主张配了 checkpointer 即为 durable execution，可任意点 pause/resume。**分歧的根子是"durable"的定义不同：状态快照恢复 vs 执行历史重放。** 但双方对工程结论一致——**任何有外部副作用的写操作必须携带由 `(workflow_id, step_id)` 派生的幂等键（idempotency key）**：
+这一点**存在争议**：Diagrid 主张 LangGraph / CrewAI / Google ADK 的 checkpoint 模型对生产 Agent workflow 不够（缺确定性重放（deterministic replay：把历史上每一步的结果按顺序记进日志，恢复时重跑代码但直接读日志里的旧结果，从而精确复现到崩溃那一刻）、跨服务编排、精确一次（exactly-once：一个副作用最终恰好发生一次；对比 at-least-once 至少一次，可能重复）副作用）；LangChain 主张配了 checkpointer 即为 durable execution，可任意点 pause/resume。**分歧的根子是"durable"的定义不同：状态快照恢复 vs 执行历史重放。** 但双方对工程结论一致——**任何有外部副作用的写操作必须携带由 `(workflow_id, step_id)` 派生的幂等键（idempotency key）**：
 
 ```python
 def exec_with_idempotency(call, key):
@@ -397,6 +447,8 @@ Five Eyes 五国联合指南（2026-05-01，CISA + NSA + ASD + CCCS + NCSC-NZ + 
 
 Agent 负载和普通 HTTP 负载的根本差别：**单个请求持续数分钟到数小时，且大部分时间在等待**。线程/进程模型完全不适用，必须是"持久化任务 + 无状态 worker + 租约"。
 
+（本节两个词：**水位线（watermark）**是一条预设的容量刻度线，越过就触发动作 —— 这里指全局在跑的 run 数超过阈值就开始拒新；**信号量（semaphore）**是一个计数式的并发闸门，最多放 N 个任务同时进入，满了后来者要么排队要么被拒。整节讲的是[`00/01 §6`](../00-foundations/01-fundamentals.md) 那条背压原理在 Agent 上的具体形态。）
+
 ```
  API ──► runs 表(PENDING) ──准入：每租户并发配额 / 全局水位──► worker pool（无状态，持租约）
                              超限 → 429 + Retry-After            │
@@ -431,7 +483,7 @@ Agent 负载和普通 HTTP 负载的根本差别：**单个请求持续数分钟
 {"seq":9,"type":"run.finished",    "status":"succeeded","stop_reason":"model_done"}
 ```
 
-1. **`seq` 单调递增 + 服务端保留最近 N 条**，断线后客户端带 `Last-Event-ID` 续传。注意 **MCP 在 2026-07-28 删掉了自己的 SSE 断线续传**，产品层必须自己实现这一层，不能指望协议。
+1. **`seq` 单调递增 + 服务端保留最近 N 条**，断线后客户端带 `Last-Event-ID` 续传。注意 **MCP 在 2026-07-28 删掉了自己的 SSE 断线续传**（SSE / Server-Sent Events：服务端通过一条一直不关的 HTTP 连接，持续往客户端推事件；断线续传指重连时带上"我收到的最后一条编号"，服务端从那之后接着发），产品层必须自己实现这一层，不能指望协议。
 2. **`tool.started` 要早于工具真正开始**（获得信号量之前就发），否则用户会看到几秒"死寂"。
 3. **参数只发预览（`args_preview`）** —— 参数里可能有密钥或大 payload；`tool.finished` 只发摘要 + artifact 引用，与 §3 的截断策略共用同一套 artifact store。
 4. **`usage` 每轮发一次**，前端实时显示花费——这是控制成本焦虑最有效的产品手段。
@@ -459,6 +511,14 @@ Agent 负载和普通 HTTP 负载的根本差别：**单个请求持续数分钟
 
 > **面试金句**
 > "Agent 运行时最难的地方在于它同时是三样东西：一个**非确定性的**决策循环、一个**执行不可信代码的**沙箱调度器、一个**有外部副作用的**分布式作业。这三者叠加意味着——重试必须幂等，因为副作用不可回滚；隔离必须是确定性的，因为决策是概率性的；预算必须是硬闸门，因为循环本身不知道该在哪停。我会先把这三条钉死，再谈 prompt 怎么写。"
+
+---
+
+## 这一章的三句话
+
+1. **终止不能交给模型判断，因为"我做完了"和"我卡死了"在它的输出分布里长得一模一样。** 所以终止必须是四个确定性闸门的 OR —— 轮次、预算、墙钟、外部世界零变化 —— 而"进展"的唯一可靠定义是外部可观测状态变了（新 commit、多过一个测试），不是模型自称有进展。
+2. **沙箱的强度只能按"分类器 100% 失效"来评估。** 概率性防御在自适应攻击下 ASR 超过 90%、红队后 100%，所以模型生成的代码永远不能跑在裸容器里；而真正决定爆炸半径的不是网络白名单，是"凭据根本没进沙箱"——放行 `api.anthropic.com` 也拦不住攻击者把自己的 API key 放进工作区。
+3. **可恢复不等于不重复，可恢复只有配上幂等键才成立。** 任何有外部副作用的写操作都必须带一个从 `(run_id, step_id, tool_use_id)` 派生的键并一路传给下游，否则"从 checkpoint 恢复"在用户那边的名字叫"被扣了两次款"；同理，取消只保证不再产生新的副作用，已经发出去的邮件收不回来。
 
 ---
 

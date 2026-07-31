@@ -5,11 +5,57 @@
 
 ---
 
+## 读这一章之前
+
+**你在工作中遇到过这个**
+
+一个企业客户在 Okta 里停用了刚离职的员工，他们的安全负责人问你"多久生效"，你答"实时"。
+四十分钟后他发来一张截图：那个人的浏览器标签页还开着，刷新一下项目文档照样打得开。
+原因是你的 access token 是自包含的 JWT、TTL 一小时，SCIM 那条停用只改了你的用户表，请求路径上没有任何一处会去回头看它。
+这条后来变成了 SOC 2 报告里的一条 finding，而修它要动的是整个令牌生命周期的设计，不是加一个 `if`。
+
+**需要先懂的概念**
+
+| 概念 | 一句话 | 详见 |
+|---|---|---|
+| 关键路径 | 用户必须等它完成的那条链；挂在上面的每个依赖都会把自己的可用性乘进去 | [00-concepts §1、§10](../00-foundations/00-concepts.md) |
+| 强一致 vs 最终一致 | 写完之后别人立刻读，是一定读到新值，还是可能读到旧值 | [00-concepts §6](../00-foundations/00-concepts.md) |
+| p99 与尾延迟放大 | 排序后第 99% 的那个耗时；一个请求要打多次下游时，尾部会被放大 | [00-concepts §3](../00-foundations/00-concepts.md)、[00/01 §7](../00-foundations/01-fundamentals.md) |
+| 缓存与缓存键 | 把算过的结果暂存在快的地方；缓存键决定了"什么算同一个问题" | [00-concepts §11](../00-foundations/00-concepts.md)、[01/02](../01-building-blocks/02-caching.md) |
+| 幂等 | 同一操作做多次和做一次效果相同 | [00-concepts §12](../00-foundations/00-concepts.md) |
+| 租户 / tenant_id | 一套系统同时服务多个互不可见的客户组织 | [02/03](../02-architecture-patterns/03-multi-tenancy.md) |
+
+**这一章要回答的问题**
+
+1. 认证可以整个外包给 Okta，授权为什么不能？这条线到底划在哪里？
+2. 一个 JWT 校验库默认信任 header 里的 `alg` 字段，攻击者能拿它做出什么？
+3. 用户刚被移出项目，他立刻刷新页面还能看到内容 —— 这是 bug，还是一个你可以明码标价的取舍？
+4. Agent 代表用户去调第三方 API，为什么绝对不能把用户的 token 直接传下去？
+
+**本章新引入的术语**
+
+| 术语 | English | 一句话定义 |
+|---|---|---|
+| 认证 | authentication (AuthN) | 确认"你是谁"：把一个请求和一个已知身份对应起来 |
+| 授权 | authorization (AuthZ) | 确认"你能不能对这个具体资源做这件具体的事" |
+| 委派 | delegation | 一个主体被授权代表另一个主体去行事，两个主体都要能被追溯 |
+| OIDC | OpenID Connect | 建在 OAuth 2.0 之上的标准登录协议，登录完给你一个描述"这个人是谁"的令牌 |
+| JWT | JSON Web Token | 一段自带签名的凭证文本，任何人都能读、但改一个字节签名就对不上，所以验签方不用回头问签发方 |
+| 撤销 | revocation | 在凭证自然过期之前主动让它失效 |
+| SCIM | SCIM | IdP 主动向你推送"这个人入职了 / 改组了 / 离职了"的标准接口 |
+| RBAC / ABAC / ReBAC | role- / attribute- / relationship-based access control | 三种授权模型：按角色判 / 按属性判 / 按主体与资源之间的关系判 |
+| 关系元组 | relation tuple | 一条形如"某个对象的某个关系上挂着某个主体"的记录，是 ReBAC 存储的最小单位 |
+| 一致性令牌 | zookie / ZedToken | 权限写入后返回的一个不透明标记，后续查询带上它就保证读到的快照不早于那次写入 |
+| 混淆代理 | confused deputy | 一个本身有权限的组件被诱导，替没有权限的调用方完成了那个动作 |
+| 令牌交换 | token exchange | 拿一个令牌去签发方换一个受众更窄、权限更小、活得更短的新令牌 |
+
+---
+
 ## 1. 三个必须分清的词
 
 | 概念 | 回答的问题 | 谁负责 | 出错的后果 |
 |---|---|---|---|
-| **Authentication（认证 / AuthN）** | 你是谁 | IdP（Okta/Entra/Auth0/自建） | 账号被冒用（account takeover） |
+| **Authentication（认证 / AuthN）** | 你是谁 | IdP（Identity Provider，身份提供方：专门负责验证用户身份并签发凭证的那个系统 —— Okta/Entra/Auth0/自建） | 账号被冒用（account takeover） |
 | **Authorization（授权 / AuthZ）** | 你能对这个资源做什么 | **你自己的授权服务** | 越权访问（unauthorized access）= 数据泄露（data breach） |
 | **Delegation（委派）** | 谁在代表谁行事 | Token 交换层 | Agent 拿着用户全部权限乱跑 |
 
@@ -24,6 +70,9 @@
 ## 2. OIDC：唯一你应该用的登录协议
 
 [OpenID Connect Core 1.0](https://openid.net/specs/openid-connect-core-1_0.html) 是 OAuth 2.0 之上的认证层。2026 年的正确姿势是 **Authorization Code + PKCE**，其他 flow 基本都被 [RFC 9700（OAuth 2.0 Security BCP，2025-01）](https://www.rfc-editor.org/rfc/rfc9700.html) 判了死刑：implicit flow **MUST NOT** 用，password grant（ROPC）**MUST NOT** 用，PKCE 对所有客户端（含机密客户端）都要求。
+
+下图里 **RP（Relying Party，依赖方）就是你的应用**，**OP（OpenID Provider）就是 IdP**。
+**PKCE（Proof Key for Code Exchange）**是这样一件事：客户端先自己造一个随机串 `verifier`，只把它的哈希（`code_challenge`）发给 IdP，最后换 token 时才出示原串 —— 这样即使授权码在回调途中被别人截走，拿不出原串就换不到 token。
 
 ```
 浏览器                你的后端 (RP)                    IdP (OP)
@@ -67,7 +116,7 @@ JWT 的问题不是格式，是**几乎每个库的默认配置都不安全**。
 | 5 | `iss` 必须匹配预期 IdP | 多租户 IdP 下别的租户的 token 被接受 |
 | 6 | `exp` / `nbf`，时钟偏移（clock skew）≤ 60s | 过期 token 长期可用 |
 | 7 | `typ` 校验：access token 应为 `at+jwt`（[RFC 9068](https://www.rfc-editor.org/rfc/rfc9068.html)） | ID token 被当 access token 使用 |
-| 8 | JWKS 缓存 TTL 5–10 min；遇到未知 `kid` 触发**限流的**刷新 | 不刷新 → 轮换密钥时全站 401；不限流 → 伪造 `kid` 打爆 IdP |
+| 8 | JWKS（JSON Web Key Set：IdP 公开发布的验签公钥集合，你按 `kid` 从里面挑一把用）缓存 TTL 5–10 min；遇到未知 `kid` 触发**限流的**刷新 | 不刷新 → 轮换密钥时全站 401；不限流 → 伪造 `kid` 打爆 IdP |
 | 9 | payload 不放敏感数据 | JWT 是 **base64 不是加密**，任何人可读 |
 
 > ⚠️ 不要自己写 JWT 校验。用 IdP 官方 SDK 或成熟库，并**显式传入允许的算法列表**——库的"自动检测 alg"就是漏洞本身。
@@ -83,7 +132,7 @@ access token TTL = 你能容忍的"权限已撤销但仍可用"的窗口
 | 手段 | 撤销延迟 | 代价 |
 |---|---|---|
 | **短 TTL（5–15 min）** | ≤ TTL | 刷新频率上升；对多数场景**这就是答案** |
-| **jti 黑名单（denylist）**（Redis，只存到 `exp`） | 秒级 | 每次校验多一次 Redis 读（~0.5ms）；存储 = 撤销量 × TTL |
+| **jti（JWT ID：签发时写进 token 的唯一编号）黑名单（denylist）**（Redis，只存到 `exp`） | 秒级 | 每次校验多一次 Redis 读（~0.5ms）；存储 = 撤销量 × TTL |
 | **不透明 token（opaque token）+ introspection**（[RFC 7662](https://www.rfc-editor.org/rfc/rfc7662.html)） | 立即 | 每次校验一次网络调用；IdP 变成关键路径 |
 | **会话版本号**：JWT 带 `sv`，与用户表的 `session_version` 比对 | 立即 | 需要一次用户表读（可缓存），撤销 = `session_version++` |
 
@@ -215,7 +264,7 @@ edit → org->administrate
      → 查 organization:acme#admin@user:alice          ✅ HIT
 ```
 
-**这就是 ReBAC 的价值**：alice 的 admin 权限自动覆盖了 acme 下所有项目，**没有任何一条元组把 alice 和 atlas 直接关联**。用 RBAC 表达同样的语义，你要么给 alice 写 N 条项目级角色（写放大 write amplification = 项目数），要么在应用里手写 join（那正是 Zanzibar 要消灭的东西）。
+**这就是 ReBAC 的价值**：alice 的 admin 权限自动覆盖了 acme 下所有项目，**没有任何一条元组把 alice 和 atlas 直接关联**。用 RBAC 表达同样的语义，你要么给 alice 写 N 条项目级角色（写放大 write amplification：一次逻辑写引发多次实际写，见 [00-concepts §12](../00-foundations/00-concepts.md) —— 这里放大倍数 = 项目数），要么在应用里手写 join（那正是 Zanzibar 要消灭的东西）。
 
 ### 6.5 zookie / 一致性：新旧敌人问题
 
@@ -267,7 +316,7 @@ Zanzibar 的核心难点不是图遍历，是**一致性**。两个失效场景�
 
 1. **批量 check**：列表页面用 `CheckBulkPermissions`（SpiceDB）/ `BatchCheck`（OpenFGA），把 50 次 RTT 变成 1 次。**N+1 授权是最常见的性能事故。**
 2. **不要用 `LookupResources` 做主查询**。"列出我能看的所有项目"在资源量大时会退化。正确做法是**先按业务过滤（分页 + tenant_id）拿 100 条候选，再批量 check 过滤**；只有在权限极稀疏时才反过来。
-3. **反规范化（denormalization）/ Leopard 式索引**：Zanzibar 用一个专门的索引服务预计算深层组成员关系。自建的等价物是"把稳定的、扇出（fan-out）巨大的关系（org 成员、team 成员）物化（materialize）成扁平表"，并接受**秒级**的更新延迟。
+3. **反规范化（denormalization）/ Leopard 式索引**：Zanzibar 用一个专门的索引服务预计算深层组成员关系。自建的等价物是"把稳定的、扇出（fan-out：一个节点往下连出去的边极多，见 [00/01 §7](../00-foundations/01-fundamentals.md)）巨大的关系（org 成员、team 成员）物化（materialize：把每次都要现算的结果预先算好、存成一张可以直接查的表）成扁平表"，并接受**秒级**的更新延迟。
 4. **两级缓存**：进程内 LRU（TTL 1–5s，按 ZedToken 分桶）+ 授权服务自身的分布式缓存。注意**缓存键必须包含一致性 token**，否则你会缓存出越权。
 
 > **面试金句**：
@@ -309,8 +358,8 @@ organization        ← 计费、合同、数据驻留、SSO 配置的边界
 | 方案 | 适用 | 优点 | 代价与陷阱 |
 |---|---|---|---|
 | **API key** | 客户集成、CLI、Webhook 验签 | 上手成本最低 | 长期有效 = 泄露即长期沦陷。**必须**：前缀可识别（`sk_live_`）便于扫描器检出、只存哈希、**支持 scope 与到期**、支持轮换期双 key 并存、泄露检测（GitHub secret scanning 伙伴计划） |
-| **OAuth 2.0 client credentials** | 第三方应用、合作伙伴 | 短期 token、scope 化、可撤销 | 需要 AS；client_secret 仍是长期凭证 → 用 **private_key_jwt** 或 mTLS 客户端认证 |
-| **mTLS / SPIFFE** | 服务间、零信任（zero trust）内网 | 无长期共享秘密，身份绑定在工作负载上 | 证书生命周期管理（SPIFFE SVID 通常小时级）；出问题时排查成本高 |
+| **OAuth 2.0 client credentials** | 第三方应用、合作伙伴 | 短期 token、scope 化、可撤销 | 需要 AS（Authorization Server，授权服务器：签发、刷新与撤销 token 的那个服务）；client_secret 仍是长期凭证 → 用 **private_key_jwt** 或 mTLS 客户端认证 |
+| **mTLS（双向 TLS：不只客户端验服务端，服务端也用证书验客户端）/ SPIFFE（给每个工作负载自动签发短期证书作为身份的开源标准）** | 服务间、零信任（zero trust）内网 | 无长期共享秘密，身份绑定在工作负载上 | 证书生命周期管理（SPIFFE SVID 通常小时级）；出问题时排查成本高 |
 | **OIDC 联合身份（workload identity federation）** | CI/CD → 云资源 | **完全无静态凭证**：GitHub Actions 的 OIDC token 换云上短期凭证 | 信任策略写错（`sub` 通配太宽）= 任何仓库都能拿你的云权限 |
 
 **默认建议**：对外用 API key（带 scope + 到期 + 轮换），对内用 mTLS/SPIFFE，CI/CD 一律用 OIDC 联合身份。**任何地方都不要长期存明文 secret。**
@@ -332,8 +381,8 @@ user ──────────> agent ────────────�
 
 **核心反模式**：让 Agent 直接持有用户的 token。后果是——
 - 下游日志里的主体是"用户"，无法追责、无法单独封禁这个 Agent；
-- Agent 被提示注入（prompt injection）劫持时，攻击者拿到的是**用户的完整权限**；
-- 一个 MCP server 拿到的 token 可以去打另一个受众的 API（confused deputy）。
+- Agent 被提示注入（prompt injection：攻击者把指令藏进模型会读到的内容里 —— 网页、文档、工具返回值 —— 让模型把它当成任务去执行，见 [04/07](../04-ai-agent-systems/07-agent-security.md)）劫持时，攻击者拿到的是**用户的完整权限**；
+- 一个 MCP server（Model Context Protocol：规定 Agent 如何发现并调用外部工具与数据源的开放协议，见 [04/03](../04-ai-agent-systems/03-agent-runtime.md)）拿到的 token 可以去打另一个受众的 API（confused deputy）。
 
 ### 10.2 [MCP 授权规范（rev 2025-11-25）](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization) 的硬性约束
 
@@ -436,7 +485,7 @@ allow(agent:a7 on behalf of user:bob, edit, project:atlas) =
 **"Agent 拿到了用户的全部权限"的解法就是这个交集**，加上四个约束：
 
 1. **每任务派生的短命凭证（short-lived credentials）**：任务开始时按任务声明的资源清单换一批 5–15 分钟的窄 scope token，任务结束即作废。
-2. **凭证不进沙箱**：长期 token 由沙箱外的代理持有，只向沙箱内下发派生凭证（derived credentials）（MCP 规范的 MUST NOT + 主流产品实现双向印证）。
+2. **凭证不进沙箱**（sandbox：Agent 真正执行代码与工具的那个受限环境；它能读到的一切都要假设会被提示注入者读到）：长期 token 由沙箱外的代理持有，只向沙箱内下发派生凭证（derived credentials）（MCP 规范的 MUST NOT + 主流产品实现双向印证）。
 3. **每个 MCP server / 工具当作独立的不可信安全域（untrusted security domain）**：独立凭证、独立 scope、**绝不共享 token**、tool 定义做哈希 pin 防 rug pull。
 4. **高影响动作走人工审批（human-in-the-loop approval）**，且**清单必须在设计期静态定义，不得运行时交给 Agent 自判**（[Five Eyes 联合指南《Careful Adoption of Agentic AI Services》，2026-05](https://www.cisa.gov/)）。典型清单：转账、权限/身份变更、对外发送消息、发布公开内容、不可逆删除、生产写操作。
 
@@ -460,6 +509,14 @@ allow(agent:a7 on behalf of user:bob, edit, project:atlas) =
 | **在 JWT 里放 PII** | base64 不是加密 | 只放标识符 |
 | **一开始就上 ReBAC** | 多一个关键路径上的有状态服务要运维 | 没有共享/继承语义时，RBAC 表就够 |
 | **SCIM `DELETE` 真删用户** | 破坏审计链与历史归属 | `active: false` |
+
+---
+
+## 这一章的三句话
+
+1. **认证外包，授权自建。** OIDC 是标准协议，自研没有任何收益且极易出错；而没有任何现成产品知道你的 `workspace` 和 `project` 是什么关系 —— 越权恰恰只发生在那个没人替你想过的关系上。
+2. **access token 的 TTL 就是你真实的去配置 SLA。** 文档里写"离职后立即失效"没有意义：SCIM 停用只改了用户表，一个还没过期的自包含 token 在整个 TTL 内照样能用，实际生效时间等于 TTL，不等于你的策略文档。
+3. **Agent 的正确权限是三个集合的交集**：用户本来就有的权限 ∩ 这个 Agent 被授予的能力上限 ∩ 本次任务批准的范围。只做第一项，就等于把用户的全部权限交给了一个随时可能被提示注入劫持的程序，而下游审计日志里连"是谁干的"都记不对。
 
 ---
 

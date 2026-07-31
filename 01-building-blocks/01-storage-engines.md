@@ -4,6 +4,54 @@
 
 ---
 
+## 读这一章之前
+
+**你在工作中遇到过这个**
+
+订单表上线时只有主键。半年里为了让几个报表查询快一点，你陆续加到了 8 个索引。
+某天写入 QPS 从 3000 掉到 800，磁盘 util 是 100% 但实际吞吐低得离谱；
+`pg_total_relation_size` 显示这张逻辑上 200 GB 的表占了 700 GB，还在涨；
+你把 autovacuum 调激进之后，p99 开始每 20 分钟准时毛刺一次。
+这三件事看着毫无关系，其实是同一个东西的三个出口 —— 而它在你加第一个索引那天就已经开始计息了。
+
+**需要先懂的概念**
+
+| 概念 | 一句话 | 详见 |
+|---|---|---|
+| 索引在优化什么 | 把"扫全表逐行比对"变成"几次定位"，代价是写变慢、占空间 | [00-concepts §11](../00-foundations/00-concepts.md) |
+| 写放大 | 一次逻辑写入引发多次实际写入设备的动作 | [00-concepts §11](../00-foundations/00-concepts.md) |
+| 事务与隔离级别 | 并发事务被允许互相干扰到什么程度 | [00-concepts §7](../00-foundations/00-concepts.md) |
+| p50 / p99 | 分位数描述的是分布形状；周期性毛刺只在尾部看得见 | [00-concepts §3](../00-foundations/00-concepts.md) |
+| 三个数量级 | 内存 ~100 ns、SSD ~100 µs、跨洲网络 ~100 ms，每级差 1000× | [00/01 §1](../00-foundations/01-fundamentals.md) |
+| 副本 / 分片 | 同一份数据存多份 vs. 把数据切成互不重叠的块 | [00-concepts §5](../00-foundations/00-concepts.md) |
+
+**这一章要回答的问题**
+
+1. 同样一条 `UPDATE` 改 100 字节，为什么在 B+Tree 上要落 16 KB、在 LSM 上只落几十字节？这个差价我最终付在了哪里？
+2. 我的表逻辑上 200 GB，磁盘上却占 700 GB 且还在涨 —— 空间去哪了，怎么把它拿回来？
+3. 同一句 `SELECT AVG(price)`，为什么列存能比行存快 100 倍？具体是哪三个机制在叠加？
+4. 向量检索加一个 `WHERE tenant_id = ?`，为什么可能一条结果都返回不了？
+5. 什么时候我该放弃"一律用 Postgres"？临界信号能不能写成一个具体数字？
+
+**本章新引入的术语**
+
+| 术语 | English | 一句话定义 |
+|---|---|---|
+| RUM 猜想 | RUM conjecture | 读放大、写放大、空间放大这三项开销，任何存储结构最多同时优化其中两项 |
+| 读放大 | read amplification | 为了拿到应用真正需要的那些字节，实际从设备上读了多少倍的字节 |
+| 空间放大 | space amplification | 数据在设备上实际占用的空间，是它逻辑大小的多少倍 |
+| 原地更新 | in-place update | 直接改写磁盘上老数据所在的那个位置，而不是把新版本追加到别处 |
+| 预写日志 | write-ahead log (WAL) | 改数据之前，先把"打算改什么"按顺序追加进一个只增不改的日志文件；崩溃后照它重放或回滚 |
+| MemTable / SSTable | memtable / sorted string table | 新写入先进内存里的有序表；写满后整块按键有序地落成一个只读文件 |
+| 合并压实 | compaction | 后台把多个只读文件按键归并、重写成更少更大的文件，顺便丢掉被覆盖和被删除的旧记录 |
+| 布隆过滤器 | Bloom filter | 一个很小的位图，回答"这个键在不在这个文件里"；说"不在"时 100% 正确，说"在"时有一定误判率 |
+| MVCC / 表膨胀 | MVCC / bloat | 更新一行时不覆盖旧值，而是留下一个新版本；旧版本靠后台回收，回收跟不上就是表膨胀 |
+| 行存 / 列存 | row store / columnar store | 一行的所有字段在磁盘上连续存放 / 同一列的所有值连续存放 |
+| 覆盖索引 / 回表 | covering index / table lookup | 索引里已经带着查询要的全部列，不用再拿主键去主表捞那一整行 |
+| 近似最近邻 / 召回率 | approximate nearest neighbor (ANN) / recall | 只找"足够近"的向量而不保证最近；召回率 = 返回的结果里有多少是真正的前 k 个 |
+
+---
+
 ## 1. RUM 猜想：所有存储的根本约束
 
 **RUM Conjecture**：任何存储结构，在 **Read（读放大）、Update（写放大）、Memory（空间放大）** 三者中，最多优化两个。
@@ -42,9 +90,9 @@
 ```
 
 **写路径**：
-1. 找到目标叶子页（可能多次随机 IO，但内部节点通常在 buffer pool 里）
+1. 找到目标叶子页（可能多次随机 IO，但内部节点通常在 buffer pool 里 —— **buffer pool**：数据库在自己进程内管理的一块内存，按页缓存最近用过的磁盘页，读写都先经过它）
 2. **原地修改（in-place update）** 该页
-3. 写 WAL（顺序）+ 脏页（dirty page）异步刷盘（随机）
+3. 写 WAL（顺序）+ 脏页（**dirty page**：内存里已经改过、但还没写回磁盘的那一页）异步刷盘（随机）
 4. 页满则分裂（page split），可能级联向上
 
 **关键特征**：
@@ -52,12 +100,12 @@
 - 读放大（read amplification）低：树高 3–4 层，热数据在内存，通常 **1 次磁盘 IO**
 - 空间放大（space amplification）低：页填充率（fill factor） ~70%
 - **范围扫描（range scan）快**：叶子页链表相连
-- 有 in-place update → **需要锁/latch**，高并发写会有页级竞争
+- 有 in-place update → **需要锁/latch**（latch：只在改一个内存页的那几微秒里持有的轻量互斥量，和事务级的行锁不是一回事），高并发写会有页级竞争
 
 ### LSM Tree
 
 ```
-写入 → MemTable（内存跳表/红黑树）
+写入 → MemTable（内存跳表/红黑树 —— 一种能保持有序、插入和查找都是 O(log n) 的内存结构）
          ↓ 满了，冻结
        Immutable MemTable
          ↓ flush（顺序写）
@@ -106,7 +154,7 @@
 空间放大 SA = 实际占用空间 / 逻辑数据大小
 ```
 
-**为什么重要**：SSD 有写入寿命（TBW）。写放大 30× 意味着你的 SSD 寿命只有标称的 1/30。
+**为什么重要**：SSD 有写入寿命（TBW，terabytes written —— 厂商标称这块盘一生总共能被写入多少 TB，写完就该换）。写放大 30× 意味着你的 SSD 寿命只有标称的 1/30。
 
 **生产中的信号：**
 
@@ -125,10 +173,10 @@
 
 | | OLTP | OLAP |
 |---|---|---|
-| 查询 | 点查（point query）、小范围，涉及少数行的多个列 | 扫描大量行的少数列 |
+| 查询 | 点查（point query：按主键或唯一键取出确定的一行）、小范围，涉及少数行的多个列 | 扫描大量行的少数列 |
 | 写入 | 高频小事务 | 批量导入 / 流式追加 |
 | 存储 | **行存（row store）** | **列存（columnar store）** |
-| 索引 | B+Tree 二级索引（secondary index） | 稀疏索引（sparse index） + 分区裁剪（partition pruning） + Zone Map |
+| 索引 | B+Tree 二级索引（secondary index：主键之外的列上建的索引，命中后通常还要拿主键回主表取整行） | 稀疏索引（sparse index：每 N 行才记一个位置，不逐行记） + 分区裁剪（partition pruning：按分区键直接判定整个分区与查询无关，连打开都不打开） + Zone Map |
 | 并发 | 高（万级） | 低（十级），但每个查询很重 |
 | 代表 | Postgres, MySQL, DynamoDB | ClickHouse, Snowflake, BigQuery, DuckDB |
 
@@ -171,7 +219,7 @@
 |---|---|---|
 | B+Tree | 等值 + 范围 + 排序 | 默认选择 |
 | Hash | 只等值 | PG 中很少用（不支持范围，且以前不写 WAL） |
-| **联合索引（composite index）** | 多列过滤 | **最左前缀原则（leftmost prefix rule）**，列顺序 = 高选择性（selectivity）/等值在前 |
+| **联合索引（composite index）** | 多列过滤 | **最左前缀原则（leftmost prefix rule：索引只能从定义的第一列开始、连续地用下去，跳过中间任何一列后面的列就用不上了）**，列顺序 = 高选择性（selectivity：这个条件能把候选行筛掉多大比例，筛得越狠选择性越高）/等值在前 |
 | **覆盖索引（covering index）** | 索引里就有所有需要的列 | 避免回表（table lookup），Postgres 的 `INCLUDE` |
 | **部分索引（partial index）** | `WHERE deleted_at IS NULL` | 索引体积大幅下降 |
 | **表达式索引（expression index）** | `ON (lower(email))` | 让函数查询能走索引 |
@@ -193,7 +241,7 @@ CREATE INDEX ON orders (tenant_id, status, created_at);
 
 - 每个索引让写入慢 5–15%
 - 索引占空间（有时比表还大）
-- **索引会阻碍 HOT update**（Postgres：更新了被索引的列就无法 HOT，产生更多膨胀）
+- **索引会阻碍 HOT update**（HOT = heap-only tuple：新版本落在同一个数据页里，因而**一个索引都不用改**。Postgres：更新了被索引的列就无法 HOT，每个索引都要加一条新指向，产生更多膨胀）
 - 太多索引让优化器选错计划
 
 **经验值**：一张表超过 5–6 个索引就该审视了。用 `pg_stat_user_indexes.idx_scan = 0` 找出从没被用过的索引。
@@ -288,6 +336,8 @@ ORDER BY embedding <=> $1 LIMIT 10;
 
 纯向量检索在**精确匹配（exact match）**上很差（产品型号 "X-4200"、人名、错误码）。生产系统都是：
 
+（**BM25**：经典的全文检索打分函数 —— 查询词在这篇文档里出现得越多、在全库里越罕见、而这篇文档又越短，分越高。它只看字面词是否命中，不看语义。）
+
 ```
         ┌─ BM25 / 全文检索 ──→ top-50 ─┐
 Query ──┤                              ├─→ RRF 融合 ─→ 重排模型 ─→ top-10
@@ -307,10 +357,10 @@ S3 / GCS / R2 现在的能力已经改变了架构：
 
 | 特性 | 影响 |
 |---|---|
-| **强一致性（strong consistency）**（S3 2020 后） | 可以直接作为元数据存储的基础（Iceberg/Delta） |
+| **强一致性（strong consistency）**（S3 2020 后） | PUT 返回成功后，任何一次 GET/LIST 立刻就能看到新对象（见 [00-concepts §6](../00-foundations/00-concepts.md)）→ 可以直接作为元数据存储的基础（Iceberg/Delta） |
 | **条件写入（conditional write）**（If-None-Match，2024） | **可以在 S3 上实现无外部锁的原子提交（atomic commit）** → 湖仓表格式不再需要独立的 catalog 锁 |
 | 单对象最大 5 TB | |
-| 首字节延迟（first-byte latency） 20–100 ms | 不适合点查热路径（hot path），适合批量 |
+| 首字节延迟（first-byte latency：从发出请求到收到响应的第一个字节） 20–100 ms | 不适合点查热路径（hot path：用户在等、且每个请求都要走的那条链，见 [00-concepts §1](../00-foundations/00-concepts.md) 的"关键路径"），适合批量 |
 | 成本 $0.023/GB/月 | 比块存储便宜 5–10× |
 | 分层（IA / Glacier） | $0.004 / $0.001 per GB |
 
@@ -330,8 +380,8 @@ S3 / GCS / R2 现在的能力已经改变了架构：
 | 需求 | 选择 | 理由 |
 |---|---|---|
 | 通用事务型主存储 | **Postgres** | 事务、JSONB、pgvector、扩展生态、你几乎不会后悔 |
-| 超高写入 KV，可最终一致（eventual consistency） | Cassandra / ScyllaDB | LSM + 无主（leaderless） |
-| 会话/缓存/排行榜/限流（rate limiting）计数 | Redis / Valkey | 内存 + 丰富数据结构 |
+| 超高写入 KV，可最终一致（eventual consistency） | Cassandra / ScyllaDB | LSM + 无主（leaderless：所有副本地位相同，没有"必须先写它"的主副本，客户端直接写若干个副本，见 [05](05-consensus-and-coordination.md)） |
+| 会话/缓存/排行榜/限流（rate limiting：给单位时间内允许通过的请求数设上限，超出直接拒绝）计数 | Redis / Valkey | 内存 + 丰富数据结构 |
 | 分析查询 | ClickHouse | 列存 + 向量化，性价比极高 |
 | 全文检索（full-text search） | OpenSearch / Postgres FTS | 小规模用 PG 就够 |
 | 向量检索 | pgvector → Qdrant/Milvus | 按规模升级 |
@@ -341,6 +391,17 @@ S3 / GCS / R2 现在的能力已经改变了架构：
 | 图关系（如权限） | Postgres 递归 CTE → 专用（Neo4j/SpiceDB） | 大多数"图"需求 PG 能搞定 |
 
 **默认建议**：**从 Postgres 开始，直到它明确扛不住某个具体维度**。它现在能做 KV、JSON 文档、全文、向量、时序（TimescaleDB）、队列（SKIP LOCKED）、地理。一个数据库的运维成本远低于五个。
+
+---
+
+## 这一章的三句话
+
+1. **存储选型不是在选产品，是在选你愿意付哪一种放大。** 读放大、写放大、空间放大你最多躲掉两个，
+   第三个一定会在某个凌晨以"磁盘满了"、"p99 每 20 分钟毛刺"或"SSD 提前报废"的形式来找你 —— 提前决定它是哪一个。
+2. **索引和缓存一样是借来的：它把读的成本挪到了写、挪到了磁盘空间、挪到了优化器选错计划的概率上。**
+   所以"加个索引"从来不是免费动作，一张表超过五六个索引，你已经在还利息了。
+3. **默认答案是 Postgres，而"什么时候放弃它"必须是一个带数字的信号** —— 写入 QPS 到多少、单表到多大、
+   扫描的列占比多少、向量到多少条。说不出这个数字，就说明你换数据库换的是感觉，不是瓶颈。
 
 ---
 

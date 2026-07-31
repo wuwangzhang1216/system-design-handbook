@@ -5,6 +5,52 @@
 
 ---
 
+## 读这一章之前
+
+**你在工作中遇到过这个**
+
+周一早上 9 点，你们最大的那个客户点了"批量导入"，8 分钟里往同一张 `documents` 表写了 400 万行。
+同一个 Postgres 实例上另外 3 万个小客户的接口 p99 从 80 ms 涨到 6 秒，值班群炸了。
+你打开监控想回答"到底是谁在写"—— 所有面板都是全局聚合的，没有一张图能按客户拆开，你只能挂在 `pg_stat_activity` 上一条条看 SQL 猜是谁。
+三个月后同一个客户提了另一个要求："把我们的数据恢复到上周二下午三点。"而那 400 万行，和另外 3 万个客户的行，躺在同一张表里。
+
+**需要先懂的概念**
+
+| 概念 | 一句话 | 详见 |
+|---|---|---|
+| 分片 / 分片键 | 把数据切成互不重叠的块分放到多台机器；分片键决定一行落到哪块 | [00-concepts §5](../00-foundations/00-concepts.md) |
+| 副本 | 同一份数据的多个完整拷贝，解决可用性和读扩展，**不解决容量** | [00-concepts §5](../00-foundations/00-concepts.md) |
+| 可用性与依赖相乘 | 串行依赖的可用性是乘法：0.999³ = 99.7% | [00-concepts §10](../00-foundations/00-concepts.md) |
+| 背压与限流 | 处理不过来时主动拒绝，而不是让队列无限增长 | [01-fundamentals §6](../00-foundations/01-fundamentals.md) |
+| 缓存与命中率 | 把算过的结果暂存复用；命中率决定它挂掉时后端要承受几倍流量 | [01-building-blocks/02](../01-building-blocks/02-caching.md) |
+| Outbox / CDC | 把数据库变更可靠地变成事件流 —— 租户迁移的"增量追平"靠它 | [01-building-blocks/03](../01-building-blocks/03-messaging-and-streams.md) |
+
+**这一章要回答的问题**
+
+1. 一千个客户的数据，是放在同一张表里靠 `tenant_id` 区分，还是一个客户一个库？两端的单位成本差多少倍？
+2. 一个客户的批量导入拖慢了所有人，我怎么先把它量化出来，再限制住它？
+3. 客户要求"恢复到昨天下午三点"或"彻底删除我们的全部数据"，在共享表模式下怎么做？要多久？
+4. 一个租户长成了占 40% 负载的巨兽，我该改架构，还是把它搬走？
+
+**本章新引入的术语**
+
+| 术语 | English | 一句话定义 |
+|---|---|---|
+| 多租户 / 租户 | multi-tenancy / tenant | 同一套代码和基础设施同时服务多个互不信任的客户组织，每个组织就是一个租户 |
+| Pool / Silo | pool / silo | 所有租户共用同一份表和同一个实例（pool）；每个租户独占自己的库、甚至独占整套栈（silo） |
+| 爆炸半径 | blast radius | 一次故障最多波及多少个租户 —— 隔离设计真正在优化的是这个数字，不是可用性百分比 |
+| 控制面 / 数据面 | control plane / data plane | 控制面存"哪个租户在哪、配额多少"这类元数据，每天只写几十次；数据面处理用户的每一次真实业务请求 |
+| Cell | cell | 一整套能自成一体运行的服务 + 存储的副本；一批租户被整体放进一个 cell，cell 之间不共享故障 |
+| 虚拟桶 | virtual bucket | 在"数据"和"物理机器"之间插一层固定数量（如 4096 个）的桶，扩容时只搬桶，不改哈希函数 |
+| 噪音邻居 | noisy neighbor | 共享资源的场景下，一个租户的用量把其他租户的性能拖了下去 |
+| 计量 | metering | 把每一份资源消耗（CPU 时间、SQL 耗时、存储、token）按租户逐笔记账，是配额与计费的前提 |
+| 行级安全 | Row-Level Security (RLS) | 数据库层的一条规则，给这张表上的每条查询自动附加过滤条件；应用漏写 `WHERE tenant_id=...` 时也读不到别人的行 |
+| fail-static / fail-closed | fail-static / fail-closed | 依赖挂掉时继续用最后一份已知正确的数据（fail-static）；判断条件缺失时默认拒绝而不是放行（fail-closed） |
+| 升舱 | tier promotion | 按预先写死的信号，把某一个租户从共享模式搬到隔离更强的模式 |
+| 前缀缓存 | prefix caching | 把多个请求共享的那段开头内容的推理中间结果缓存下来，后续请求跳过对这一段的重算 |
+
+---
+
 ## 1. 四种隔离级别
 
 ```
@@ -25,13 +71,15 @@
 | 隔离强度 | 应用/RLS 逻辑隔离（logical isolation） | 逻辑隔离 + 独立对象 | 进程与存储隔离 | 网络+计算+存储全隔离 |
 | 单租户备份/恢复 | ❌ 极难（要恢复到影子库再回填） | ⚠️ 可 `pg_dump -n` | ✅ 原生 | ✅ 原生 |
 | 单租户硬删除（hard delete） | ⚠️ 大表 DELETE + vacuum | ✅ `DROP SCHEMA CASCADE` | ✅ `DROP DATABASE` | ✅ 销毁栈 |
-| 单租户 PITR | ❌ | ❌ | ✅ | ✅ |
+| 单租户 PITR（point-in-time recovery，把数据恢复到过去任意时刻） | ❌ | ❌ | ✅ | ✅ |
 | 爆炸半径（blast radius） | 全部租户 | 全部租户（共享实例资源） | 该实例上的租户 | 1 个租户 |
 | per-tenant schema 定制 | ❌ | ✅（也是诅咒，见下） | ✅ | ✅ |
 | 版本/发布节奏（release cadence） | 全体同步 | 全体同步 | 可分批 | **可完全独立** |
 | 合规适配（数据驻留 data residency/BYOK） | 难 | 难 | 中 | ✅ 天然满足 |
 | 跨租户分析查询 | ✅ 一条 SQL | ⚠️ 要 UNION N 个 schema | ❌ 需要数据平台 | ❌ |
 | 迁移到下一级的难度 | — | 中 | 中 | 高（回不去） |
+
+（表里两个合规词：**数据驻留（data residency）** = 合同要求这个客户的数据只能存放在指定国家或区域境内；**BYOK（bring your own key）** = 加密密钥由客户自己保管，客户随时可以吊销它，从而让你无法再解密他的数据。这两条一旦写进合同，就直接排除了共享实例的可能。）
 
 ### L2 的撞墙点（scaling wall）：schema 数量
 
@@ -47,6 +95,8 @@
   3. pg_dump / 逻辑复制槽初始化从分钟变小时
   4. DDL 迁移：一次加列 = 2,000 次 ALTER TABLE，且需要 2,000 把 ACCESS EXCLUSIVE 锁
 ```
+
+（`pg_class` 是 Postgres 的系统表，每张表、每个索引在里面各占一行；`ACCESS EXCLUSIVE` 是最强的表锁，持有期间连读都被挡住 —— 所以"2000 次 ALTER TABLE"不是慢，是 2000 段小停机。）
 
 **实践上限：500–2,000 个 schema。** 早期信号是"每次发版的 migration 时间线性增长"和"连接数没变但内存涨了"。
 
@@ -104,9 +154,9 @@
 
 ### tenant_id 作为分片键（shard key）
 
-**它几乎总是正确的分片键**，因为绝大多数查询天然带 `tenant_id`，不会产生跨分片扇出（fan-out）。
+**它几乎总是正确的分片键**，因为绝大多数查询天然带 `tenant_id`，不会产生跨分片扇出（fan-out：一个请求被拆成 N 个下游请求并等它们全部返回；N 越大，整体 p99 越接近"最慢的那一个"，见 [`00-foundations/01 §7`](../00-foundations/01-fundamentals.md)）。
 
-代价：**分片内数据倾斜（data skew）完全由租户大小决定**，你控制不了。所以分片键要预留一层间接：
+代价：**分片内数据倾斜（data skew：各分片的数据量或负载严重不均，少数分片扛了大部分量）完全由租户大小决定**，你控制不了。所以分片键要预留一层间接：
 
 ```
 ❌ shard = hash(tenant_id) % N            -- 扩容要 rehash 全部数据
@@ -116,7 +166,7 @@
 
 **虚拟桶（virtual bucket）数取 1024–8192**，一次定死。桶数是唯一不能在线改的参数。
 
-⚠️ **超大租户必须能突破单桶**：给 whale 租户启用二级键 `(tenant_id, sub_key)`，`sub_key` 取业务上天然的第二维度（project_id / workspace_id / 日期）。**这个逃生舱（escape hatch）必须在第一天就在 schema 里留好位置**（哪怕暂时恒为 `'0'`），事后加等于全量迁移。
+⚠️ **超大租户必须能突破单桶**：给 whale 租户（巨型租户：一个租户的数据量或流量占到整个池的两位数百分比，下面 §8 会展开）启用二级键 `(tenant_id, sub_key)`，`sub_key` 取业务上天然的第二维度（project_id / workspace_id / 日期）。**这个逃生舱（escape hatch）必须在第一天就在 schema 里留好位置**（哪怕暂时恒为 `'0'`），事后加等于全量迁移。
 
 ### 路由表放哪
 
@@ -164,7 +214,7 @@ Cell 内部的组成、协调循环、跨 cell 迁移与 cell 级金丝雀（can
 
 1. **标记状态**：`tenant_placement.state = 'MIGRATING'`，数据面开始对该租户拒绝**结构性变更**（DDL、批量导入），普通读写照常。
 2. **快照拷贝**：源库一致性快照（Postgres `pg_export_snapshot` / 逻辑复制槽）批量导入目标库。**限速（throttling）**：不超过源库 IOPS 的 30%，否则会拖垮同 pool 的其他租户 —— 迁移本身就是最大的噪音邻居（noisy neighbor）。
-3. **增量追平（catch-up）**：CDC 把快照点之后的变更持续应用到目标。等到 **replica lag < 1 s** 才进下一步。
+3. **增量追平（catch-up）**：CDC（change data capture，变更数据捕获：订阅数据库自己的变更日志，把每一行的增删改实时变成一条事件流，见 [`01-building-blocks/03`](../01-building-blocks/03-messaging-and-streams.md)）把快照点之后的变更持续应用到目标。等到 **replica lag（目标库比源库落后的时间）< 1 s** 才进下一步。
 4. **冻结写入**：把该租户的写请求排队（不是拒绝），返回 `Retry-After`，或前端显示"同步中"。**冻结窗口（freeze window）= 剩余 lag + 校验时间 + 路由生效时间**，目标 < 30 s。
 5. **最终校验**：行数 + 关键表的 checksum（`sum(hashtext(row::text))`）比对。**不一致就回滚**，不要"先切了再说"。
 6. **切换路由**：控制面更新 placement + 版本号，广播失效。DNS 型 router 这里要等 TTL。
@@ -198,7 +248,7 @@ Cell 内部的组成、协调循环、跨 cell 迁移与 cell 级金丝雀（can
 
 | 噪音源 | 检测信号 | 治理手段 |
 |---|---|---|
-| 某租户突发流量 | 单租户 QPS 占比 > 25% | **令牌桶限流（token bucket rate limiting）**（per-tenant），突发容量（burst capacity）= 稳态速率 × 10 |
+| 某租户突发流量 | 单租户 QPS 占比 > 25% | **令牌桶限流（token bucket rate limiting）**（per-tenant）—— 桶里按固定速率放令牌，每个请求取走一个，取不到就拒绝；桶容量决定能容忍多大的瞬时突发。突发容量（burst capacity）= 稳态速率 × 10 |
 | 某租户慢查询 | 单租户 DB 时间占比 > 30% | `statement_timeout` per-tenant（按 tier 设 1 s / 5 s / 30 s） |
 | 某租户占满连接池 | 池等待时间 p99 上升 | **隔板（bulkhead）**：把池按 tier 切分，任一 tenant 上限 = 池容量 × 20% |
 | 大批量导入 | 写 QPS 尖峰 | 批量作业走独立队列 + 独立连接池，与在线路径物理隔离 |
@@ -249,6 +299,8 @@ CREATE INDEX ON documents (tenant_id, status) WHERE deleted_at IS NULL;
 ⚠️ **绝对不要**为了"方便本地调试"写成 `COALESCE(current_setting(...), tenant_id::text)` —— 那一行代码把整个隔离层变成装饰品。
 
 ### 坑 1：连接池 + session 变量（最常见的生产事故）
+
+> **transaction pooling（事务级连接池）**：PgBouncer 的一种模式 —— 一条数据库连接只在**一个事务期间**属于你，事务一提交就被还回池子给别的请求用。它能用几十条真实连接扛住几千个应用连接，代价就是下面这个坑：任何"会话级"的设置都会跟着连接漏给下一个租户。
 
 ```sql
 -- ❌ 在 PgBouncer transaction pooling 下这是灾难
@@ -309,7 +361,7 @@ COMMIT;
 6. 销毁影子实例
 ```
 
-**必须提前定的两个数字**：单租户恢复的 RTO（现实值 2–6 小时，别承诺 15 分钟）和 RPO（= WAL 归档间隔）。
+**必须提前定的两个数字**：单租户恢复的 **RTO**（recovery time objective：从决定恢复到服务重新可用，允许花的最长时间 —— 现实值 2–6 小时，别承诺 15 分钟）和 **RPO**（recovery point objective：允许丢掉最近多长时间的数据 —— 这里等于 WAL 归档间隔；WAL = write-ahead log，预写日志，数据库先把每一次改动追加进这个顺序日志，再去改真正的数据文件）。
 
 **删除的正确做法（软删除 soft delete → 硬删除 hard delete，呼应上一篇的 crypto-shredding）：**
 
@@ -322,7 +374,7 @@ T+30d  硬删除：DELETE / DROP + 删除该租户的 KEK
          □ 缓存          □ 日志/APM      □ 数据仓库/湖    □ 下游 SaaS
 ```
 
-**per-tenant KEK 是 L1 pool 下唯一实用的删除加速器**：租户数据按其 KEK 加密，删 KEK 让所有副本（包括备份里的）同时失效，剩下的物理删除可以慢慢做。代价见上一篇：KEK 存储绝不能开 PITR。
+**per-tenant KEK 是 L1 pool 下唯一实用的删除加速器**（KEK = key encryption key，密钥加密密钥：用来加密其他密钥的那把主钥匙 —— 删掉它，被它保护的所有数据密钥就都解不开了，等于该租户的密文全部同时变成乱码）：租户数据按其 KEK 加密，删 KEK 让所有副本（包括备份里的）同时失效，剩下的物理删除可以慢慢做。代价见上一篇：KEK 存储绝不能开 PITR。
 
 ---
 
@@ -354,6 +406,8 @@ T+30d  硬删除：DELETE / DROP + 删除该租户的 KEK
 | **Qdrant** | payload 字段索引 + 过滤 | 过滤在 HNSW 遍历内部执行，性能好；但隔离靠查询正确性保证 |
 | **pgvector** | Postgres RLS + tenant_id | 复用本篇第 6 节全部结论；适合几十到几百租户量级 |
 
+（**HNSW** 是向量库最常用的近似最近邻索引结构：把向量组织成多层图，查询时从稀疏层往稠密层逐层逼近，用一点召回率换几个数量级的速度。**namespace / collection** 是各家给"一组互不相干的向量"取的名字，可以粗略地当成向量库里的一张表。）
+
 ⚠️ **namespace/collection 数量爆炸是多租户向量库最常见的翻车点。** 各家的 namespace 上限数字在 2026 年的对比文章里普遍**未经一手核实且厂商在改**（量级参考：Pinecone 侧有"10 万 namespace / 20 index"的二手说法，Cloudflare Vectorize 侧有"5 万 namespace / 每 index 500 万向量"的二手说法 —— **上线前必须查官方 limits 页并压测**）。
 
 **通用对策**：小租户共用一个 collection + 强制 filter，大租户独立 collection。切换阈值按"单租户向量数 > 100 万"或"单租户查询占比 > 20%"。
@@ -361,6 +415,8 @@ T+30d  硬删除：DELETE / DROP + 删除该租户的 KEK
 ### b) 前缀缓存（prefix caching）的跨租户泄露（已被实证，不是理论风险）
 
 这是本手册里最需要单独强调的一条：**KV / prefix cache 既是 2026 最大的性能杠杆，也是最大的跨租户泄露面。**
+
+> 三个词先说清楚：**KV cache** = 模型生成时缓存下来的注意力中间结果，让生成后一个 token 时不用把前面所有内容重算一遍；**prefix cache（前缀缓存）** = 把这份中间结果按"请求开头那段一模一样的内容"跨请求复用，谁的开头和它相同谁就能跳过这段计算；**TTFT** = time to first token，从请求发出到模型吐出第一个字的时间。泄露就发生在"跨请求复用"这五个字上 —— 命中与否会体现在耗时上，而耗时是攻击者能测量的。
 
 - [PROMPTPEEK（NDSS 2025）](https://www.ndss-symposium.org/wp-content/uploads/2025-1772-paper.pdf) 利用 KV cache 共享造成的**服务顺序/时序侧信道（timing side channel）**逐 token 重建他人的 prompt。实测成功率：**已知 prompt 模板 99%、反推模板本身 98%、无任何背景知识 95%**；已知模板时约 **60 次请求**即可套出受害者的性别/年龄/体重/身高。攻击面覆盖 vLLM、SGLang、LightLLM、DeepSpeed；已向厂商披露，ByteDance 已确认该侧信道。
 - 另一面：前缀缓存能把 TTFT 降低数倍、命中率（hit rate）在共享 system prompt 场景可达 70–90%、聚合吞吐（aggregate throughput）+30–50%（收益幅度存在争议，也有实测报告在特定负载下吞吐**下降** 36% 的相反结论 —— 取决于前缀重叠率与并发数）。
@@ -375,11 +431,11 @@ prefix cache 共享策略：
   ⚠️ 密钥、PII 绝不放进会被缓存的系统提示前缀
 ```
 
-**用托管 API 时同样要处理**：OpenAI 的 ZDR（零数据保留）**不消除 prompt cache 驻留** —— ZDR 排除 abuse monitoring 中的客户内容并强制 `store=false`，但**仍会存储加密的 prompt cache tensors，最长 24 小时**。这一点必须写进 DPIA 与数据流图，不能因为"我们开了 ZDR"就跳过。
+**用托管 API 时同样要处理**：OpenAI 的 ZDR（零数据保留）**不消除 prompt cache 驻留** —— ZDR 排除 abuse monitoring 中的客户内容并强制 `store=false`，但**仍会存储加密的 prompt cache tensors，最长 24 小时**。这一点必须写进 DPIA（data protection impact assessment，数据保护影响评估：GDPR 要求的一份文档，说明这套系统怎么处理个人数据、风险在哪、怎么缓解）与数据流图，不能因为"我们开了 ZDR"就跳过。
 
 ### c) 微调 / 适配器隔离
 
-多 LoRA 共享底座是主流成本方案（一个 base model + N 个租户适配器），但 **vLLM 本身不提供租户隔离**：一个 Pod 内的 batch 共享同一个 KV cache 与 scheduler。
+多 LoRA 共享底座是主流成本方案（一个 base model + N 个租户适配器）—— LoRA 是一种低成本微调方法：冻结底座模型的全部权重，只训练并加载一小组增量权重（几十 MB 而不是几十 GB），所以一个底座能同时挂载很多个租户的适配器。但 **vLLM 本身不提供租户隔离**：一个 Pod 内的 batch 共享同一个 KV cache 与 scheduler。
 
 ```
 ❌ 假设：不同 LoRA = 不同租户 = 天然隔离
@@ -412,7 +468,7 @@ prefix cache 共享策略：
 
 [AWS Lambda Tenant Isolation Mode](https://aws.amazon.com/about-aws/whats-new/2025/11/aws-lambda-tenant-isolation-mode)（GA 2025-11-19）：调用时传租户标识，Lambda 保证执行环境（Firecracker microVM）**永不跨租户复用**，同租户内仍复用 —— 所以可以安全地缓存租户级配置与凭据。
 
-⚠️ 代价：**冷启动（cold start）次数从 O(并发) 变成 O(租户 × 并发)。** 隔离是免费的，冷启动不是。公告未披露最大租户数、冷启动放大倍数与定价细节 —— **三项都必须自测**。对策仍然是 bridge：小租户走 pool 模式，大租户/高合规租户走 silo 模式。
+⚠️ 代价：**冷启动（cold start：没有现成的执行环境可以复用时，要新建一个、加载运行时和你的代码再执行，这一次请求因此额外多花几百毫秒到几秒）次数从 O(并发) 变成 O(租户 × 并发)。** 隔离是免费的，冷启动不是。公告未披露最大租户数、冷启动放大倍数与定价细节 —— **三项都必须自测**。对策仍然是 bridge：小租户走 pool 模式，大租户/高合规租户走 silo 模式。
 
 ---
 
@@ -431,6 +487,14 @@ prefix cache 共享策略：
 2. **把 tenant_id 放在 URL 而不是从会话/token 推导。** `GET /api/tenants/{tenant_id}/docs` 看起来 RESTful，实际是把授权决策交给了客户端。tenant_id 必须来自已验证的凭据。
 3. **事后改分区键（partition key）。** 等于全量数据迁移。若业务天然存在跨租户协作（共享工作区、跨组织审批），**要么把协作对象本身作为分区单元，要么承认该子系统不适用分片模型**。
 4. **用"我们以后会做多租户"来推迟计量。** 计量（per-tenant 的资源账本）是所有配额、计费、噪音治理、成本归因的前提，且**它必须在第一行业务代码里就带上 tenant 标签** —— 事后补标签是全链路改造。
+
+---
+
+## 这一章的三句话
+
+1. **隔离级别不是一个全局架构选择，而是每个租户各自一档的旋钮。** 默认把所有人放进最便宜的共享池，同时把"升舱"的信号（存储 > 20%、QPS > 25%、合规硬要求）和搬迁剧本提前写进 runbook —— 从 L1 升到 L3 是一次数据迁移，从 L3 降回 L1 是一次架构重写。
+2. **没有 per-tenant 计量，就没有任何配额、限流和成本归因可言。** 而计量必须在第一行业务代码里就带上租户标签，事后补是全链路改造 —— 这是多租户系统里唯一一个"晚一天做，贵一个数量级"的决定。
+3. **隔离必须在每一层各自实现一遍。** RLS 只保护数据库连接，你的缓存、搜索索引、对象存储、向量库、消息队列和 LLM 前缀缓存全都没有它 —— 指望一个数据库特性覆盖全栈，是多租户设计里最贵的一个错觉。
 
 ---
 

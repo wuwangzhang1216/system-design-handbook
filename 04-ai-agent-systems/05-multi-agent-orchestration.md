@@ -7,6 +7,52 @@
 
 ---
 
+## 读这一章之前
+
+**你在工作中遇到过这个**
+
+你把"重构支付模块"拆给三个 Agent 并行做，一人一个 worktree，三个都跑完、各自的测试都绿。
+你一 merge 才发现：A 把配置改成从环境变量读，B 在另一个文件里改成从 `config.yaml` 读，
+C 新写的类调的是 A 那版还没定稿的接口签名。三份 diff 各自都自洽，git 一条冲突都没报，合起来编译不过。
+而这一次运行的账单，是单 Agent 跑同一个任务的 4 倍。
+
+**需要先懂的概念**
+
+| 概念 | 一句话 | 详见 |
+|---|---|---|
+| Agent 循环 | "模型输出 → 调工具 → 把结果塞回上下文 → 再输出"这个反复的过程 | [03 §1](03-agent-runtime.md) |
+| 终止条件 | 这个循环凭什么停下来；不写清楚它是 Agent 系统第一大 bug 源 | [03 §2](03-agent-runtime.md) |
+| 上下文腐化 | 窗口里塞得越多，模型对其中每一条的注意力越差 | [02 §2](02-context-engineering-and-rag.md) |
+| 前缀缓存 | 请求开头逐字节相同的那一段可以复用上次的计算，价格降到约 1/10 | [01 §6](01-llm-serving-infra.md) |
+| 扇出与尾延迟放大 | 一个请求分发给 N 个后端并等全部返回时，整体 p99 逼近单后端的更高分位 | [00/01 §7](../00-foundations/01-fundamentals.md) |
+| 幂等 | 同一个操作执行多次，效果和执行一次相同 | [00/01 §5](../00-foundations/01-fundamentals.md) |
+
+**这一章要回答的问题**
+
+1. 多 Agent 到底贵几倍？它的收益是来自"多个 Agent"这个结构本身，还是仅仅来自"花了更多 token"？
+2. 哪些子任务可以并行、哪些必须收敛到一条线？判据是什么，而不是感觉是什么？
+3. 父 Agent 怎么把上下文交给子 Agent？三种传法各丢了什么，什么时候应该**故意**丢？
+4. 一次跑飞的 workflow 拉起 50 个子 Agent 吃光配额 —— 你有几道闸，分别拦在哪一层？
+5. 系统失败了，怎么用数据判定责任在编排者还是在执行者？
+
+**本章新引入的术语**
+
+| 术语 | English | 一句话定义 |
+|---|---|---|
+| 编排者 | orchestrator / lead | 负责拆任务、把子任务分发出去、再把回传结果合起来的那个 Agent，它自己通常不直接动手 |
+| 子 Agent | worker / subagent | 被编排者拉起、拿一段独立指令去执行、结束后只回传一段结果的 Agent |
+| 单写者 | single writer | 整个系统里只允许一个 Agent 真正落盘修改，其他 Agent 只能产出建议和补丁 |
+| 决策依赖 | decision dependency | 两个子任务的产出必须在接口、风格、假设上互相吻合，因此其中一个怎么做取决于另一个怎么做 |
+| 语义冲突 | semantic conflict | 两份改动没碰到同一行、能自动合并，但合起来的行为是错的 |
+| 熵饱和 | entropy saturation | 编排者窗口里堆进太多中间结果之后，新信息不再改变它的判断，决策质量从某一步起掉档 |
+| 上下文污染 | context pollution | 不该进的内容进了某个 Agent 的窗口，把它的判断带偏 |
+| 自包含 prompt | self-contained prompt | 一段不依赖任何外部上下文、单独读也能执行到底的任务描述 |
+| 确定性验收器 | deterministic verifier | 每次都给出相同判定的一段程序（跑测试、编译、校验 schema），用来代替"让 Agent 互相说服" |
+| 失控扇出 | runaway fan-out | 一次运行里被自动拉起的子 Agent 数量远超预期，把预算或配额吃光 |
+| 归因 | attribution | 把一次失败的责任分配到具体是哪个 Agent、哪一步上 |
+
+---
+
 ## 1. 先算账：多 Agent 贵在哪
 
 任何多 Agent 讨论必须从这张表开始，否则就是在做没有成本约束的架构幻想。
@@ -29,7 +75,7 @@
   多 Agent 的缓存命中率通常更低（每个 worker 是全新上下文，前缀不共享）
 ```
 
-**注意最后一行**：多 Agent 不只是 token 多，它还**系统性地降低 prefix cache 命中率**——每个 worker 的上下文是全新构造的，父的前缀在子那里一点也用不上。所以真实成本倍数常常高于 3.7×。
+**注意最后一行**：多 Agent 不只是 token 多，它还**系统性地降低 prefix cache 命中率**（prefix cache，前缀缓存：请求开头逐字节完全相同的那一段可以直接复用上一次的计算结果，价格降到输入价的约 1/10，见 [01 §6](01-llm-serving-infra.md)）——每个 worker 的上下文是全新构造的，父的前缀在子那里一点也用不上。所以真实成本倍数常常高于 3.7×。
 
 **同时，token 用量也是收益的主要解释变量**：Anthropic 报告 orchestrator-worker（Opus 4 lead + Sonnet 4 subagents）相对单 Agent Opus 4 提升 **+90.2%**（内部研究评测），而在 BrowseComp 上，**仅 token 用量一项就解释了 80% 的性能方差**。
 
@@ -42,7 +88,7 @@
 | 模式 | 拓扑 | 相对单 Agent 的成本倍数 | 适用判据 | 撞墙条件 / 失效信号 |
 |---|---|---|---|---|
 | **Orchestrator-Worker** | 1 lead → N worker（**同步**执行），worker 回传摘要 | ~2–4× | **广度优先（breadth-first）的只读探索（read-only exploration）**：多来源检索、竞品调研、代码库全局理解 | lead 上下文 ~6 步后熵饱和（entropy saturation）→ 决策退化；一个慢 worker 阻塞全局；worker 重复劳动 |
-| **Map-Reduce 扇出（fan-out）** | 同构任务 N 份并行 → 单点 reduce | ~N× 计算，但墙钟时间（wall-clock time） −最多 90% | 任务**完全同构且互不依赖**：批量文档抽取、批量文件分类 | reduce 阶段上下文爆炸；分片边界（shard boundary）跨越了语义边界 |
+| **Map-Reduce 扇出（fan-out：把一份工作同时分发给 N 个执行者，见 [00/01 §7](../00-foundations/01-fundamentals.md)）** | 同构任务 N 份并行 → 单点 reduce | ~N× 计算，但墙钟时间（wall-clock time，真实流逝的秒表时间） −最多 90% | 任务**完全同构且互不依赖**：批量文档抽取、批量文件分类 | reduce 阶段上下文爆炸；分片边界（shard boundary）跨越了语义边界 |
 | **Planner-Executor** | 先出计划（固化）→ 按计划执行 | ~1.3–1.6× | 步骤可预先枚举、需要人审计划、需要抗注入（计划固化后工具调用序列不可被改写） | 计划过时（环境在执行中变了）；**参数仍可被注入（prompt injection）影响**，只有序列不可变 |
 | **Handoff / Swarm** | Agent A 把控制权连同上下文转交 Agent B | ~1.2–2× | 明确的**角色切换**：分诊（triage）→ 专科；意图识别 → 领域 Agent | 无结构的 swarm 会形成环；转交时上下文丢失导致"重新问一遍" |
 | **反思（self-reflection）/ 批评者（critic）**（Reflexion、Code-Review-Loop） | 生成 Agent ⟷ 批评 Agent，多轮 | **~2.3×**（F1 0.943，相对 sequential pipeline 基线） | 输出质量比成本重要；**有客观验收信号**（测试、编译、schema） | **无外部反馈的纯自反思会退化** —— 模型常把对的改错（degeneration-of-thought） |
@@ -159,7 +205,7 @@
 | **强依赖的顺序任务** | 每一步的输入是上一步的输出。并行度为 1 时，多 Agent 只增加了摘要损失和协调开销 |
 | **需要共享细粒度上下文** | 子 Agent 拿不到父的历史。你会看到"重新问一遍"和"假设不一致" |
 | **子任务边界不清晰** | 见判据 3。边界模糊 → 重复劳动 + 冲突写入 |
-| **你还没有轨迹级（trajectory-level）eval** | 多 Agent 的失效是隐蔽的（轨迹脏但答案对、答案对但花了 10 倍钱）。**outcome-only eval 对多 Agent 是全盲的** |
+| **你还没有轨迹级（trajectory-level）eval** | 轨迹（trajectory）= 一次运行里模型的每一步输出、每一次工具调用及其返回值组成的完整序列；只看最终答案对不对叫 outcome-only。多 Agent 的失效是隐蔽的（轨迹脏但答案对、答案对但花了 10 倍钱）。**outcome-only eval 对多 Agent 是全盲的**（评测分层见 [06 §2](06-evaluation-and-observability.md)） |
 
 > **面试金句**：
 > "我不会先问'要不要多 Agent'，我会先问'哪些子任务是只读的'。只读的部分可以扇出，因为读之间没有冲突；写的部分必须收敛到单一 writer，因为**行动隐含决策，两个并行的写者会做出互相冲突的决策，而这种冲突在合并时才暴露，那时已经晚了**。所以我的默认架构是：N 个只读 worker 并行探索 → 一个 lead 综合 → 一个 writer 单线程落盘 → 一个确定性验收器（跑测试）判定。额外的 Agent 只贡献判断，不贡献动作。"
@@ -197,7 +243,7 @@
 三条直接可执行的推论：
 
 1. **orchestrator 的上下文必须主动裁剪**，中间结果不能落在它的窗口里（这正是"编排脚本化"把中间结果放在脚本变量里的动机）。
-2. **orchestrator 不要用重推理模型 / 高 reasoning effort**，把深推理预算留给 worker。这和大多数人的直觉相反。
+2. **orchestrator 不要用重推理模型 / 高 reasoning effort**（reasoning effort：让模型在给出答案前多想几步还是少想几步的档位旋钮 —— 想得越多，思考 token 越多、越慢也越贵），把深推理预算留给 worker。这和大多数人的直觉相反。
 3. **超过 ~6 步的编排，切成分层或改成脚本化**，不要让一个 orchestrator 线性走 20 步。
 
 ---
@@ -260,7 +306,7 @@ Dynamic Workflows 的恢复是**按 Agent 启动顺序回放（replay），缓�
 1. **把工作切成很多小 Agent 比一个长 Agent 保住更多进度。**
 2. 并行度越高，"停在中间"的重跑代价越大 —— 这是"并行 = 更快"的一个反例。
 
-同时注意运行时约束：脚本本身**无文件系统 / shell 访问**（只有 Agent 有）；运行中**不能插入用户输入**（只有权限提示能暂停）；生成的 subagent 一律以 `acceptEdits` 模式运行并继承你的工具 allowlist ⇒ **长跑前必须把需要的命令预先加入 allowlist**，否则会在半路卡死。
+同时注意运行时约束：脚本本身**无文件系统 / shell 访问**（只有 Agent 有）；运行中**不能插入用户输入**（只有权限提示能暂停）；生成的 subagent 一律以 `acceptEdits` 模式运行并继承你的工具 allowlist（白名单：只有列在名单里的命令/工具才允许执行，名单外一律拒绝，见 [07 §5.1](07-agent-security.md)） ⇒ **长跑前必须把需要的命令预先加入 allowlist**，否则会在半路卡死。
 
 ---
 
@@ -285,6 +331,8 @@ Dynamic Workflows 的恢复是**按 Agent 启动顺序回放（replay），缓�
 ---
 
 ## 10. 可观测（observability）：父子 span 与归因（attribution）
+
+**先定义 span**：一次调用在链路追踪里的一段记录 —— 有开始时间、结束时间、一组属性，以及"我的父亲是谁"。多个 span 按父子关系组成一棵树，这棵树叫一条 trace。下面这棵树就是一次多 Agent 运行的完整形状（span 树的完整设计规则在 [06 §6](06-evaluation-and-observability.md)）。
 
 ### span 结构
 
@@ -317,7 +365,7 @@ span 命名规则（OTel GenAI 约定）：推理/嵌入 `{gen_ai.operation.name
 | 有没有重复劳动？ | 确定性 evaluator：跨 worker 的工具调用参数去重率 |
 | 有没有死循环（infinite loop）/ 过早终止？ | step count 对预算、必经步骤是否出现、工具调用序列匹配 |
 
-**关键做法：可判定的轨迹指标用代码 evaluator，不要用 LLM judge。** 布尔轨迹分数在每条采样 trace 上计算几乎是免费的，适合直接做告警信号；只有语义层（"这一步选这个工具合不合理"）才交给 judge。轨迹匹配可以做成四档：`strict`（完全一致同序）/ `unordered`（同一组工具，顺序不限，适合并行取数）/ `subset`（不许多调）/ `superset`（至少覆盖参考轨迹）。
+**关键做法：可判定的轨迹指标用代码 evaluator，不要用 LLM judge**（LLM judge：用另一个模型按一份写死的评分标准给输出打分，代替人工标注；它自己的成本和偏差见 [06 §4](06-evaluation-and-observability.md)）。 布尔轨迹分数在每条采样 trace 上计算几乎是免费的，适合直接做告警信号；只有语义层（"这一步选这个工具合不合理"）才交给 judge。轨迹匹配可以做成四档：`strict`（完全一致同序）/ `unordered`（同一组工具，顺序不限，适合并行取数）/ `subset`（不许多调）/ `superset`（至少覆盖参考轨迹）。
 
 ⚠ **最后一条，也是最容易被忽略的**：生产遥测（production telemetry）里一个基础设施 bug 曾在两周窗口内把失败率**虚高约 2.5×**，同时影响 15 个 Agent，伪装成"终止挂起"。**先信数据管道，再信数据。**
 
@@ -332,12 +380,20 @@ span 命名规则（OTel GenAI 约定）：推理/嵌入 `{gen_ai.operation.name
 5. **"worktree 解决了并行冲突"** —— 只解决工作区级文件隔离，不解决语义冲突。
 6. **orchestrator 用最强模型 + 最高 reasoning effort** —— 实证反了。抑制过度思考反而提升 step 成功率；深推理预算应该给 worker。
 7. **subagent 的 prompt 不写完成判据 / 输出 schema / `maxTurns`** —— MAST 里"不知道终止条件 + 过早终止 + 无验证"合计约 36%，是生产环境的第一梯队失效。
-8. **只设并发上限，不设组织级 spend limit** —— 一次跑飞的 workflow 能吃掉团队当天的 TPM 配额。三层预算缺一不可。
+8. **只设并发上限，不设组织级 spend limit** —— 一次跑飞的 workflow 能吃掉团队当天的 TPM 配额（TPM = tokens per minute，服务商按分钟给你的 token 额度；打满之后同组织所有人一起被限流）。三层预算缺一不可。
 9. **把子 Agent 的返回值直接拼进父的 system prompt** —— 子 Agent 输出是不可信输入。伪造 `<system-reminder>`、伪造轮次标记、声称"已获授权"都是已知形态。
 10. **把学术失效分布直接当自己的分布** —— 先确认你真的是多 Agent 系统。
 11. **拿 pre-production 案例当生产能力证据** —— 旗舰案例（如 ~750,000 行 / 11 天 / 测试 99.8% 通过的大规模重写）**官方明确标注 pre-production**。
 12. **把实验特性当 GA 用** —— 例如 Agent teams 默认关闭、官方标 experimental，已知限制包括不支持 `/resume` `/rewind`、一会话仅一个 team、不支持嵌套、lead 不可转移、权限在 spawn 时固定。**上生产前先查当前版本的能力矩阵（capability matrix）。**
 13. **没有轨迹级 eval 就上多 Agent** —— outcome-only eval 看不见错工具、参数畸形、死循环、10 倍成本。
+
+---
+
+## 这一章的三句话
+
+1. **读可以并行，写必须单线程** —— 不是因为写更容易出错，而是因为**行动隐含决策**：两个并行的写者一定会各自做出互相冲突的决策，而这种冲突要到合并时才暴露，那时已经晚了。
+2. **多 Agent 的收益里有一大块只是"花了更多 token"买来的**（BrowseComp 上仅 token 用量一项就解释了 80% 的性能方差）。所以拆多 Agent 之前必须先问：同样的预算给单 Agent 多跑几轮 + 一个确定性验收器，是不是就够了？
+3. **多 Agent 出事，第一嫌疑人是编排者而不是执行者**（实测 67.7%），而它出事的根因通常是自己的窗口被中间结果撑爆了 —— 所以编排者要用**低**推理档位、要主动裁剪上下文、要在 6 步之内收工。
 
 ---
 

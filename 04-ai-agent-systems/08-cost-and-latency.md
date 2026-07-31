@@ -6,6 +6,54 @@
 
 ---
 
+## 读这一章之前
+
+**你在工作中遇到过这个**
+
+你们的 coding agent 上个月账单 $40k，老板让你砍一半。
+你花两周把沙箱换成更便宜的机型、把闲置容器回收从 10 分钟压到 2 分钟、给对象存储加了生命周期策略 ——
+账单降了 **1.4%**。因为沙箱本来就只占 11–15%，剩下 85% 是推理；
+而推理那 85% 里，又有 95% 是**每一轮把之前所有轮次的历史重新发一遍**产生的输入 token。
+你两周的工作从一开始就动错了地方，而这件事在你写第一行代码之前用一张纸就能算出来。
+
+**需要先懂的概念**
+
+| 概念 | 一句话 | 详见 |
+|---|---|---|
+| 延迟 / 吞吐 / 并发 | 单次耗时 / 单位时间处理量 / 此刻在途的请求数 | [00/00 §2](../00-foundations/00-concepts.md) |
+| 分位数与长尾 | p50/p99 描述分布形状；少数极端样本能主导总量 | [00/00 §3](../00-foundations/00-concepts.md) |
+| Prefill / Decode 与 TTFT / TPOT | 处理输入和逐 token 生成是两台特性相反的机器，各有各的延迟指标 | [01 §1](01-llm-serving-infra.md) |
+| 前缀缓存 | 请求开头逐字节相同的那段复用上次计算，价格降到输入价的约 1/10 | [01 §6](01-llm-serving-infra.md) |
+| Compaction | 会话太长时把历史压成摘要，腾出窗口 | [04 §7](04-agent-memory-and-state.md) |
+| 多 Agent 的 token 倍数 | 单 Agent ≈ 纯 chat 的 4×，多 Agent ≈ 15× | [05 §1](05-multi-agent-orchestration.md) |
+
+**这一章要回答的问题**
+
+1. 为什么 Agent 的账单对轮次是**二次**增长而不是线性的？公式长什么样？
+2. 一次运行的钱到底花在哪几项上？哪一项值得动，哪一项动了也白动？
+3. 缓存写要多付 25%–100%、读只要 10% —— 那要被读几次才回本？
+4. 我上线了上下文压缩，账单为什么反而涨了 10%？
+5. 自建 GPU 到底什么时候划算？决定这件事的是 GPU 价格还是别的东西？
+
+**本章新引入的术语**
+
+| 术语 | English | 一句话定义 |
+|---|---|---|
+| 轮次 | turn | 模型一次"读完整个上下文 → 输出 → 调工具 → 拿到结果"的完整往返；一次运行由 N 个轮次串成 |
+| 二次增长 | quadratic growth | 累计量随轮次的**平方**长，因为第 n 轮必须把前 n−1 轮的全部内容重发一遍 |
+| 字节稳定前缀 | byte-stable prefix | 每一轮请求开头那一段内容**逐字节完全相同**，一个字符都不差 —— 只有这样缓存才命中 |
+| 缓存写 / 缓存读 | cache write / cache read | 第一次把一段前缀存进缓存要按输入价的 1.25×–2× 多付（写乘数）；之后每次命中只按输入价的约 10% 收 |
+| 缓存断点 | cache breakpoint | 在 prompt 里显式标出"到这里为止的内容请缓存下来"的标记 |
+| 静默缓存未命中 | silent cache miss | 缓存没命中，但没有异常、没有报错、没有日志 —— 唯一的信号是账单变贵 |
+| 级联失效 | cascading invalidation | 改了靠前的一段内容，它**后面**的全部缓存断点一起作废 |
+| 模型路由 / 级联 | model routing / cascade | 先判断难度再挑模型（并行一次决策）/ 先用便宜模型跑、判断不行再升级给贵模型（串行两次） |
+| 升级率 | escalation rate | 级联里被判定为"便宜模型搞不定、必须交给贵模型"的请求比例 |
+| 隐性倍数 | hidden-cost multiplier | 自建推理的真实成本相对**裸 GPU 租金**的倍数：专职工程、冗余副本、闲置时段、可观测性栈 |
+| 利用率 | utilization | GPU 真正在算的时间占你持有它的时间的比例；单位成本 ≈ 固定成本 ÷ 利用率 |
+| 重尾分布 | heavy-tailed | 少数极端样本贡献了大部分总量，因此均值既不代表典型用户，也不代表最坏用户 |
+
+---
+
 ## 1. 先建模：成本与延迟的分解公式
 
 ```
@@ -15,7 +63,7 @@ C_infer = Σ_turns [ T_fresh × P_in                # 未缓存直读
                   + T_cw    × P_in × W            # W = 缓存写乘数（1.25× / 2×）
                   + T_cr    × P_in × 0.1          # 缓存读 ≈ 输入价 10%
                   + T_out   × P_out ]
-C_sandbox = running_seconds × 单价                 # 是 running，不是 wall-clock
+C_sandbox = running_seconds × 单价                 # 是 running，不是 wall-clock（秒表时间）
 C_tools   = web_search 次数 × 单价 + 外部 API
 C_storage = 向量库 + 对象存储 + Gemini 显式缓存持有费
 ```
@@ -30,6 +78,8 @@ C_storage = 向量库 + 对象存储 + Gemini 显式缓存持有费
 Δ 的真实量级：agentic KV 复用的生产实测给出每轮上下文增长中位约 **2,242 token**，输入:输出比 **131:1**（2026-05 口径）。**agent 的账单几乎全是输入 token，而输入 token 几乎全是重发的历史。** 这一条推出本篇 80% 的结论。
 
 **延迟分解**：`L_e2e = Σ_turns [ Queue + TTFT + T_out × TPOT + Tool_time ] + Orchestration`，其中 `TTFT ≈ Queue + uncached_prefill_tokens / prefill_throughput + RTT`。
+
+（**TTFT** = time to first token，从发出请求到收到第一个 token 的时间；**TPOT** = time per output token，第一个 token 之后每多吐一个 token 的间隔。**prefill** = 把整段输入一次性算完那个阶段，它算力受限；**decode** = 之后逐个 token 生成，它访存受限。两者是两台特性相反的机器，见 [01 §1](01-llm-serving-infra.md)。）
 
 | 指标 | 交互式目标 | 依据 |
 |---|---|---|
@@ -71,7 +121,7 @@ B. 开 5 分钟 prompt caching
 1h TTL:  2.00 + 0.1k < 1 + k  ⟹  k > 1.11  ⟹  读 2 次回本
 ```
 
-**推论：任何会被复用至少一次的前缀，无条件加 breakpoint。**
+**推论：任何会被复用至少一次的前缀，无条件加 breakpoint**（缓存断点：在 prompt 里显式标出"到这里为止的内容请缓存下来"的那个标记；下一次请求只要开头到这个位置逐字节相同，就按缓存读计价）。
 
 ---
 
@@ -108,7 +158,7 @@ B. 开 5 分钟 prompt caching
 | 最小前缀 | **非单调**：512（Opus 5 / Fable 5 / Mythos 5）、1024（Opus 4.8 / Sonnet 5 / 4.6 / 4.5）、2048（Opus 4.7 / Haiku 3.5）、**4096（Opus 4.6 / 4.5 / Haiku 4.5）** | 1024 tok | 隐式 4096（3.5 Flash / 3.1 Pro Preview）、2048（2.5 Flash / 2.5 Pro） |
 | 写价 | 1.25×（5m）/ 2×（1h） | **GPT-5.6 起 1.25×**（此前免费） | — |
 | 读价 | **0.1×** | **按代际不同**：GPT-5.x = 0.1×；gpt-4.1/o3/o4-mini = 0.25×；**gpt-4o = 0.5×** | — |
-| TTL | 5m / 1h | GPT-5.6+ 至少保留 30 分钟；更早模型 5–10 分钟不活动淘汰，最长 1h | 隐式不可控 |
+| TTL（time to live，缓存条目的存活时间，过期即失效） | 5m / 1h | GPT-5.6+ 至少保留 30 分钟；更早模型 5–10 分钟不活动淘汰，最长 1h | 隐式不可控 |
 | 持有费（storage fee） | 无 | 无 | **显式缓存 $1.00 / 百万 token / 小时**（三家唯一） |
 | 隔离域（isolation scope） | workspace（Bedrock/GCP 上按 organization） | 账户 | 项目 |
 
@@ -117,8 +167,8 @@ B. 开 5 分钟 prompt caching
 **Anthropic 特有的三条硬约束（考点密集）**
 
 1. **失效是级联的（cascading invalidation）**，渲染顺序 `tools → system → messages`：改 tool 定义 ⟹ 整条全废；改 system ⟹ system+messages 失效；改 `tool_choice` / 增删图片 ⟹ 仅 messages 失效。
-2. **最多 4 个 breakpoint，每个只回看 20 个 content block。** Agent 单轮塞进 >20 个 `tool_use`/`tool_result` block 时下一轮**静默 miss** —— 没有异常、没有日志，只有账单。
-3. **并发同前缀请求全部 miss**：缓存条目要等第一条响应开始流式输出后才可读。**N 路 fan-out 同时发出 = N 次全价写。** 正确做法：先发 1 条、等到首 token，再发其余。
+2. **最多 4 个 breakpoint，每个只回看 20 个 content block**（content block：一条消息里的一个内容单元 —— 一段文本、一张图、一次 `tool_use`、一个 `tool_result` 各算一个）。Agent 单轮塞进 >20 个 `tool_use`/`tool_result` block 时下一轮**静默 miss** —— 没有异常、没有日志，只有账单。
+3. **并发同前缀请求全部 miss**：缓存条目要等第一条响应开始流式输出后才可读。**N 路 fan-out（把同一份工作同时分发给 N 个执行者，见 [00/01 §7](../00-foundations/01-fundamentals.md)）同时发出 = N 次全价写。** 正确做法：先发 1 条、等到首 token，再发其余。
 
 **工程做法：prompt 装配写成"字节稳定前缀 + 易变尾巴"两段**
 
@@ -156,7 +206,7 @@ FROM llm_calls WHERE ts > now() - interval '24 hours' GROUP BY 1,2,3 ORDER BY 1 
 
 **b) 工具定义（L₀ 的主体）** —— 30 个工具 × 400 token = 12,000 token，**每轮全量重发**。做法：按阶段/角色做工具的命名空间加载（namespaced tool loading），别把所有 MCP server 的工具一次全挂上。
 
-**c) 检索量** —— 一阶段 top-100 → rerank 压到 30–50 → 实际塞 top-20（[Anthropic Contextual Retrieval](https://www.anthropic.com/news/contextual-retrieval) 口径，top-20 优于 top-5/top-10）。⚠ 长上下文 vs RAG 经济性差距按二手估算约 **1,250×**（100K token 请求仅 input ≈ $0.20，同等 RAG query ≈ $0.00008），量级参考。
+**c) 检索量** —— 一阶段 top-100 → rerank（重排：用一个更贵但更准的模型，对第一阶段召回的候选重新排序并砍掉尾部，见 [02 §5.4](02-context-engineering-and-rag.md)）压到 30–50 → 实际塞 top-20（[Anthropic Contextual Retrieval](https://www.anthropic.com/news/contextual-retrieval) 口径，top-20 优于 top-5/top-10）。⚠ 长上下文 vs RAG 经济性差距按二手估算约 **1,250×**（100K token 请求仅 input ≈ $0.20，同等 RAG query ≈ $0.00008），量级参考。
 
 **服务端上下文编辑**（Anthropic，截至 2026-07 仍为 beta，header `context-management-2025-06-27`）：
 
@@ -171,7 +221,7 @@ clear_thinking_20251015: 组合使用时必须排在 edits 数组首位
 
 官方实测：100 轮 web search 场景 token **−84%**；memory tool + context editing 组合 **+39%** 性能，单独 **+29%**。
 
-**这一节最重要的一句话：压缩和缓存是对立的。** 改写历史 = 前缀变了 = 整条缓存作废，下一轮按 1.25× 重写全部前缀。所以 `压缩净收益 = Δ_saved × 剩余轮次 × P_in × 0.1 − L_prefix × P_in × 1.25`。代入 §2 参数（L₀=12,000，Δ_saved=20,000）：重建代价 ≈ $0.075，每轮省 ≈ $0.010 ⟹ **剩余轮次 ≥ 8 才划算**。这就是 `clear_at_least` 必须设得足够大的原因 —— 小打小闹的清理是净亏损。
+**这一节最重要的一句话：压缩和缓存是对立的。** 改写历史（compaction，把长历史压成摘要，见 [04 §7](04-agent-memory-and-state.md)）= 前缀变了 = 整条缓存作废，下一轮按 1.25× 重写全部前缀。所以 `压缩净收益 = Δ_saved × 剩余轮次 × P_in × 0.1 − L_prefix × P_in × 1.25`。代入 §2 参数（L₀=12,000，Δ_saved=20,000）：重建代价 ≈ $0.075，每轮省 ≈ $0.010 ⟹ **剩余轮次 ≥ 8 才划算**。这就是 `clear_at_least` 必须设得足够大的原因 —— 小打小闹的清理是净亏损。
 
 ---
 
@@ -220,7 +270,7 @@ Haiku 4.5 : Opus 5 的价格比约 1:5 ⟹ **升级率（escalation rate）超�
 
 可抄的编排层对照（2026-03，10,000 份 SEC 文件 / 25 类字段 / 5 模型）：Reflexive 自纠正 F1 0.943 / 成本 **2.3×**；Hierarchical supervisor-worker F1 0.921 / **1.4×**；**Hybrid（语义缓存 + 模型路由 + 自适应重试）成本 1.15× 就拿回 reflexive 89% 的收益**。
 
-**三条工程纪律**：① 路由决策做成可一键下线的旁路（bypass，feature flag），出问题时 30 秒退回全走大模型；② **先埋点（instrumentation）后路由** —— 在全走大模型的状态下用影子流量（shadow traffic）跑小模型 + judge 对比，统计"多少比例小模型也能过"，低于 30% 就不值得做；③ **路由维度不只是模型**，还有 thinking budget、是否开工具、是否开检索。关掉 thinking 往往比换模型省得更多且质量损失更小 —— HAL 的 21,730 rollout 实验结论是**多数运行中提高 reasoning effort 反而降低准确率**。
+**三条工程纪律**：① 路由决策做成可一键下线的旁路（bypass，feature flag），出问题时 30 秒退回全走大模型；② **先埋点（instrumentation）后路由** —— 在全走大模型的状态下用影子流量（shadow traffic：把线上真实请求复制一份喂给候选方案，两边都打分，但候选的输出永不返回给用户，见 [06 §8](06-evaluation-and-observability.md)）跑小模型 + judge 对比，统计"多少比例小模型也能过"，低于 30% 就不值得做；③ **路由维度不只是模型**，还有 thinking budget、是否开工具、是否开检索。关掉 thinking 往往比换模型省得更多且质量损失更小 —— HAL 的 21,730 rollout 实验结论是**多数运行中提高 reasoning effort 反而降低准确率**。
 
 ---
 
@@ -229,7 +279,7 @@ Haiku 4.5 : Opus 5 的价格比约 1:5 ⟹ **升级率（escalation rate）超�
 | 档位 | 折扣 | 形态 | 适用 |
 |---|---|---|---|
 | 同步 | — | 阻塞 | 用户在等 |
-| **OpenAI Flex** | 对齐 Batch 费率，**可叠加 caching** | **保持同步调用形态** | 能等几分钟的后台任务；更慢、更易超时、可能 429（**429 不计费**），SDK 默认 10 分钟超时需调大。beta、模型有限（[文档](https://developers.openai.com/api/docs/guides/flex-processing)） |
+| **OpenAI Flex** | 对齐 Batch 费率，**可叠加 caching** | **保持同步调用形态** | 能等几分钟的后台任务；更慢、更易超时、可能 429（HTTP 状态码 Too Many Requests，即被限流；**429 不计费**），SDK 默认 10 分钟超时需调大。beta、模型有限（[文档](https://developers.openai.com/api/docs/guides/flex-processing)） |
 | **Batch** | **三家一律 50%**（输入+输出） | 提交 → 轮询 → 取结果 | 离线 eval、批量分类打标、embedding 回填、夜间报告 |
 | **Fast mode**（反向档） | **2× 标准价**换 ≤**2.5×** 输出 tok/s | 仅第一方 API，**不能与 Batch 同用** | 只在感知延迟直接等于产品价值时成立（demo、实时语音） |
 
@@ -253,7 +303,7 @@ Batch 边界（2026 年中）：Anthropic 100,000 请求 / 256 MB、24h 过期�
 盈亏平衡日 token 量 T* 满足:  T* × P_api = 节点日成本 × 隐性倍数
 ```
 
-**算例**：单 H100 跑 70B FP8 + vLLM 连续批处理（continuous batching）≈ **400 tok/s ≈ 34.5M tok/天**（⚠二手口径）。H100 现货 ~$2.00–3.00/hr，取 $2.50 ⟹ 裸租金 **$60/天**。
+**算例**：单 H100 跑 70B FP8 + vLLM 连续批处理（continuous batching：一个序列生成完就立刻把空位让给排队中的新请求，不必等整批跑完，见 [01 §3](01-llm-serving-infra.md)）≈ **400 tok/s ≈ 34.5M tok/天**（⚠二手口径）。H100 现货 ~$2.00–3.00/hr，取 $2.50 ⟹ 裸租金 **$60/天**。
 
 | 成本口径 | 日成本 | 对标 $25/M（Opus 5 输出） | 对标 $5/M | 对标 $1.20/M |
 |---|---|---|---|---|
@@ -263,7 +313,7 @@ Batch 边界（2026 年中）：Anthropic 100,000 请求 / 256 MB、24h 过期�
 
 > 物理上限 34.5M tok/天（100% 利用率）。隐性倍数（hidden-cost multiplier）3–5× 来自二手汇总：专职工程 $5,000–15,000/月、冗余副本、闲置时段、可观测性栈。
 
-**利用率（utilization）敏感性 —— 这张表就是自建决策的全部**（8×H100 跑 671B MoE，⚠二手，2026-06-17）：
+**利用率（utilization）敏感性 —— 这张表就是自建决策的全部**（8×H100 跑 671B MoE（mixture of experts：模型总参数很大，但每个 token 只激活其中一小部分专家，见 [01 §10](01-llm-serving-infra.md)），⚠二手，2026-06-17）：
 
 | 利用率 | 100% | 50% | 20% | **5%** |
 |---|---|---|---|---|
@@ -278,7 +328,7 @@ Batch 边界（2026 年中）：Anthropic 100,000 请求 / 256 MB、24h 过期�
 
 **什么时候自建才对**：① 数据不能出网/出境（合规硬约束）；② 单一稳定高利用率 workload（批量 embedding、离线打标、固定分类）；③ API 上没有你需要的模型。**"省钱"单独不构成理由。**
 
-**蒸馏 / 微调**同理。收益（⚠均为二手）：**5–30×** 单位成本下降；13B 微调在与前沿模型差 2 个准确率点内时，单 token 便宜 **12–40×**；单点案例给出投入 $35k–120k、回本约 **2.9 个月**。真实代价常被漏掉：**先得有评测体系**（LLM judge 起步就要 100+ 标注样本 + 每周维护）、几千到几万条训练对、**模型漂移（model drift）**（上游迭代后你的蒸馏模型不跟着变好，6–12 个月要重做）、一整套新 serving 栈（见 [01-llm-serving-infra.md](01-llm-serving-infra.md)）、一个长期 owner。**判据：任务窄 + 量大 + 稳定 ≥ 6 个月，三者同时成立才做。** Agent 主循环通常不满足（提示和工具每周都在改）；适合蒸馏的是**边缘子任务**：意图分类、字段抽取、重排（reranking）、query 改写、安全审查。
+**蒸馏（distillation：拿大模型在你这类任务上的输出当训练数据，去训一个小模型，让小模型在这一类任务上逼近大模型）/ 微调**同理。收益（⚠均为二手）：**5–30×** 单位成本下降；13B 微调在与前沿模型差 2 个准确率点内时，单 token 便宜 **12–40×**；单点案例给出投入 $35k–120k、回本约 **2.9 个月**。真实代价常被漏掉：**先得有评测体系**（LLM judge 起步就要 100+ 标注样本 + 每周维护）、几千到几万条训练对、**模型漂移（model drift）**（上游迭代后你的蒸馏模型不跟着变好，6–12 个月要重做）、一整套新 serving 栈（见 [01-llm-serving-infra.md](01-llm-serving-infra.md)）、一个长期 owner。**判据：任务窄 + 量大 + 稳定 ≥ 6 个月，三者同时成立才做。** Agent 主循环通常不满足（提示和工具每周都在改）；适合蒸馏的是**边缘子任务**：意图分类、字段抽取、重排（reranking）、query 改写、安全审查。
 
 ---
 
@@ -289,7 +339,7 @@ Batch 边界（2026 年中）：Anthropic 100,000 请求 / 256 MB、24h 过期�
 | # | 手段 | 收益 | 备注 |
 |---|---|---|---|
 | 1 | **前缀缓存 / prompt caching** | 长输入下可降**两个数量级** | 先做这个 |
-| 2 | **缓存感知路由（cache-aware routing）（会话粘性 session affinity）** | 极端对照 P90 TTFT **0.542 s**(precise) vs 31.083 s(approximate) vs **92.551 s**(random) ⟹ **57× / 170×** | 8 pod / 16×H100 / 150 租户 × 6k ctx。**这让 LLM 网关变成有状态路由（stateful routing）** |
+| 2 | **缓存感知路由（cache-aware routing）（会话粘性 session affinity：把同一会话的后续请求固定送回上一次那台实例，因为它上面还留着这个会话算好的 KV cache）** | 极端对照 P90 TTFT **0.542 s**(precise) vs 31.083 s(approximate) vs **92.551 s**(random) ⟹ **57× / 170×** | 8 pod / 16×H100 / 150 租户 × 6k ctx。**这让 LLM 网关变成有状态路由（stateful routing）** |
 | 3 | **KV cache 复用 / 融合** | [CacheBlend](https://arxiv.org/pdf/2405.16444) 相比纯前缀缓存再降 **2.2–3.3× TTFT**、吞吐 +2.8–5× | RAG 的多段非前缀复用 |
 | 4 | 分层 KV 卸载 | LayerKV 超长 prompt 最高 **69×**；vLLM CPU offload 单请求 TTFT **2–22×** | 需自建 serving |
 | 5 | 上下文压缩 / 裁剪 | 与 §5 同一件事 | 注意击穿缓存 |
@@ -388,6 +438,14 @@ CREATE INDEX ON llm_call_costs (tenant_id, ts DESC);
 杠杆侧 —— agentic KV 复用把命中率从 1.7% 拉到 92.2%，P50 TTFT **↓46×**、端到端 **↓8.6×**、吞吐 **↑3.8×**（GB200×60，2026-05；⚠ 代码未合入主干）。泄露侧 —— PROMPTPEEK（NDSS 2025）实证共享 prefix cache 可被**逐 token 重建他人 prompt**，无背景知识成功率 **95%**。
 
 结论只能是 **同租户内共享、跨租户默认关闭** —— 而这会直接削掉多租户场景里最大的性能杠杆。这不是可以两全的取舍，是必须在设计评审上明说的成本。详见 [07-agent-security.md](07-agent-security.md)。
+
+---
+
+## 这一章的三句话
+
+1. **Agent 的账单几乎全是输入 token，而输入 token 几乎全是每一轮重发的历史**（实测输入:输出 ≈ 131:1）。所以成本对轮次是二次的，而优化顺序被这一条钉死：先让前缀字节稳定（不改行为、不用重跑 eval、一周上线、吃掉输入成本 60–90%），再让工具变粗。
+2. **压缩和缓存是对立的。** 改写历史 = 前缀变了 = 整条缓存作废，下一轮按 1.25× 重写全部前缀。所以"小打小闹地清理一点上下文"是**净亏损** —— 剩余轮次不够多（本篇算例里是 8 轮）就根本不该压。
+3. **自建划不划算取决于你对标哪个模型，不取决于 GPU 便不便宜。** 而单位成本 ≈ 固定成本 ÷ 利用率：利用率从 100% 掉到 20%，同一张卡的单位成本涨 5 倍 —— 真实业务有日夜波峰谷，平均利用率很少超过 30%。
 
 ---
 

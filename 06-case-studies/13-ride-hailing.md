@@ -6,6 +6,36 @@
 
 ---
 
+## 读这道题之前
+
+**如果你是直接翻到这道题的**：下面三个问题是这题的地基。答不出，正文里每一句"条件更新"都会读成黑话 —— 案例篇不再解释构件。
+
+**先确认你能回答这三个问题**
+
+1. 什么是 check-then-act？"先 SELECT 查这个司机是否空闲、再 UPDATE 把他占住"，两个请求同时来会发生什么？
+   答不出 → 先读 [00-concepts §7 事务与隔离级别](../00-foundations/00-concepts.md)
+2. 副本和分片各解决什么问题？全世界司机位置加起来才 200 MB、一台机器绰绰有余，那为什么还要分片？
+   答不出 → 先读 [00-concepts §5 副本 / 分片 / 分区](../00-foundations/00-concepts.md)
+3. 弱网会带来重复、乱序、迟到三件事。幂等键能解决其中哪几件？剩下那件靠什么？
+   答不出 → 先读 [01-fundamentals §5 幂等](../00-foundations/01-fundamentals.md)、[§9 幂等 × 重试 × 超时](../00-foundations/01-fundamentals.md)
+
+**这道题会用到的构件**
+
+| 构件 | 用在哪 | 详见 |
+|---|---|---|
+| 条件更新、fencing token、租约 | §4.3 判定"这个司机归谁"、§4.4 超时回收 | [`05-consensus-and-coordination.md`](../01-building-blocks/05-consensus-and-coordination.md) §3、§4 |
+| 有状态 vs 无状态 | 司机长连接与 Geo 索引分片都是有状态的 | [00-concepts §9](../00-foundations/00-concepts.md)、[`04-networking-and-edge.md`](../01-building-blocks/04-networking-and-edge.md) §2、§4 |
+| Little's Law（并发 = 吞吐 × 延迟） | §2.4 推出 43.5 万在途订单与 30 台接入机 | [00-concepts §2](../00-foundations/00-concepts.md)、[`02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §3 |
+| 流式窗口聚合与 watermark | §4.6 供需信号 → surge 价格快照 | [`03-messaging-and-streams.md`](../01-building-blocks/03-messaging-and-streams.md) §6 |
+| 热 key | §4.2 "一城一个 geo key" 为什么会烧掉一个分片 | [`02-caching.md`](../01-building-blocks/02-caching.md) §4 |
+
+**这道题的一句话本质**
+
+> **在一个最终一致的世界里守住一个强一致的不变量：任一时刻，一个司机只能被一个订单持有。**
+> 地理索引是入场券，独占性与超时收敛才是分数。带着这句话往下读 —— 每见到一个组件就问一次："它是在守这个不变量，还是在为它做准备？"
+
+---
+
 ## 0. 45 分钟怎么分配这道题
 
 | 时间 | 做什么 | 这一段的得分点 |
@@ -76,7 +106,8 @@ cell → driver 倒排索引 ≈ 50 MB                                          
 
 轨迹归档（trajectory archive）：只归档载客段（30% 司机 × 4 s）
   75,000 点/s × 86,400 = 65 亿点/天 × 24 B = 156 GB/天（原始）
-  delta-of-delta + zigzag + zstd 约 10× → 15.6 GB/天 → 5.7 TB/年
+  delta-of-delta + zigzag + zstd（时序压缩三件套：只存"差值的差值"、把负数映射成小正数、再通用压缩）
+    约 10× → 15.6 GB/天 → 5.7 TB/年
   S3 标准约 $0.023/GB/月（2026 量级）→ 约 $130/月
 ```
 
@@ -99,7 +130,8 @@ cell → driver 倒排索引 ≈ 50 MB                                          
 ### 2.4 连接数、在途订单与成本
 
 ```
-Little's Law：峰值在途订单 L = λ × W = 290/s × (等待 5 min + 行程 20 min = 1,500 s) ≈ 435,000
+Little's Law（并发 = 吞吐 × 停留时间，见 00-concepts §2）：
+  峰值在途订单 L = λ × W = 290/s × (等待 5 min + 行程 20 min = 1,500 s) ≈ 435,000
   ⇒ 与"40% 司机处于载客或接客中"自洽（§2.1 的上报占比假设成立）
 长连接 = 100 万司机 + 43.5 万乘客 ≈ 143 万 ÷ 10 万/机 = 15 台，留 2× 余量 → 30 台接入机
   内存 143 万 × 40 KB = 57 GB ÷ 30 台 = 1.9 GB/台   ← 装得下
@@ -120,7 +152,8 @@ ETA 调用 = 58 QPS × 20 候选 = 1,160 次/s → 30 亿次/月 × $2–5/千�
 ```
  司机 App ──HTTP 10s──► App ──► Postgres
                                  drivers(id, geog GEOGRAPHY, status, updated_at)
-                                 GiST 索引 on geog
+                                 GiST 索引 on geog   -- GiST：PostgreSQL 的通用搜索树，
+                                                     -- PostGIS 用它做空间索引（B-Tree 做不了二维范围）
  乘客 App ──叫车──────► App ──► SELECT id FROM drivers
                                  WHERE status='idle' AND ST_DWithin(geog, :p, 2000)
                                  ORDER BY geog <-> :p LIMIT 20;
@@ -157,6 +190,8 @@ ETA 调用 = 58 QPS × 20 候选 = 1,160 次/s → 30 亿次/月 × $2–5/千�
                                     ▲                    │
                                     └── 超时事件 ─── Timeout Scheduler（Redis ZSET 时间轮）
 ```
+
+> **图里的三个词**：**H3 res N** = H3 六边形网格的分辨率等级，数字越大格子越小（res 5 ≈ 253 km² 的城市片区，res 8 ≈ 0.74 km²）｜**k-ring(k)** = 以某个格子为中心、向外 k 圈的全部格子，共 `3k²+3k+1` 个（§4.1 有推导）｜**haversine** = 球面上两点的直线距离公式，不走路网、纯算术、零外部依赖，所以能当 ETA 的降级值。
 
 **数据流的四条边界**：
 
@@ -262,7 +297,7 @@ RETURNING epoch;
 **三个要点，每一个都是独立的评分信号**：
 
 1. **`expires_at < now()` 是惰性过期判定（lazy expiry）**：正确性只依赖读时比时间戳。后台清理器挂掉不会永久占用运力 —— 清理器只负责"体验"（让司机 App 及时回到空闲界面），**不负责正确性**。这两件事必须由两个机制分别保证。
-2. **`epoch` 是 fencing token**：司机 App 上报"我接受订单 X"时必须回传收到 offer 时的 epoch。epoch 落后 = 这是一个过期 offer 的回声（弱网延迟送达），服务端必须拒绝。**没有 epoch，一条迟到 10 秒的"接受"会把一个已经重派给别人的订单改回来，然后两个司机同时开向同一个乘客。**
+2. **`epoch` 是 fencing token**（围栏令牌：一个单调递增的编号，让被抢占的旧持有者的写在下游被识别出来并拒绝，见 [`05-consensus-and-coordination.md`](../01-building-blocks/05-consensus-and-coordination.md) §3）：司机 App 上报"我接受订单 X"时必须回传收到 offer 时的 epoch。epoch 落后 = 这是一个过期 offer 的回声（弱网延迟送达），服务端必须拒绝。**没有 epoch，一条迟到 10 秒的"接受"会把一个已经重派给别人的订单改回来，然后两个司机同时开向同一个乘客。**
 3. **串行 offer，不是并行广播**。并行给 5 个司机发同一单，4 个人白点一次 —— 接单率指标直接废掉，司机端体验崩坏。串行的代价是延迟 = 轮数 × 超时，所以超时必须短（§4.4）。
 
 **注意这题和票务系统的关键差别**：票务的痛点是**单行热点**（1 万座位的总余量在一行上被 6 万 QPS 打），所以它需要准入层削峰 + 分桶。打车这里，`driver_assignment` 按 `driver_id` 天然分散在 100 万行上，**单行 TPS < 0.1，根本没有热点**。同样是"条件更新守不变量"，两题的瓶颈完全不在一处 —— 说得出这个区别，说明你不是在背模板。
@@ -364,7 +399,7 @@ UPDATE driver_assignment SET order_id = NULL, state = 'idle'
 | 下单时的预估路线里程 | 遇绕路/堵车差 10%+ | 0（已经算过） | 中性 |
 
 **选：下单时用预估价锁定，行程后用 map matching 修正，两者差 > 20% 挂起转人工。** 裸 GPS 求和是这里唯一必须排除的选项。
-账本走复式记账（乘客应付 / 司机应收 / 平台抽成），取消费、等待费、路桥费各自独立行项，见 [`../03-saas-platform/02-billing-and-metering.md`](../03-saas-platform/02-billing-and-metering.md)。
+账本走复式记账（double-entry：每笔钱同时记一借一贷，两边相等，账本因此自带校验，见 [15-payment-system.md](15-payment-system.md) §4.3）——乘客应付 / 司机应收 / 平台抽成，取消费、等待费、路桥费各自独立行项，见 [`../03-saas-platform/02-billing-and-metering.md`](../03-saas-platform/02-billing-and-metering.md)。
 
 ---
 
@@ -397,7 +432,7 @@ UPDATE driver_assignment SET order_id = NULL, state = 'idle'
 | 单城市、< 5,000 在线司机 | 位置写 500/s，内存索引、H3、Kafka 全是净复杂度 | §3.1 的 PostGIS 版本，一个进程 + 一个 Postgres |
 | **预约单（scheduled ride）为主** | 根本没有"实时附近"这个问题 | 这是排班与运筹问题：提前 N 小时做全局指派，架构接近排产系统，和本文没有共享部分 |
 | **货运 / 长途**（一单 8 小时，日单 1,000） | 匹配质量的价值远超匹配延迟；15 s 超时毫无意义 | 批量撮合 + 人工确认，超时以分钟/小时计，状态机参数全变 |
-| **外卖配送**（一个骑手同时持 3–5 单） | 不变量从"独占"变成"容量 + 路径可行性"。条件更新仍能防超派，但**它保证不了'这五单能顺路送完'** | 撮合器内做路径规划（VRP 近似），条件更新只做最后一道防线 |
+| **外卖配送**（一个骑手同时持 3–5 单） | 不变量从"独占"变成"容量 + 路径可行性"。条件更新仍能防超派，但**它保证不了'这五单能顺路送完'** | 撮合器内做路径规划（VRP = vehicle routing problem，车辆路径问题：给定多个取送点求一条总代价最小的路线，NP-hard，工程上只求近似解），条件更新只做最后一道防线 |
 | 强监管市场要求"最近的车必须优先" | 本文按 ETA + 接单率 + 空驶补偿排序，会被判定为不合规 | 排序键退化为纯距离，把接单率优化挪到司机端的接单激励里 |
 
 **一条通用判据**：当"匹配质量"的边际收益超过"匹配延迟"的边际成本时，立即派单就该换成批量撮合。可观测的信号是 **空驶率（deadhead ratio）**成为公司级指标的那一天。
@@ -414,7 +449,7 @@ UPDATE driver_assignment SET order_id = NULL, state = 'idle'
 | ETA 服务慢或熔断 | 匹配 p99 从 200 ms 涨到 3 s | ETA 调用 p99、超时率 | 200 ms 超时 → 降级 haversine × 城市绕行系数（1.3–1.4）；熔断后全城走降级 5 min |
 | 位置流 Kafka 堆积 | 轨迹、热力、surge 滞后（**派单不受影响**，它读内存索引） | consumer lag | 丢最旧数据（位置可丢）；surge 冻结在最后一个有效快照 |
 | 单城市热点（一城占 30% 流量） | 该分片 CPU 打满，p99 分化 | 分片间 CPU / p99 方差 | 分片键从 `city_id` 换成 `h3_res5_cell`，天然按地理打散；超大城市再切到 res 6 |
-| 接入机重启引发重连风暴 | 单机约 4.8 万连接（143 万 ÷ 30）同时重连，打死鉴权链路 | 新建连接速率尖峰 | 指数退避 + 全抖动（full jitter）；接入层新建连接限速；**重连只发最新一条位置，不补历史** |
+| 接入机重启引发重连风暴 | 单机约 4.8 万连接（143 万 ÷ 30）同时重连，打死鉴权链路 | 新建连接速率尖峰 | 指数退避 + 全抖动（full jitter：重试间隔在 `[0, 上限]` 里取随机值，而不是"上限 ± 一点"，否则所有客户端的重试时刻仍会对齐，见 [`03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) §3）；接入层新建连接限速；**重连只发最新一条位置，不补历史** |
 | GPS 伪造 / 漂移；司机端时钟不可信 | 司机"瞬移"到高需求区抢单；用 `client_ts` 排序会错乱 | 相邻两点隐含速度 > 200 km/h 的占比 | 服务端速度合理性检查，异常点丢弃后进风控队列；**所有生效时间由服务端赋值**，`client_ts` 只用于同一设备内排序 |
 | 支付失败但行程已完成 | 司机已提供服务，钱没到 | 未结算行程数、老化天数 | 行程状态机到 `completed` 即结束；收款是独立账务流程（挂账 + 催收），**不能让支付失败卡住行程状态** |
 

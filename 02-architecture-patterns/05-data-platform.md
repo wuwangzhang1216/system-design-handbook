@@ -5,13 +5,64 @@
 
 ---
 
+## 读这一章之前
+
+**你在工作中遇到过这个**
+
+上游后端把 `orders.status` 的取值从 `paid` 改成了大写 `PAID`，一行代码的事，没人想起来通知数据组。
+当天的收入看板依然是绿的 —— 口径写死了 `status = 'paid'`，匹配不到就是 0 行，画出来是一条完美的平线，没有任何告警。
+三天后 CFO 在经营会上问"周三收入为什么是 0"，你才开始查。
+同一周，那个每分钟提交一次的流式作业跑满了一个月，同样的查询从 200 ms 变成 40 秒，而数据量只涨了 3 倍。
+
+**需要先懂的概念**
+
+| 概念 | 一句话 | 详见 |
+|---|---|---|
+| 副本 / 分片 | 同一份数据存多份 vs. 把数据切成互不重叠的块分开放 | [00-concepts §5](../00-foundations/00-concepts.md) |
+| 快照隔离 / 乐观并发 | 读的人锁定一个瞬间的一致视图；写的人靠版本号抢，抢输了重来 | [00-concepts §7](../00-foundations/00-concepts.md) |
+| 最终一致 | 分析链路天然滞后于业务库，且**没有时间上界** | [00-concepts §6](../00-foundations/00-concepts.md) |
+| 幂等 | 同一批数据被重复处理一次，结果不能变 | [00/01 §5](../00-foundations/01-fundamentals.md) |
+| 消息、流与 Outbox | 变更怎么可靠地从业务库流到下游 | [01/03](../01-building-blocks/03-messaging-and-streams.md) |
+| SLO 与错误预算 | 用可测量的指标承诺质量，超支就停下来修 | [05/01](../05-reliability/01-slo-and-error-budget.md) |
+
+**这一章要回答的问题**
+
+1. 业务库里的数据怎么变成能被分析的数据？只读副本、批量导出、CDC 三条路，什么时候该走下一步？
+2. 对象存储只有"整个文件覆盖"这一种写法，Iceberg 这类表格式凭什么能在上面做出 ACID 表？这对提交频率有什么硬约束？
+3. 上游偷偷改了一列，怎么在下游看板算错之前就把它挡住？
+4. 用户要求"删除我的全部数据"，为什么 `DELETE` 跑成功了还不等于删干净了？
+
+**本章新引入的术语**
+
+| 术语 | English | 一句话定义 |
+|---|---|---|
+| 湖仓 | lakehouse | 在对象存储的一堆文件之上加一层事务元数据，让"文件的集合"具备数据库式的表语义 |
+| 表格式 | table format | 一套约定，规定哪些文件属于这张表、表现在的结构是什么、以及如何原子地把一批文件换成另一批 |
+| 目录 | catalog | 保存"表名 → 当前元数据文件"这个唯一可变指针的服务，是所有查询引擎的会合点 |
+| 快照 | snapshot | 表在某一时刻的完整文件清单；读的人一旦拿到它，之后别人怎么写都不影响这次读 |
+| 小文件问题 | small files problem | 高频写入产生海量几 MB 的碎文件，让查询在读到数据之前就先被"清点文件"拖垮 |
+| 合并压实 | compaction | 后台把大量小文件重写成少量大文件的维护作业 |
+| CoW / MoR | copy-on-write / merge-on-read | 改一行就重写整个数据文件（写慢读快）/ 只追加一条"这行已删/已改"的记录，读的时候再合并（写快读慢） |
+| 数据契约 | data contract | 一份版本化、有署名 owner、且能在 CI 里被机器检查的表结构与质量约定 |
+| 分层（青铜/白银/黄金） | medallion architecture | 原始层（只追加、可重放）→ 明细层（清洗建模、有契约）→ 消费层（面向具体用途的汇总） |
+| 隔离区表 | quarantine table | 专门接收"校验没通过但绝不能丢"的坏行的表，它的行数本身就是一个告警信号 |
+| 指标层 / 语义层 | metrics layer / semantic layer | 把每个指标的口径写成一份版本化代码，看板、笔记本、Agent 都只能从这里取数 |
+| 反向 ETL | reverse ETL | 把仓库里算出来的结论（如流失风险分）写回业务 SaaS（CRM、客服系统）的同步作业 |
+
+---
+
 ## 1. OLTP → 分析：三条路径
+
+**OLTP**（online transaction processing）就是你的业务库：海量小事务、按主键读写、要求毫秒级返回。
+**OLAP**（online analytical processing）是分析侧：查询很少但每条都要扫过成百上千万行做聚合。
+两者对存储布局的要求正好相反（前者按行存、后者按列存），所以数据必须搬家，而搬家只有下面三条路。
+第三条里的 **CDC（change data capture，变更数据捕获）**指：不走查询路径，而是直接读数据库为崩溃恢复而顺序写的日志（MySQL 的 binlog / PostgreSQL 的 WAL），把每一行的增、删、改**按发生顺序**输出成一条流。
 
 | 路径 | 新鲜度 | 对 OLTP 的压力 | 复杂度 | 撞墙条件与信号 |
 |---|---|---|---|---|
 | **直读只读副本（read replica）** | 秒级 | 中（大扫描吃 IO buffer，副本 lag 上升） | 最低 | 数据 > ~500 GB 或分析查询 > 几十 QPS；**信号：副本 lag 从毫秒涨到秒，业务开始抱怨"读不到刚写的"** |
 | **批量导出（batch export）**（每日/每小时快照） | 1–24 h | 低（低峰跑） | 低 | 需要小时内新鲜度；或单表 > 1 TB 时全量 dump 跑不完窗口；**信号：导出任务开始重叠** |
-| **CDC → 流 → 湖** | 秒到分钟 | 最低（读 WAL/binlog，不走查询路径） | **高** | 从第一天就复杂：schema 变更、迟到事件（late-arriving events）、断点重放（replay from checkpoint）、快照+增量的接缝全要处理 |
+| **CDC → 流 → 湖** | 秒到分钟 | 最低（读 WAL/binlog，不走查询路径） | **高** | 从第一天就复杂：schema 变更、迟到事件（late-arriving events：事件发生在昨天、今天才到，落进一个已经被算过的时间窗口）、断点重放（replay from checkpoint）、快照+增量的接缝全要处理 |
 
 **演进顺序是固定的**：只读副本 → 批量导出 → CDC。**跳级是最常见的浪费**。一个 ARR 不到 1000 万的公司直接上 Debezium + Flink + Iceberg，通常会在 6 个月后发现 80% 的查询其实是"昨天的数据就够"。
 
@@ -40,8 +91,8 @@ data files (Parquet)   实际数据 + delete files / deletion vectors
 
 **关键推论：**
 
-1. **快照隔离（snapshot isolation）是"免费"的**：读取者拿到一个 metadata.json 就锁定了一致的文件列表，写入者往后追加新文件不影响它。代价是**旧快照的文件不能立刻删**（这在合规删除上会咬你，见 §10）。
-2. **写入冲突靠乐观并发控制（optimistic concurrency control）**：两个写入者同时想把指针从 v7 换到 v8，只有一个 CAS 成功，另一个重读元数据、重放自己的变更、再试（Iceberg `commit.retry.num-retries` 默认 4）。**这意味着高频小事务会退化成互相打架** —— 每分钟 commit 一次是上限量级，每秒 commit 一次不行。
+1. **快照隔离（snapshot isolation）是"免费"的**（快照隔离 = 整个读取过程都看着数据在某一瞬间的样子，别人后来的修改一律看不见，见 [00-concepts §7](../00-foundations/00-concepts.md)）：读取者拿到一个 metadata.json 就锁定了一致的文件列表，写入者往后追加新文件不影响它。代价是**旧快照的文件不能立刻删**（这在合规删除上会咬你，见 §10）。
+2. **写入冲突靠乐观并发控制（optimistic concurrency control）**：两个写入者同时想把指针从 v7 换到 v8，只有一个 **CAS**（compare-and-swap：只有当这个指针的当前值仍然是我读到的那个值时才写进去，否则整个操作失败；见 [00-concepts §7](../00-foundations/00-concepts.md)）成功，另一个重读元数据、重放自己的变更、再试（Iceberg `commit.retry.num-retries` 默认 4）。**这意味着高频小事务会退化成互相打架** —— 每分钟 commit 一次是上限量级，每秒 commit 一次不行。
 3. **查询规划（query planning）的成本在元数据层**，不在数据层。manifest 里的列统计让引擎能在读任何 Parquet 之前就剪掉（prune）95%+ 的文件。**manifest 太多（小文件的副作用）会让规划本身变成几十秒的瓶颈。**
 4. **列由 ID 标识，不由名字标识**。所以在 Iceberg 里重命名列是纯元数据操作，不需要重写数据 —— 这是它相对 Hive 表最实用的一个差异。⚠️ 但**表格式安全 ≠ 契约安全**：重命名对下游的 SQL 仍然是破坏性变更（见 §4）。
 
@@ -53,6 +104,8 @@ data files (Parquet)   实际数据 + delete files / deletion vectors
 | 强项 | **引擎中立（engine-neutral）**，规范与实现分离，生态最广 | Databricks 一等公民，Liquid Clustering 等运行时优化最成熟 | **索引化 upsert**（record-level index），增量查询原生 |
 | 更新语义 | CoW + MoR（v2 位置/等值删除文件，v3 起用二进制 deletion vector） | CoW + MoR（deletion vector） | CoW / MoR 可按表选择 |
 | 最适合 | 多引擎、多云、长期资产 | 已在 Databricks 上 | 高频 upsert 的准实时表（CDC 落地） |
+
+（表里三个词先解释清楚：**upsert** = 这行在就更新、不在就插入。**CoW（copy-on-write）**= 改一行就把它所在的整个数据文件重写一遍，写的时候贵、读的时候什么都不用做。**MoR（merge-on-read）**= 原文件一个字节不动，只追加一份"这个文件的第几行已被删/已被改"的记录，读的时候现场合并 —— 写得快，但每次读都多一步。那份记录的现代形态就是 **deletion vector**：一个按行号打点的位图，比"逐条列出被删的主键"小得多，也快得多。）
 
 **2025–2026 的生态收敛是这一节最重要的部分：**
 
@@ -131,6 +184,12 @@ CALL catalog.system.remove_orphan_files(table => 'silver.orders',
    BI/报表    反向 ETL→SaaS    RAG 索引    ML 特征    Agent 的 SQL 查询
 ```
 
+图里最下面那行出现了 **RAG**（retrieval-augmented generation，检索增强生成：模型回答之前，先按问题从外部知识库里检索出若干片段拼进 prompt，让它基于这些材料作答，而不是只靠训练时记住的东西 —— 完整讲法见 [`04-ai-agent-systems/02`](../04-ai-agent-systems/02-context-engineering-and-rag.md)）；
+对数据平台来说，它只是 Gold 层的又一个消费者，且是要求"能增量更新、能按行删除"的那一类（§9 展开）。
+
+图里 SILVER 层那个 **SCD2**（slowly changing dimension type 2，缓慢变化维第 2 型）指：实体的属性变化时**不覆盖旧行**，而是新增一行，并给每行打上"从什么时候生效、到什么时候失效"。
+于是"这个客户在去年 3 月属于哪个套餐"这类问题才答得出来 —— 直接 `UPDATE` 覆盖会让历史永久消失，而分析的价值有一半在历史里。
+
 **"批流一体（unified batch and streaming）"在 2026 年的真实含义不是"用一套代码跑两种模式"**，而是：**同一套表**（Iceberg 表同时支持流写与批读）+ **同一套契约与质量规则**，但**仍然是两套执行** —— Flink/Spark Streaming 负责秒-分钟级的 Silver，Spark/Trino 批作业负责小时-天级的 Gold。
 
 **增量物化（incremental materialization）**是把成本降一个数量级的关键：Gold 层不要每天全量重算，用快照区间做增量。
@@ -144,6 +203,8 @@ WHERE occurred_at > (SELECT max(occurred_at) FROM {{ this }})
 ```
 
 ⚠️ **增量物化的第一个坑是迟到数据（late-arriving data）**：`WHERE occurred_at > max(occurred_at)` 会永久漏掉所有迟到事件。正确做法是用**处理时间（processing time）**（`_ingested_at`）做增量水位（watermark），用**事件时间（event time）**做业务分区，并定期跑一个覆盖最近 N 天的全量回填（backfill）（典型 N = 3–7 天，取决于你的迟到分布 p99.9）。
+
+（**水位线 watermark**：一个只向前推的时间点，含义是"比它更早的数据，我认为已经到齐了"；比水位线还旧的数据再到，就算迟到数据。**回填 backfill**：把某一段历史区间整个重算一遍，并覆盖掉那段区间已有的结果。用事件时间做水位的致命之处在于：一条迟到 3 天的事件不会把水位往回拉，它只是永远不会被算进去。）
 
 ---
 
@@ -230,6 +291,8 @@ PR 修改契约 YAML
    └─ ⑤ 影响面：查血缘图，把受影响的下游模型与 dashboard 贴到 PR 评论里
 ```
 
+（**血缘 lineage**：一张"哪张表、哪个字段是由哪些上游算出来的"的依赖图，通常由解析 SQL 自动生成，§9d 会展开它的另一半用途。）
+
 **兼容性判定表**（Avro / Confluent Schema Registry 语义）：
 
 | 变更 | BACKWARD（新代码读旧数据） | FORWARD（旧代码读新数据） | FULL |
@@ -254,7 +317,9 @@ PR 修改契约 YAML
 
 ## 5. 数据质量与新鲜度 SLO
 
-数据的 SLO 和服务的 SLO 是同一套方法（见 [05-reliability/01-slo-and-error-budget.md](../05-reliability/01-slo-and-error-budget.md)），只是 SLI 不同。
+数据的 SLO 和服务的 SLO 是同一套方法（见 [05-reliability/01-slo-and-error-budget.md](../05-reliability/01-slo-and-error-budget.md)），只是 **SLI** 不同 ——
+**SLI**（service level indicator，服务等级指标）是你实际去测的那个比值，**SLO** 是你对这个比值公开承诺的那条线；
+服务侧的 SLI 通常是"成功请求 / 总请求"和"延迟 < X 的请求 / 总请求"，数据侧则换成下面这几个。
 
 | SLI | 定义 | 典型 SLO |
 |---|---|---|
@@ -327,10 +392,10 @@ Gold 层的 customer_health_score / churn_risk / usage_tier
 
 **四条工程要求：**
 
-1. **必须幂等（idempotent）+ 增量**：按行做 diff（存上次同步的哈希），只推变化的行。全量推送会在第一天就打爆目标 SaaS 的 API 配额（多数 SaaS 的写 API 在每秒几十到几百次量级）。
+1. **必须幂等（idempotent：同一批数据推两次，目标系统的最终状态和推一次完全一样，见 [00/01 §5](../00-foundations/01-fundamentals.md)）+ 增量**：按行做 diff（存上次同步的哈希），只推变化的行。全量推送会在第一天就打爆目标 SaaS 的 API 配额（多数 SaaS 的写 API 在每秒几十到几百次量级）。
 2. **必须限速并处理 429**：目标系统的限流是你的硬约束，见 [04-api-design-and-versioning.md](04-api-design-and-versioning.md) §6。
 3. **PII 扩散（PII sprawl）是主要风险**：反向 ETL 是把仓库里的 PII 复制到 N 个第三方系统的最快途径。契约里的 `classification: pii` 必须能阻止字段被同步到未授权的目的地。
-4. **绝不放进关键路径（critical path）**：仓库有小时级延迟、有批处理失败、有回填。用它驱动"销售线索评分"可以，用它驱动"能不能下单"不行。
+4. **绝不放进关键路径（critical path：用户必须等它跑完才能拿到结果的那条链，见 [00-concepts §1](../00-foundations/00-concepts.md)）**：仓库有小时级延迟、有批处理失败、有回填。用它驱动"销售线索评分"可以，用它驱动"能不能下单"不行。
 
 ---
 
@@ -351,7 +416,7 @@ Gold 层的 customer_health_score / churn_risk / usage_tier
 
 **治理机制比技术手段更重要：**
 
-- **每个查询强制打标签**（`team` / `dashboard_id` / `job_id`），按扫描量出账（chargeback）到具体团队。没有归因（attribution）就没有节约动机。
+- **每个查询强制打标签**（`team` / `dashboard_id` / `job_id`），按扫描量出账（**chargeback**：把一笔公共开销按实际用量分摊回发起方团队自己的预算上）到具体团队。没有归因（attribution）就没有节约动机。
 - **给按需引擎设硬上限**（BigQuery 的 `maximum_bytes_billed`），防止一次手滑的 `SELECT *` 烧掉一个月预算。
 - **测量"每个 dashboard 的 30 天成本 / 30 天独立查看人数"**。这个比值会暴露出你最大的一笔浪费：**没人看但每小时刷新的 dashboard**。在多数公司这一项能占分析总成本的 20–40%。
 
@@ -376,6 +441,8 @@ chunks 表（Iceberg）：chunk_id, doc_id, doc_version, chunk_hash, text, posit
 上下文化（可选）→ embedding → 向量索引 + BM25 索引
 ```
 
+（**embedding**：把一段文本映射成一个几百到几千维的浮点向量，语义相近的文本得到的向量也相近，于是"找相似的文档"变成了"找距离近的向量"。**chunk**：把长文档切成的一小段，几百 token，是检索和嵌入的最小单位。）
+
 **增量更新的关键在 chunk 级哈希**（分块 chunking 的粒度决定了增量粒度）：一次文档编辑通常只改动 1–3 个 chunk，按文档整体重嵌（re-embedding）是 10–50× 的浪费。成本锚点（2026 年中量级，随时变动）：embedding 约 **$0.12–0.15 / 百万 token**；Anthropic 的 contextual retrieval 做法给每个 chunk 生成 50–100 token 的上下文，一次性成本约 **$1.02 / 百万文档 token**（2024 年官方口径），配合 prompt caching 可再降。
 
 ### b) 删除传播（deletion propagation）：这是最容易漏的一条
@@ -390,6 +457,8 @@ chunks 表（Iceberg）：chunk_id, doc_id, doc_version, chunk_hash, text, posit
 □ 派生物：embedding 缓存、语义缓存、特征表、导出快照
 □ 下游第三方（反向 ETL 推过去的）     ← 需要一份"推送到哪儿了"的台账
 ```
+
+（**HNSW** 是最常用的一种向量索引：把向量按邻近关系连成一张多层图，查询时从最稀疏的那层开始逐层往下逼近，于是不必扫过全部向量就能找到足够近的邻居。它的删除通常只是**墓碑标记（tombstone）**—— 把这个点标记为"不许再返回"，它占的内存和它在图里的连边要等索引重建才真正回收。**所以"从向量库里删了"和"数据不在了"是两件事。**）
 
 ⚠️ **快照过期（snapshot expiration）是最常被审计抓到的一条**：`DELETE FROM orders WHERE user_id = ?` 在 Iceberg/Delta 里只是写了一个 deletion vector，**旧快照仍然可以读到原值**。如果你的 `history.expire.max-snapshot-age-ms` 是 30 天，而合规删除 SLA 是 30 天，你在数学上就不可能达标。规则：**快照保留期必须显著小于删除 SLA**（比如保留 7 天 / SLA 30 天）。
 
@@ -409,7 +478,7 @@ index_key = (model_id, model_version, dim, chunk_strategy_version, normalize?, p
 5. 旧索引留至少一个回滚窗口（7 天）再删
 ```
 
-⚠️ **绝不能"边换模型边查询"**：同一个索引里混着两个模型的向量，相似度计算在数学上就是无意义的，而且**不会报错**，只会让召回（recall）悄悄变差 —— 这是 RAG 系统最隐蔽的一类事故。（Matryoshka 表示可以把 3072 维截到 256 维，通常只损 2–3% 精度、存储降 4×；但截断维度同样是 `index_key` 的一部分。）
+⚠️ **绝不能"边换模型边查询"**：同一个索引里混着两个模型的向量，相似度计算在数学上就是无意义的，而且**不会报错**，只会让召回率（recall：本该被检索出来的那些相关文档里，实际被检索出来的比例）悄悄变差 —— 这是 RAG 系统最隐蔽的一类事故。（Matryoshka 表示可以把 3072 维截到 256 维，通常只损 2–3% 精度、存储降 4×；但截断维度同样是 `index_key` 的一部分。）
 
 ### d) 血缘（data lineage）要能反查到人
 
@@ -444,6 +513,14 @@ index_key = (model_id, model_version, dim, chunk_strategy_version, normalize?, p
 > **① 从"源系统改了一列"到"下游 owner 收到告警"要多久**（好的答案：CI 阶段就挡住，根本进不了 prod）；
 > **② 一次"删除某用户全部数据"的请求，需要几个人手工介入**（好的答案：0）。
 > 这两个数字答不上来的平台，不管栈多现代，都还在"数据沼泽（data swamp）"阶段。
+
+---
+
+## 这一章的三句话
+
+1. **数据平台的瓶颈从来不是引擎选型，是"谁对这张表负责"这个问题没有名字写在上面。** 表格式三家在 2026 年已经同构，换掉任何一个都是几周的事；换掉"没有 owner、没有契约、没人知道谁在用"的一张 Gold 表，是几个季度的事。
+2. **契约的价值全部来自那个会挡住合并按钮的 CI 检查，而不是那份 YAML。** 没有门禁的契约在三个月内必然与实现脱节，然后它比没有契约更糟 —— 因为所有人都以为它还是对的。
+3. **`DELETE` 跑成功不等于删干净。** 湖仓的删除只是写了一个标记，历史快照仍能读到原值；只要快照保留期没有显著短于你的删除 SLA，你在数学上就不可能合规。
 
 ---
 

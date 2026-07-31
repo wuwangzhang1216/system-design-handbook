@@ -5,6 +5,38 @@
 
 ---
 
+## 读这道题之前
+
+🔶 **这道题属于 AI 岗方向**：通用 full-stack / 后端面试路径（[README 路径 A / B](../README.md#学习路径)）可以整题跳过 —— 判断依据和 [`04-ai-agent-systems/`](../04-ai-agent-systems/) 一致：JD 里出现「LLM / Agent / 推理 / RAG / GPU」中任意一个词，它才从"可跳过"变成"面试官的主场"（路径 C）。
+
+**如果你是直接翻到这道题的**：这题把 04 章的四节压在了一起 —— 推理成本、Agent 运行时、沙箱安全、计量。下面三个问题是地基，答不出，正文里每一句"前缀字节稳定"都会读成一句正确的废话，案例篇不再解释构件。
+
+**先确认你能回答这三个问题**
+
+1. Little's Law（并发 = 吞吐 × 延迟）怎么用？峰值 17 任务/秒、平均任务墙钟 8 分钟，此刻同时在跑多少个沙箱？
+   答不出 → 先读 [00-concepts §2 延迟/吞吐/并发](../00-foundations/00-concepts.md)、[02-capacity-estimation §5 AI Agent 平台估算示例](../00-foundations/02-capacity-estimation.md)
+2. 前缀缓存（prefix caching）命中的前提是"前缀逐字节相同"。把每轮都在变的检索结果拼在 system prompt 后面，账单会变成几倍？为什么全程不报错？
+   答不出 → 先读 [08-cost-and-latency §4 Prompt caching](../04-ai-agent-systems/08-cost-and-latency.md)、[01-llm-serving-infra §6 前缀缓存与缓存感知路由](../04-ai-agent-systems/01-llm-serving-infra.md)
+3. 一个已经跑了 25 分钟的任务，承载它的进程被驱逐（eviction）了，从哪里继续？"有状态 vs 无状态"和 checkpoint 各解决这里的哪一半？
+   答不出 → 先读 [00-concepts §9 有状态 vs 无状态](../00-foundations/00-concepts.md)、[03-agent-runtime §7 长任务与可恢复执行](../04-ai-agent-systems/03-agent-runtime.md)
+
+**这道题会用到的构件**
+
+| 构件 | 用在哪 | 详见 |
+|---|---|---|
+| Little's Law、单位经济（unit economics） | §2.2 推出 8,160 并发沙箱、§2.6 毛利结构 | [00-concepts §2](../00-foundations/00-concepts.md)、[`02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §5、§6 |
+| Agent 循环、终止条件、可恢复执行、沙箱 | §4.2 长任务 checkpoint 与重放、§4.5 microVM 边界 | [`03-agent-runtime.md`](../04-ai-agent-systems/03-agent-runtime.md) §2、§6、§7 |
+| 前缀缓存与上下文组装顺序 | §4.3 让前缀字节稳定 —— 本题最大的省钱旋钮 | [`08-cost-and-latency.md`](../04-ai-agent-systems/08-cost-and-latency.md) §4、[`02-context-engineering-and-rag.md`](../04-ai-agent-systems/02-context-engineering-and-rag.md) §9 |
+| 致命三要素（lethal trifecta）与出网管控 | §4.5 编码 Agent 天然把三条占满 | [`07-agent-security.md`](../04-ai-agent-systems/07-agent-security.md) §2、§5 |
+| 计量管道、配额与预算护栏 | §4.4 三层限额、§4.6 计量与成本护栏 | [`02-billing-and-metering.md`](../03-saas-platform/02-billing-and-metering.md) §7、§8 |
+
+**这道题的一句话本质**
+
+> **胜负手不在 Agent 循环，在两件基础设施上：仓库物化的冷启动决定用户第一眼看到什么，前缀缓存的字节稳定性决定你亏不亏钱。**
+> 沙箱、队列、计费都是为这两件事做的配套。带着这句话往下读 —— 每见到一个组件就问一次："它是在压缩受理延迟，还是在保住前缀？"两个都不是的，就该问它为什么在图上。
+
+---
+
 ## 1. 需求澄清：我会问的 12 个问题
 
 面试的前 5 分钟只做这一件事。下面每一条都写"我问什么 + 我假设的答案"，因为面试官通常会说"你自己定"。

@@ -5,6 +5,36 @@
 
 ---
 
+## 读这道题之前
+
+**如果你是直接翻到这道题的**：这题的地基不是 CRDT，是"单写者 + 租约 + fencing"。第 2 题答不出，§4.2 那句"影响行数 = 0 就自杀"会读成一句黑话 —— 案例篇不再解释构件。
+
+**先确认你能回答这三个问题**
+
+1. 有状态服务和无状态服务差在哪？"按 doc_id 路由到唯一一台机器"这句话，让扩容和故障转移分别多付出什么代价？
+   答不出 → 先读 [00-concepts §9 有状态 vs 无状态](../00-foundations/00-concepts.md)、[`04-networking-and-edge.md`](../01-building-blocks/04-networking-and-edge.md) §2、§4
+2. 租约（lease）和 fencing token 各解决什么？老 owner 因为 GC 停顿 15 s 被判死、新 owner 已接管，老 owner 醒来继续写 op log —— 没有 epoch 会发生什么？
+   答不出 → 先读 [`05-consensus-and-coordination.md`](../01-building-blocks/05-consensus-and-coordination.md) §3、§4
+3. "两个副本最终会长得一样"和"任何时刻读到的都一样"是两回事。收敛（convergence）属于哪一个？它保证过顺序吗？
+   答不出 → 先读 [00-concepts §6 一致性的两种含义](../00-foundations/00-concepts.md)、[01-fundamentals §4 一致性模型全谱](../00-foundations/01-fundamentals.md)
+
+**这道题会用到的构件**
+
+| 构件 | 用在哪 | 详见 |
+|---|---|---|
+| 有状态服务、长连接、WebSocket 与扇出 | §3 三条数据通路、§4.2 按 doc_id 路由的 single-writer | [00-concepts §9](../00-foundations/00-concepts.md)、[`04-networking-and-edge.md`](../01-building-blocks/04-networking-and-edge.md) §2、§4 |
+| 租约、fencing token、脑裂 | §4.2 lease + epoch，被 fence 立刻自杀不重试 | [`05-consensus-and-coordination.md`](../01-building-blocks/05-consensus-and-coordination.md) §3、§4、§8 |
+| Little's Law（并发 = 到达率 × 会话时长） | §2.1 从 DAU 推出 25 万峰值连接与 13.9 万活跃文档 | [00-concepts §2](../00-foundations/00-concepts.md)、[`02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §3 |
+| 出网流量与成本 | §2.4 光标降采样把带宽账单从 $109k 压到 $18k | [`04-networking-and-edge.md`](../01-building-blocks/04-networking-and-edge.md) §7 |
+| op log / 快照 / 对象存储的分工 | §4.3 热尾只为恢复服务、快照与版本历史是三件不同的事 | [`01-storage-engines.md`](../01-building-blocks/01-storage-engines.md) §7 |
+
+**这道题的一句话本质**
+
+> **服务端能不能读懂一条操作的语义，决定你的权限模型上限；光标数据有没有和文档数据分家，决定你的带宽账单。**
+> OT / CRDT 的选择只是这两件事的副产品。带着这句话往下读 —— 每见到一条数据通路就问一次："它丢了会怎样？它必须经过单写者吗？"这两个答案不同的东西，永远不该放进同一条通路。
+
+---
+
 ## 1. 需求澄清：我会问的 12 个问题
 
 | # | 问题 | 假设答案 | 为什么这个答案改变架构 |

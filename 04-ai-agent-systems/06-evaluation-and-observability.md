@@ -5,6 +5,54 @@
 
 ---
 
+## 读这一章之前
+
+**你在工作中遇到过这个**
+
+你改了一版 prompt，本地那套 150 条的 eval 集从 72% 涨到 76%，你合并上线了。
+三天后客服说某一类工单的处理质量掉了一截。你回去翻日志 —— 翻不到：那条轨迹按 1% 采样，没被留下来。
+你只好把 prompt 回滚，然后发现回滚后那 150 条又是 72%，和上线前一模一样。
+两件事你都没证据：**当初那 4 个百分点是不是真的**（150 条根本检不出 4 pp），
+**线上那次退化是不是这次改的**（你没有能对上号的轨迹）。
+
+**需要先懂的概念**
+
+| 概念 | 一句话 | 详见 |
+|---|---|---|
+| 分位数 p50/p99 | 排序后处在某个百分比位置的值；平均值会骗人，尾部才决定体验 | [00/00 §3](../00-foundations/00-concepts.md) |
+| Agent 循环与终止条件 | "输出 → 调工具 → 结果回填 → 再输出"的反复过程，以及它凭什么停 | [03 §1 §2](03-agent-runtime.md) |
+| 链路追踪 | 一次业务跨了好几个系统时，靠一个共同的 id 把散落的日志串成一条线 | [05/02 §4](../05-reliability/02-observability.md) |
+| 编排者 / 子 Agent / 轨迹 | 谁分发、谁执行；一次运行的每一步与每次工具调用组成的完整序列 | [05 §3 §4](05-multi-agent-orchestration.md) |
+| 前缀缓存 | 请求开头逐字节相同的那段复用上次的计算；缓存读和直读是分开计费的 | [01 §6](01-llm-serving-infra.md) |
+| 检索指标 | Recall / rerank / MRR 是检索这一层自己的质量指标 | [02 §12](02-context-engineering-and-rag.md) |
+
+**这一章要回答的问题**
+
+1. 温度设成 0 之后，同样的输入为什么还会得到不同输出？这让"跑一次比对结果"失效到什么程度？
+2. 150 条 eval、成功率从 72% 涨到 76%，这个提升是真的吗？要多少条才算得准，一次要花多少钱？
+3. 什么时候可以让模型给模型打分？它自己上线前要过哪些门槛，什么情况下坚决不用？
+4. 榜单第一的模型能直接选吗？公开 benchmark 的分数到底在测什么？
+5. Agent 的轨迹要不要全量存？传统的 1% 采样常识为什么在这里是错的？
+
+**本章新引入的术语**
+
+| 术语 | English | 一句话定义 |
+|---|---|---|
+| 至少一次成功率 / 全部成功率 | pass@k / pass^k | 同一道题跑 k 次，**至少一次**成功的比例 / **k 次全部**成功的比例；用户体验对应后者 |
+| 模型评审 | LLM-as-judge | 用另一个模型按一份写死的评分标准给被测输出打分，代替人工标注 |
+| 评分标准 | rubric | 一份逐条列出"什么算通过"的判分说明，模型评审和人工标注共用同一份 |
+| 校准 | calibration | 把模型评审的判分和人工判分放在同一批样本上比，量出两者一致到什么程度，达标才允许上线 |
+| kappa 系数 | Cohen's kappa | 把"两个判分者的一致率"扣掉"瞎猜也能碰上的那部分"之后的数；0 = 和瞎猜一样，1 = 完全一致 |
+| 错误分析 / 开放编码 | error analysis / open coding | 人工逐条读失败案例、用自由文本写下"这条哪里坏了"，再把这些文本归并成几类 |
+| 追踪 / 跨度 | trace / span | span = 一次调用的一段记录（起止时间 + 属性 + 父亲是谁）；按父子关系组成的那棵树叫一条 trace |
+| 硬门禁 / 软门禁 | hard gate / soft gate | 不达标直接阻断合并 / 不达标只告警并要求人工签字放行 |
+| 统计功效与样本量 | statistical power / sample size | "想要多大把握、检出多大的差异、需要多少条样本"这三个数互相锁死，定死两个就定死了第三个 |
+| 影子流量 | shadow traffic | 把线上真实请求复制一份喂给新版本，两边都打分，但新版本的输出**永不返回给用户** |
+| 金丝雀发布 | canary | 先把很小一部分真实流量切到新版本，指标不掉再逐档放大 |
+| 隐式信号 | implicit signal | 用户没有专门打分，但行为本身透露了满意度（改了你的输出、立刻重问、直接关掉） |
+
+---
+
 ## 1. 为什么传统测试不够
 
 下面四条任何一条都足以让单元测试失效，而它们同时成立。
@@ -12,11 +60,11 @@
 **(a) 非确定性（non-determinism）不是靠 `temperature=0` 能消掉的。** 即便温度为 0，同样的输入在生产里也会得到不同输出：
 
 - GPU 批处理内核的浮点非结合性（floating-point non-associativity） —— 你的请求和谁拼在同一个 batch 里，会改变 reduce 顺序
-- MoE 专家路由（expert routing）随 batch 组成漂移（drift）
-- prefix cache 命中/未命中会走不同的 kernel 路径
+- MoE（mixture of experts：模型内部分成很多组参数，每个 token 只激活其中几组，见 [01 §10](01-llm-serving-infra.md)）的专家路由（expert routing）随 batch 组成漂移（drift）
+- prefix cache（前缀缓存，见 [01 §6](01-llm-serving-infra.md)）命中/未命中会走不同的 kernel 路径
 - provider 悄悄换模型小版本（你的 `claude-sonnet-5` 不是上周那个）
 
-**结论**：任何"跑一次比对输出"的测试，在 Agent 系统上都是 flaky test 制造机。评测的最小单位是**分布**，不是单次结果。
+**结论**：任何"跑一次比对输出"的测试，在 Agent 系统上都是 flaky test（同样的代码、同样的输入，有时过有时不过的测试）制造机。评测的最小单位是**分布**，不是单次结果。
 
 **(b) 语义正确性（semantic correctness）没有唯一解。** 同一个 bug 有 5 种合理修法。`assertEqual` 无从下手。
 
@@ -28,7 +76,7 @@
 | 0.98 | 82% | 67% | 36% |
 | 0.95 | 60% | 36% | 8% |
 
-实测比这更糟：有研究观察到 orchestrator 的"认知视界"约在 **6 步**后熵饱和（entropy saturation），某开源模型从 Step1 的 92% 掉到 Step2 的 22%（2026-06，单一实验，当量级看）。这解释了为什么"再加一层 Agent"往往让准确率下降而不是上升 —— 详见 [05-multi-agent-orchestration.md](05-multi-agent-orchestration.md)。
+实测比这更糟：有研究观察到 orchestrator 的"认知视界"约在 **6 步**后熵饱和（entropy saturation：窗口里堆进太多中间结果后，新信息不再改变它的判断，见 [05 §6](05-multi-agent-orchestration.md)），某开源模型从 Step1 的 92% 掉到 Step2 的 22%（2026-06，单一实验，当量级看）。这解释了为什么"再加一层 Agent"往往让准确率下降而不是上升 —— 详见 [05-multi-agent-orchestration.md](05-multi-agent-orchestration.md)。
 
 **(d) `pass@k` 会系统性高估可靠性。** `pass@k` = k 次里**至少一次**成功；`pass^k` = k 次**全部**成功，用户体验对应后者。[τ-bench](https://arxiv.org/pdf/2406.12045) 给出的形状：GPT-4o 在 retail 域 `pass^1 < 50%`，`pass^8 < 25%`。
 
@@ -36,7 +84,7 @@
 
 | | 传统服务测试 | Agent 评测 |
 |---|---|---|
-| 判定 | 断言相等 | 分布比较 + 统计显著性（statistical significance） |
+| 判定 | 断言相等 | 分布比较 + 统计显著性（statistical significance：这个差异有多大概率只是随机波动碰出来的） |
 | 单次运行成本 | ~0 | $0.05–2.0（Agent token 量约为 chat 的 **4×**，多 Agent 约 **15×**） |
 | 失败定位 | 栈回溯 | 轨迹回放（trace replay）+ 错误分析（error analysis） |
 | 门禁 | 红/绿硬阻塞（hard gate） | 分层：低层硬阻塞，高层软门禁（soft gate）+ 在线自动回滚（auto-rollback） |
@@ -71,7 +119,8 @@
 | **L3 端到端** | 任务成功率 `pass^k`、答案质量 | 参考答案比对 + 校准（calibration）过的 judge，k=4–8 | 300–500 任务 × k | 每日 / 合并 main | **软门禁**：回归 > 3 pp 需人工放行 |
 | **L4 在线** | 接受率（acceptance rate）、纠正率、放弃率（abandonment rate）、$/成功任务 | 影子 + 金丝雀 + 隐式信号（implicit signal） | 生产流量 | 持续 | **自动回滚**：单 rubric 回归 2–3 pp 持续 15–60 min |
 
-L1 的目标线（2026 生产经验值）：Recall@10 **85–91%**、MRR **> 0.80**、Hit Rate@10 **> 90%**。检索侧的细节在 [02-context-engineering-and-rag.md](02-context-engineering-and-rag.md)。
+L1 的目标线（2026 生产经验值）：Recall@10 **85–91%**、MRR **> 0.80**、Hit Rate@10 **> 90%**。
+（Recall@10 = 应该被检出的文档里，有多少落进了返回的前 10 条；MRR = mean reciprocal rank，每道题取"第一条正确结果的名次的倒数"再平均，排第 1 得 1、排第 4 得 0.25，越接近 1 越好；Hit Rate@10 = 前 10 条里**至少有一条**正确的题目比例。）检索侧的细节在 [02-context-engineering-and-rag.md](02-context-engineering-and-rag.md)。
 
 ### L2：轨迹匹配的四种模式
 
@@ -131,11 +180,11 @@ n_per_arm = (z_α/2 + z_β)² · [p₁(1−p₁) + p₂(1−p₂)] / (p₁−p�
 
 **这就是为什么"CI 里 150 条 eval 集，成功率从 72% 涨到 76%，合并！"是自欺欺人** —— 150 条只够检出 10–15 pp 级别的粗差，4 pp 完全在噪声里。
 
-**降样本量的唯一正经手段是配对设计（paired design）**：同一批任务两个版本都跑，用 McNemar 检验，方差只来自"两版本结论不一致"的那部分。同样检出 5 pp、不一致率 15% 时所需**总任务数约 470**，比独立两样本的 2,500 少 **5×**。再乘上 `pass^k` 的 k：470 × 4 = 1,880 rollout，按每 rollout $0.15–0.60 算，**一次完整 L3 回归 $280–1,130**。这个数字直接决定门禁分层 —— 每个 PR 跑不起，所以 L3 只能放在"每日 + 合并 main"。
+**降样本量的唯一正经手段是配对设计（paired design）**：同一批任务两个版本都跑，用 McNemar 检验，方差只来自"两版本结论不一致"的那部分。同样检出 5 pp、不一致率 15% 时所需**总任务数约 470**，比独立两样本的 2,500 少 **5×**。再乘上 `pass^k` 的 k：470 × 4 = 1,880 rollout（rollout：把一道题从头到尾完整跑一遍的一次运行），按每 rollout $0.15–0.60 算，**一次完整 L3 回归 $280–1,130**。这个数字直接决定门禁分层 —— 每个 PR 跑不起，所以 L3 只能放在"每日 + 合并 main"。
 
 ### 其他纪律
 
-- **二元 pass/fail 优于 1–5 Likert**：标准更清晰、漂移更少，且同样功效所需样本更小。Likert 的中间档是团队分歧的藏身处。
+- **二元 pass/fail 优于 1–5 Likert**（Likert：李克特量表，让评分者在"1 很差 … 5 很好"这类固定档位里选一档）：标准更清晰、漂移更少，且同样功效所需样本更小。Likert 的中间档是团队分歧的藏身处。
 - **合成数据（synthetic data）只能补边角**：先手写 20 个维度元组再组合扩展，抽 100 条合成 trace 人工验证。对**复杂领域内容、低资源语言、高风险领域、少数用户群**明确不可靠。
 - **回归集（regression set）会腐坏**：给每个 dataset 打 `last_verified_at`，超过 90 天未重跑的条目在报告里单独标出。
 - **标注一致性（annotator agreement）**：中小团队指定单个领域专家做 "benevolent dictator"；多人标注时用 Cohen's kappa 量化，人-人基线通常落在 **0.5–0.8**。
@@ -171,7 +220,7 @@ def score(trace, task) -> Verdict:
 ```
 
 **面试金句**：
-> "我不会让 LLM judge 去判断能用断言判断的东西。一条 judge 规则的起步成本是 **100+ 条人工标注 + 每周维护**，而且它自己会随模型版本和数据分布漂移。我的顺序是：能 assert 的 assert，能比参考答案的比参考答案，剩下真正语义的部分才给 judge —— 而且 judge 上线前必须在留出集（holdout set）上跑到 Cohen's kappa ≥ 0.6。**换 judge 模型等同于换评测标准，必须重跑校准并记录版本。**"
+> "我不会让 LLM judge 去判断能用断言判断的东西。一条 judge 规则的起步成本是 **100+ 条人工标注 + 每周维护**，而且它自己会随模型版本和数据分布漂移。我的顺序是：能 assert 的 assert，能比参考答案的比参考答案，剩下真正语义的部分才给 judge —— 而且 judge 上线前必须在留出集（holdout set：专门留着不参与任何调优、只用于最终验收的那批人工标注样本）上跑到 Cohen's kappa ≥ 0.6。**换 judge 模型等同于换评测标准，必须重跑校准并记录版本。**"
 
 ### 校准是上线门禁，不是可选项
 
@@ -222,6 +271,8 @@ judge:
 
 ## 5. 公开 benchmark：现状、局限，和为什么它不是你的验收标准
 
+**两个词先定义清楚，这一整节都在用它们。** **scaffold（脚手架）** = 包在模型外面、负责组织提示 / 调工具 / 判断何时停止的那层代码；同一个模型换个 scaffold，分数会明显变。**harness（评测框架）** = 真正把这套题跑起来的那套程序，它决定 Agent 能读哪些文件、能不能上网、允许试几次、测试在哪个进程里跑。**一个分数是"模型 × scaffold × harness"三者的联合结果，只报模型名的分数不可比。**
+
 | Benchmark | 规模 / 形态 | 2026 现状与坑 |
 |---|---|---|
 | [**SWE-bench Verified**](https://epoch.ai/benchmarks/swe-bench-verified) | 500 题真实 GitHub issue | Epoch 实际只能可靠复现 **484** 题；估计任务错误率 **5–10%**；scaffold v2.0.0（2026-02）前后**不可比**；OpenAI 于 2026-02 公开宣布不再用它评测 |
@@ -241,9 +292,9 @@ judge:
 - `file://` URL 直接读答案文件 → WebArena **812** 个任务约 100%
 - 只有 OSWorld 停在 73%
 
-> **面试金句**："benchmark 分数首先反映的是 harness 的隔离质量，其次才是模型能力。我看到一个榜单第一，第一反应是去看它的沙箱（sandbox）怎么写的 —— 有没有断网、有没有剥掉 `.git`、答案文件在不在 Agent 可读路径上。"
+> **面试金句**："benchmark 分数首先反映的是 harness 的隔离质量，其次才是模型能力。我看到一个榜单第一，第一反应是去看它的沙箱（sandbox：把 Agent 关进一个受限环境执行，限制它能碰的文件、进程和网络，见 [03 §6](03-agent-runtime.md)）怎么写的 —— 有没有断网、有没有剥掉 `.git`、答案文件在不在 Agent 可读路径上。"
 
-另一条独立证据：[HAL](https://arxiv.org/abs/2510.11977)（21,730 rollout × 9 模型 × 9 基准，约 $40,000，2.5B token 日志）发现**多数运行中提高 reasoning effort 反而降低准确率**。把 reasoning effort 当成需要按任务类型 A/B 的旋钮，不要全局拉满。
+另一条独立证据：[HAL](https://arxiv.org/abs/2510.11977)（21,730 rollout × 9 模型 × 9 基准，约 $40,000，2.5B token 日志）发现**多数运行中提高 reasoning effort 反而降低准确率**（reasoning effort：让模型在给出答案前多想几步还是少想几步的档位旋钮，想得越多思考 token 越多、越慢也越贵）。把它当成需要按任务类型 A/B 的旋钮，不要全局拉满。
 
 ### 自建 benchmark 的卫生清单
 
@@ -315,11 +366,11 @@ trace_id=9f2c…   一次 Agent run（用户点一次"开始"）
 |---|---|---|
 | 基本 | `gen_ai.operation.name`、`gen_ai.provider.name` | 全 span 必填；枚举含 `chat`/`embeddings`/`retrieval`/`execute_tool`/`invoke_agent`/`invoke_workflow`/`plan`/`*_memory` |
 | Token | `gen_ai.usage.input_tokens`、`output_tokens`、`cache_creation.input_tokens`、`cache_read.input_tokens`、`reasoning.output_tokens` | 规范明确：provider 同时报 used 与 **billable** 时，**MUST 上报 billable** |
-| 延迟 | `gen_ai.client.operation.duration`、`time_to_first_chunk`、`time_per_output_chunk` | TTFT 与 TPOT 要分开，单看 TTFT 会漏掉 10× 的 TPOT 漂移 |
-| 工具 | `gen_ai.tool.name`、`args_hash`、`result_bytes`、`truncated`、`exit_code` | `result_bytes` 是上下文污染（context pollution）的头号预警指标 |
+| 延迟 | `gen_ai.client.operation.duration`、`time_to_first_chunk`、`time_per_output_chunk` | TTFT（time to first token，从发出请求到吐出第一个 token）与 TPOT（time per output token，之后每多吐一个 token 的间隔）要分开，单看 TTFT 会漏掉 10× 的 TPOT 漂移；见 [01 §1](01-llm-serving-infra.md) |
+| 工具 | `gen_ai.tool.name`、`args_hash`、`result_bytes`、`truncated`、`exit_code` | `result_bytes` 是上下文污染（context pollution：不该进的内容进了模型窗口，挤掉有用部分并带偏判断，见 [05 §4](05-multi-agent-orchestration.md)）的头号预警指标 |
 | **成本** | `app.cost_usd`（**自定义**） | ⚠ 官方 `gen_ai.*` 命名空间**没有任何 cost 属性**。有文章用 `gen_ai.usage.cost_usd`，那是厂商扩展，跨平台不保证被识别 |
 | **租户（tenant）** | `app.tenant.id`、`app.user.id`、`app.feature`（**全部自定义**） | ⚠ 官方明确"User/Tenant Attributes — Notably absent"。**必须一开始就打全，事后不可回溯** |
-| 内容 | `gen_ai.input.messages`、`gen_ai.output.messages`、`gen_ai.system_instructions`、`gen_ai.tool.definitions` | **Opt-In，默认不采**；也是最大的 PII 面 |
+| 内容 | `gen_ai.input.messages`、`gen_ai.output.messages`、`gen_ai.system_instructions`、`gen_ai.tool.definitions` | **Opt-In，默认不采**；也是最大的 PII 面（PII = personally identifiable information，能定位到具体某个人的信息：姓名、手机号、证件号、邮箱、地址） |
 
 **计价（metering）放在后端**（token × 单价表），不要把价格烧进 SDK —— 促销价会变（例如 Claude Sonnet 5 的 $2 促销价有明确切换日 2026-09-01），缓存读与 reasoning token 要单独归因。
 
@@ -364,7 +415,7 @@ eval 层（永久，版本化）        被标注进 dataset 的 trace       单
 
 1. **脱敏在 SDK 的 span processor 里做，不能在后端做** —— 数据一旦离开进程就已经泄露了。正则（邮箱/卡号/手机/证件号）+ 轻量 NER，替换为**稳定 token** `<EMAIL_7f3a>`，保留跨 span 可关联性但不保留原值。
 2. 开关粒度到 **环境 × 租户 × 采样率**，默认关。企业客户合同里通常明确禁止内容采集。
-3. ⚠ 合规坑：即便在 OpenAI 的 ZDR 模式下，**加密的 prompt cache tensors 仍会保留最长 24 小时**。"我们零留存"这句话在架构评审里要问清是哪一层的零留存。
+3. ⚠ 合规坑：即便在 OpenAI 的 ZDR 模式（zero data retention，零数据保留：厂商承诺不留存你的请求与响应内容）下，**加密的 prompt cache tensors 仍会保留最长 24 小时**。"我们零留存"这句话在架构评审里要问清是哪一层的零留存。
 
 ---
 
@@ -410,7 +461,7 @@ eval 层（永久，版本化）        被标注进 dataset 的 trace       单
      └──── 新失败模式回灌 ◀── CI 门禁 ◀── 版本化 dataset ◀──────┘
 ```
 
-⚠ 别把隐式信号当无偏标签直接拿去调 prompt。接受率会被 UI 位置、默认选中、按钮大小主导，这些混淆因子（confounder）的效应量（effect size）常常大于模型质量差异。**隐式信号用来做优先级排序，不用来做最终判定。**
+⚠ 别把隐式信号当无偏标签直接拿去调 prompt。接受率会被 UI 位置、默认选中、按钮大小主导，这些混淆因子（confounder：同时影响"原因"和"结果"的第三个变量，让你把它的效应误算成你想测的那个效应）的效应量（effect size，差异的绝对大小）常常大于模型质量差异。**隐式信号用来做优先级排序，不用来做最终判定。**
 
 ---
 
@@ -431,6 +482,14 @@ eval 层（永久，版本化）        被标注进 dataset 的 trace       单
 | **在 1–5 Likert 上做 judge** | 中间档是团队分歧的藏身处，功效更低、漂移更大。用二元 |
 
 **什么时候可以不建这套**：**单轮、无工具、有确定答案**的任务（分类、抽取、翻译到固定格式）用传统标注集 + 准确率就够，别上 judge；**日请求量 < 1,000 且失败可人工兜底**的内部工具，每周人工看 20 条 trace 的性价比高于任何自动化 eval；**原型期（< 6 周）**先只把错误分析流程跑起来，dataset 和 CI 门禁等失败模式稳定后再建 —— 过早冻结 dataset 会把你锁死在早期的错误假设上。
+
+---
+
+## 这一章的三句话
+
+1. **Agent 评测的最小单位是分布，不是单次结果** —— 所以"跑一次比对输出"只会生产 flaky test，而汇报可靠性必须用 `pass^k` 而不是 `pass@k`：用户体验的是"每次都对"，不是"八次里对过一次"。
+2. **模型评审是最后手段，不是默认手段。** 能 assert 的 assert，能比参考答案的比参考答案，剩下真正语义的那一小块才给 judge —— 而且它上线前必须在人工标注留出集上过 kappa 门槛，**换 judge 模型等同于换评测标准，必须重新校准**。
+3. **能当发布门禁的只有你自己的生产轨迹回归集，公开 benchmark 只配做选型粗筛** —— 因为榜单分数首先反映的是 harness 的隔离质量。而这条要成立的前提是轨迹全量留下来：它的存储成本相对推理账单不到 1%，而你丢掉的那条 trace 恰好就是复现不了的那次失败。
 
 ---
 

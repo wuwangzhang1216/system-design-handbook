@@ -8,6 +8,36 @@
 
 ---
 
+## 读这道题之前
+
+**如果你是直接翻到这道题的**：这题考的是分布式计数，不是算法。第 1 题答不出，你会把它读成一道单机题，正文里 `q = limit × T / N` 的整套推导就只剩公式表演。
+
+**先确认你能回答这三个问题**
+
+1. "先 `GET` 判断有没有超，再 `INCR` 扣减"，两个网关同时执行会发生什么？"原子"具体指哪一步不可分割？
+   答不出 → 先读 [`00-foundations/00-concepts.md` §7](../00-foundations/00-concepts.md)
+2. 下游从 0.8 ms 变慢到 80 ms（注意：没有挂），为什么比它直接挂掉更危险？用 Little's Law 把这条链说一遍。
+   答不出 → 先读 [`00-foundations/00-concepts.md` §2](../00-foundations/00-concepts.md)
+3. `429` 和 `503` 在客户端 SDK、CDN 眼里有什么不同？`Retry-After` 是谁在告诉谁什么？
+   答不出 → 先读 [`02-architecture-patterns/04-api-design-and-versioning.md` §6](../02-architecture-patterns/04-api-design-and-versioning.md)
+
+**这道题会用到的构件**
+
+| 构件 | 用在哪 | 详见 |
+|---|---|---|
+| Little's Law、峰谷比、排队论、成本建模 | §2 全部：内存装得下、ops/s 装不下、跨 AZ 账单 | [`00-foundations/02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §2 §3 §6 |
+| 限流的 HTTP 契约（429 / `Retry-After` / `RateLimit`） | §4.6 响应契约，本题唯一的单向门 | [`02-architecture-patterns/04-api-design-and-versioning.md`](../02-architecture-patterns/04-api-design-and-versioning.md) §6 |
+| 租约（lease）、单调时钟、为什么不用分布式锁 | §4.2 本地租约 + 周期同步；§3 惰性补充为什么用单调时钟 | [`01-building-blocks/05-consensus-and-coordination.md`](../01-building-blocks/05-consensus-and-coordination.md) §4 §5 |
+| 超时预算、熔断半开、信号量隔板、负载卸载、优雅降级 | §4.4 Redis 挂了 / 变慢了的分档降级状态机 | [`05-reliability/03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) §2 §4 §5 §6 §7 |
+| 噪音邻居、巨型租户的逃生舱 | §4.3 热点租户打爆单分片，邻居陪葬 | [`02-architecture-patterns/03-multi-tenancy.md`](../02-architecture-patterns/03-multi-tenancy.md) §5 §8 |
+
+**这道题的一句话本质**
+
+> **限流器的难点从来不是选算法，而是在 200 个进程上维护同一个计数。**
+> 那张算法对比表最多值 20% 的分；精确性只能用延迟买，买不买得起由 `q = limit × T / N` 决定。而当这个计数器自己变慢或挂掉时，被打分的是"**降级之后的上界是多少**" —— `fail-open` 的上界是 ∞，所以它从来不是一个答案。
+
+---
+
 ## 0. 45 分钟怎么分配这道题
 
 | 时间 | 做什么 | 这一段的得分点 |
@@ -18,7 +48,7 @@
 | `13:00–19:00` **分布式版** | 集中式 Redis + Lua 原子判定 + hash tag；**主动说出 hash tag 的代价**并预告会回来讲 | 画完立刻提名 3 个深挖点让面试官选 —— 交出选择权，同时展示你知道哪个最难 |
 | `19:00–27:00` **深挖 A** | 五种算法（用你自己算的 ops/s 否决滑动窗口日志）+ 集中式 vs 本地租约的判据公式 | `q = limit × T / N`。**给公式，不给"看情况"** |
 | `27:00–33:00` **深挖 B** | 热点租户（含 key splitting 的碎片化损失公式）+ Redis 故障的分档降级 | 区分"挂了"和"变慢了"；拒绝 `fail-open` 这个标准答案，给**有界**降级 |
-| `33:00–37:00` **深挖 C** | 多维度组合与优先级 + 响应契约（429 / `Retry-After` / `RateLimit`） | "响应头是这个系统唯一真正的单向门（one-way door）" —— 面试官很少听到这句 |
+| `33:00–37:00` **深挖 C** | 多维度组合与优先级 + 响应契约（429 / `Retry-After` / `RateLimit`） | "响应头是这个系统唯一真正的单向门（one-way door：一旦发出去被客户端解析，就再也改不回来的决定；见 [`03-tradeoff-framework` §3](../00-foundations/03-tradeoff-framework.md)）" —— 面试官很少听到这句 |
 | `37:00–43:00` **收敛** | 30 秒回顾 + v0/v1/v2 + 撞墙表 + 单向门 | **自己启动收敛**。没有收敛的设计题，评分上等同于没做完 |
 | `43:00–45:00` **反问** | 见文末 | 问可运维性与组织边界，不问 WLB —— 这 2 分钟仍在被评分 |
 
@@ -164,10 +194,12 @@ if b.tokens >= cost { b.tokens -= cost; ALLOW } else { DENY }
 第一段：进程内，零 IO，任一拒即短路（不产生任何 Redis ops）
   ① block 标志（本地缓存 TTL 30 s）………………………… 拒 → 403
   ② 每节点静态上限（与租户无关，如 2,000 rps/节点）…… 拒 → 429   ← 零依赖的最后防线
-  ③ per-IP 桶（GCRA，进程内，认证之前就能判）………… 拒 → 429
+  ③ per-IP 桶（GCRA：令牌桶的等价形式，只存一个"下一次允许通过的
+     理论时刻"，进程内，认证之前就能判）…………………… 拒 → 429
         │ 通过
         ▼
-第二段：一次 EVALSHA，三层原子 try-then-commit
+第二段：一次 EVALSHA（按脚本哈希调用已缓存在 Redis 上的 Lua 脚本；Redis 单线程执行
+        脚本，所以"读—判断—扣减"在脚本内部天然是原子的），三层原子 try-then-commit
   ④ rl:{grp:317}:t:acme        租户全局
   ⑤ rl:{grp:317}:k:ak_9f2c     单个 API key          三个都过才扣；
   ⑥ rl:{grp:317}:e:search      (租户 × 端点类)        任一不过，一个都不扣
@@ -176,7 +208,7 @@ if b.tokens >= cost { b.tokens -= cost; ALLOW } else { DENY }
 
 **顺序原则：便宜的、拒绝概率高的、不需要网络的放前面。** 被攻击时，第一段短路掉的流量不产生任何 Redis 调用 —— 这就是限流器自己能活下来的原因。第二段必须是**一次** Lua 调用而不是三次 pipeline：pipeline 给不了"三层 dry-run 后统一提交"的原子性，两个网关会同时看到"三层都还有余量"然后都提交。
 
-> **`{grp:317}` 而不是 `{acme}`**：hash tag 里放一层间接（`grp = hash(tenant_id) % 4096`）。它保留了"同租户三个 key 落同一 slot"的原子性，同时让你可以**把单个热租户重映射到另一个 group 而不改 key 格式**。直接用 `{tenant_id}` 做 hash tag 的设计，在热点出现时唯一的出路是改 key 格式 —— 那是一次全量迁移。
+> **`{grp:317}` 而不是 `{acme}`**：hash tag（Redis Cluster 里被 `{}` 包住的那段子串单独决定 key 落在哪个 slot —— 同 tag 的多个 key 保证同槽，才可能被一个 Lua 脚本原子地一起改）里放一层间接（`grp = hash(tenant_id) % 4096`）。它保留了"同租户三个 key 落同一 slot"的原子性，同时让你可以**把单个热租户重映射到另一个 group 而不改 key 格式**。直接用 `{tenant_id}` 做 hash tag 的设计，在热点出现时唯一的出路是改 key 格式 —— 那是一次全量迁移。
 
 ---
 
@@ -234,7 +266,7 @@ if b.tokens >= cost { b.tokens -= cost; ALLOW } else { DENY }
 **超发上界（可推导，不是拍的）**：分配器每周期只发 `L·T` 个令牌 ⇒ 长期速率 = L，由构造保证。误差来自时序：节点可以把第 k 周期没花完的租约和第 k+1 周期的一起花。
 ⇒ **瞬时最坏 2L，持续时间 ≤ T = 200 ms。** 这个数字写进设计文档，让业务方决定它可不可接受。
 
-**误拒来自量化误差**。令 `q = L·T / N`（每节点每周期分到的令牌数），到达近似泊松，则相对抖动 `≈ 1/√q`：
+**误拒来自量化误差**。令 `q = L·T / N`（每节点每周期分到的令牌数），到达近似泊松（Poisson：随机独立到达时，每个窗口内的计数会围绕均值波动，标准差 = √均值），则相对抖动 `≈ 1/√q`：
 
 ```
 q < 1       多数节点连一个整令牌都拿不到      → 必然误拒，禁止本地
@@ -265,7 +297,7 @@ q ≥ 100     抖动 ≤ 10%，与集中式几乎无差别    → 本地明显�
 
 **分片丢失**：`cluster-require-full-coverage no` —— 一行配置，把爆炸半径（blast radius）从"整个 keyspace 下线"变成"1/20 的租户降级"。
 
-**故障转移期**：Redis Cluster 的自动故障转移需要 `cluster-node-timeout`（默认 15 s）加选举，实际 15–30 s。**限流器等不了 15 秒** ⇒ 熔断器必须在 1 s 内打开并进降级路径，而不是等集群自愈。这两个时间尺度差一个数量级，是很多人第一次踩到才发现的。
+**故障转移期**：Redis Cluster 的自动故障转移需要 `cluster-node-timeout`（默认 15 s）加选举，实际 15–30 s。**限流器等不了 15 秒** ⇒ 熔断器（circuit breaker：错误率超阈值就直接短路、不再发请求，每隔一段时间放一个探针试探恢复；见 [`03-resilience-patterns` §4](../05-reliability/03-resilience-patterns.md)）必须在 1 s 内打开并进降级路径，而不是等集群自愈。这两个时间尺度差一个数量级，是很多人第一次踩到才发现的。
 
 **持久化**：AOF `everysec`，让重启的节点不是空的；**绝不用 `appendfsync always`** —— 给半衰期 60 s 的数据付每请求的耐久成本是净亏。
 
@@ -295,7 +327,7 @@ q ≥ 100     抖动 ≤ 10%，与集中式几乎无差别    → 本地明显�
 - **干净故障**（connection refused、节点消失）：熔断器 1 秒内打开，简单。
 - **延迟故障**（Redis 活着但 p99 从 0.8 ms 涨到 80 ms）：**这个才是杀手**。天真的客户端就是等，网关工作线程堆在限流调用上，**唯一职责是保护平台的东西变成了平台挂掉的原因**。
 
-客户端配置不可协商：`5 ms 硬超时` / `每网关 200 个在飞请求的信号量（semaphore），满了直接走降级，不排队` / `10 s 窗口内错误率 > 20% 或超时率 > 5% 即熔断` / `半开每 2 s 放 1 个探针`。
+客户端配置不可协商：`5 ms 硬超时` / `每网关 200 个在飞请求的信号量（semaphore：一个有上限的并发许可计数），满了直接走降级，不排队` / `10 s 窗口内错误率 > 20% 或超时率 > 5% 即熔断` / `半开每 2 s 放 1 个探针`。
 
 **fail-open vs fail-closed 按维度决定，一刀切必错**：
 

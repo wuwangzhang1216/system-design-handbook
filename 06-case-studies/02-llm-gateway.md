@@ -7,6 +7,38 @@
 
 ---
 
+## 读这道题之前
+
+🔶 **这道题属于 AI 岗方向**：通用 full-stack / 后端面试路径（[README 路径 A / B](../README.md#学习路径)）可以整题跳过 —— 判断依据和 [`04-ai-agent-systems/`](../04-ai-agent-systems/) 一致：JD 里出现「LLM / Agent / 推理 / RAG / GPU」中任意一个词，它才从"可跳过"变成"面试官的主场"（路径 C）。
+
+**如果你是直接翻到这道题的**：这题的每一个难点都是"API 网关的某条基本假设在 LLM 上反掉了"。第 3 题答不出，你会把限流设计成按请求数计数 —— 而正文从头到尾在论证那条路为什么必然超配额。
+
+**先确认你能回答这三个问题**
+
+1. 有状态（stateful）和无状态（stateless）的判据是什么？一个"只做转发"的网关，为什么一旦要吃到 provider 的前缀缓存，就不能再随便挑一个后端了？
+   答不出 → 先读 [00-concepts §9 有状态 vs 无状态](../00-foundations/00-concepts.md)、[04-networking-and-edge §2 连接管理](../01-building-blocks/04-networking-and-edge.md)
+2. 前缀缓存命中的前提是"前缀逐字节相同"。在 system prompt 里放一个 `now()`、或一段未排序的 `json.dumps`，命中率和账单会怎么变？
+   答不出 → 先读 [02-caching §7 LLM 时代的新缓存层](../01-building-blocks/02-caching.md)、[08-cost-and-latency §4 Prompt caching](../04-ai-agent-systems/08-cost-and-latency.md)
+3. 一次调用要用掉多少 token，请求发出前你知道吗？不知道的话令牌桶怎么扣？20 个 pod 各扣各的本地桶，全局配额会错成什么样？
+   答不出 → 先读 [02-billing-and-metering §7 配额与限额](../03-saas-platform/02-billing-and-metering.md)、[03-resilience-patterns §6 负载卸载与准入控制](../05-reliability/03-resilience-patterns.md)
+
+**这道题会用到的构件**
+
+| 构件 | 用在哪 | 详见 |
+|---|---|---|
+| 有状态 vs 无状态、长连接、SSE vs WebSocket | §7 缓存亲和路由把网关变成有状态的、§8 流式代理 | [00-concepts §9](../00-foundations/00-concepts.md)、[`04-networking-and-edge.md`](../01-building-blocks/04-networking-and-edge.md) §2、§4 |
+| 超时预算、重试放大、熔断、负载卸载 | §5 路由与故障转移、§12 失败模式清单 | [`03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) §2、§3、§4、§6 |
+| 前缀缓存 / 精确缓存 / 语义缓存 | §7 三种缓存各自的命中前提与泄露面 | [`02-caching.md`](../01-building-blocks/02-caching.md) §7、[`08-cost-and-latency.md`](../04-ai-agent-systems/08-cost-and-latency.md) §4 |
+| 计量管道：事件 schema、去重幂等、对账 | §9 四类 token 必须分开计、三方对账 | [`02-billing-and-metering.md`](../03-saas-platform/02-billing-and-metering.md) §3、§4、§9 |
+| 数据驻留、审计留痕、PII 边界 | §9 PII 与留痕、§10 安全 | [`04-isolation-and-compliance.md`](../03-saas-platform/04-isolation-and-compliance.md) §2、§6 |
+
+**这道题的一句话本质**
+
+> **LLM 网关看起来像 API 网关，其实四条基本假设全反了：后端不是同构副本、缓存不在你手里、计费单位是 token 不是请求、响应是一条可能十分钟后才失败的流。**
+> 整篇正文都可以读成对这四条的逐个补救。每读到一个组件就问一次："它在补哪一条反掉的假设？"补不上的那一条，就是面试官会追问你的地方。
+
+---
+
 ## 1. 需求澄清（前 8 分钟，不要动笔画图）
 
 面试官说"设计一个 LLM 网关"时，至少有五种完全不同的东西叫这个名字。先把它钉死。

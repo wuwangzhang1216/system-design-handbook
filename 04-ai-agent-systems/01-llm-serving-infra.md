@@ -5,6 +5,52 @@
 
 ---
 
+## 读这一章之前
+
+**你在工作中遇到过这个**
+
+你把一个 70B 模型用 vLLM 起在两张 H100 上，压测报告写着"聚合吞吐 3,100 tok/s"，很漂亮，你按这个数报了容量。
+上线后客服转来的用户原话是"字是一个一个蹦出来的"。你翻监控：TTFT p95 是 1.4 秒，达标 ——
+但你的 SLO 里压根没有第二个指标，而首 token 之后每个字要等 400 ms，这件事被"聚合吞吐"那一个数字完整地盖住了。
+你加了两张卡想救一下，加完发现一点没变。
+
+**需要先懂的概念**
+
+| 概念 | 一句话 | 详见 |
+|---|---|---|
+| 延迟 / 吞吐 / 并发 | 延迟是单次耗时，吞吐是单位时间处理量，并发是此刻在途的请求数 | [00-concepts §2](../00-foundations/00-concepts.md) |
+| Little's Law | 并发 = 吞吐 × 延迟；本章 §12 用它从 QPS 反推要几张卡 | [00-concepts §2](../00-foundations/00-concepts.md) |
+| p50 / p99 分位数 | 排序后处在某个百分比位置的耗时，平均值会骗人 | [00-concepts §3](../00-foundations/00-concepts.md) |
+| 缓存命中率的代价 | 命中率 90% 的缓存一挂，后端瞬间承受 10 倍流量 | [00-concepts §11](../00-foundations/00-concepts.md) |
+| 垂直 vs 水平扩展 | 换更强的单机 vs 加更多台机器，两条完全不同的路 | [00-concepts §4](../00-foundations/00-concepts.md) |
+| 三个延迟量级 | 内存 ~100 ns、SSD ~100 µs、跨洲往返 ~100 ms，每级差 1000× | [00/01 §1](../00-foundations/01-fundamentals.md) |
+
+**这一章要回答的问题**
+
+1. 同一张 GPU，为什么读你的输入时能跑到 50% 的算力，生成回答时只剩 5%？这个落差会逼出什么架构？
+2. 给我 2 张 H100 和一个 70B 模型，能同时服务多少个用户、上下文能开多长？公式怎么列？
+3. 为什么"吞吐涨了"和"用户体验变好了"经常是相反的两件事？容量规划该盯哪个指标？
+4. 什么时候自建推理集群比直接调 API 划算？盈亏平衡点怎么算，最常被漏掉的成本是哪一项？
+
+**本章新引入的术语**
+
+| 术语 | English | 一句话定义 |
+|---|---|---|
+| Prefill（预填充） | prefill | 模型把你输入的整段文字一次读完、算出内部中间结果的那个阶段 |
+| Decode（解码） | decode | 模型一个词一个词往外生成的阶段；每生成一个词，都要把全部模型权重从显存里读一遍 |
+| KV cache | KV cache | 上面那份中间结果，缓在显存里，让后面每生成一个词都不必把前面所有词重算一次 |
+| TTFT | time to first token | 从请求发出到用户看见第一个字之间的时间 |
+| TPOT / ITL | time per output token / inter-token latency | 第一个字之后，平均每多吐一个字要等多久 |
+| ISL / OSL | input / output sequence length | 一次请求的输入长度 / 输出长度，单位都是 token（模型眼里的最小文字单位） |
+| 算术强度 | arithmetic intensity | 每从显存搬 1 字节数据，能顺带做多少次浮点运算；这个数低就说明卡在搬数据而不是算数据 |
+| MFU | model FLOPs utilization | 实际用掉的算力，占这块芯片理论峰值算力的百分比 |
+| goodput | goodput | 每秒完成、**且同时满足全部延迟承诺**的请求数；超时才完成的不算 |
+| PD 分离 | prefill / decode disaggregation | 把 prefill 和 decode 放到两组不同的 GPU 上分开跑，中间把中间结果传过去 |
+| 前缀缓存 | prefix caching | 多个请求开头那段完全相同的文字只算一次，后来的请求直接复用这份结果 |
+| 投机解码 | speculative decoding | 先用一个小模型连猜几个词，再让大模型一次性验证，猜中的部分等于白赚 |
+
+---
+
 ## 1. 两个阶段，本质上是两台不同的机器
 
 Transformer 自回归推理（autoregressive inference）分成两段，它们的硬件特征相反：
@@ -18,7 +64,7 @@ Transformer 自回归推理（autoregressive inference）分成两段，它们�
 | 延迟指标 | TTFT | TPOT / ITL |
 | 加卡的收益 | 近线性 | 需要**加批**才有收益 |
 
-**为什么 decode 这么惨。** 每生成一个 token，都要把**整个模型权重**从 HBM 读一遍。H100 SXM 的算力/带宽比（ridge point）约 **300 FLOP/byte**（BF16 口径，990 TFLOPS ÷ 3.35 TB/s，量级）。decode 的算术强度 ≈ 2×batch，所以：
+**为什么 decode 这么惨。** 每生成一个 token，都要把**整个模型权重**从 HBM（high bandwidth memory：焊在 GPU 封装上的高带宽显存，模型权重就住在这里）读一遍。H100 SXM 的算力/带宽比（ridge point，拐点：算力÷带宽，代表"每搬 1 字节至少要做多少次运算才不浪费算力"）约 **300 FLOP/byte**（BF16 口径，990 TFLOPS ÷ 3.35 TB/s，量级）。decode 的算术强度 ≈ 2×batch，所以：
 
 ```
 batch = 1    → 强度 2      → 用掉不到 1% 的算力，GPU 在等内存
@@ -31,7 +77,7 @@ batch ≈ 150  → 强度 300    → 才刚够到 roofline 拐点
 
 **结论 1**：同一张卡不可能同时对两个阶段最优。prefill 想要小批、快进快出；decode 想要极大批。这是 PD 分离（§5）的全部动机。
 
-**结论 2**：**prefill-only 的 tok/s 和混合口径的 tok/s 差一个数量级**。同一份 DeepSeek-R1 在 GB300 上 prefill 报 22,476 TGS，混合负载（ISL=2k/OSL=1k）报约 3,072 TGS——差 7×。看到没有标注 ISL/OSL/并发/量化/版本的 tok/s，直接判为不可用。
+**结论 2**：**prefill-only 的 tok/s 和混合口径的 tok/s 差一个数量级**。同一份 DeepSeek-R1 在 GB300 上 prefill 报 22,476 TGS（tokens per GPU per second：每张 GPU 每秒处理的 token 数），混合负载（ISL=2k/OSL=1k）报约 3,072 TGS——差 7×。看到没有标注 ISL/OSL/并发/量化/版本的 tok/s，直接判为不可用。
 
 ---
 
@@ -53,6 +99,8 @@ KV 显存预算 = N_gpu × HBM_per_gpu − 权重 − 激活/CUDA graph/框架�
 
 ### 算例：Llama-3.1-70B，FP8 权重 + FP8 KV，2× H100
 
+（FP8 / BF16 是数值精度格式：同一个数分别用 1 字节 / 2 字节存。精度换显存，下面 §9 会展开。）
+
 - 结构：`n_layers=80, n_kv_heads=8 (GQA), head_dim=128`
 - 每 token 每层 = 2 × 8 × 128 × 1 byte = **2 KiB**
 - 每 token 总计 = 2 KiB × 80 = **160 KiB/token**（BF16 KV 则为 320 KiB）
@@ -72,6 +120,8 @@ KV 预算                    ≈  78 GB
 **同一台机器，KV 精度从 FP8 换成 BF16，并发直接砍半到 55。** 这是 FP8 KV cache 在 2026 被 vLLM 定调为"长上下文部署默认起点"的原因（[FP8 KV-Cache 现状](https://vllm.ai/blog/2026-04-22-fp8-kvcache)：长上下文 AUC 恢复 94–98%，输出吞吐 +5–15%）。
 
 ### 注意力结构决定一切
+
+注意力有多个"头"（head），每个头各自算一份 K 和 V。**KV cache 的大小与 KV 头数成正比**，所以模型架构直接决定你能开多大并发：MHA（multi-head attention）每个头都有独立的 K/V；GQA（grouped-query attention）让多个头共用一份 K/V；MQA（multi-query attention）全部头共用一份；MLA（multi-head latent attention）先把 K/V 压成低维潜变量再存。
 
 | 结构 | 代表 | 每 token KV（量级，BF16） | 相对 MHA |
 |---|---|---|---|
@@ -97,6 +147,7 @@ KV 预算                    ≈  78 GB
 **Chunked prefill**：把长 prompt 的 prefill 切成小块，塞进 decode 的 batch 里一起跑，避免一个 8k prompt 把 decode 池"卡住"数百毫秒。vLLM V1 默认开启。
 
 ```bash
+# --tensor-parallel-size 2 = TP2：把每一层的矩阵切成 2 份放到 2 张卡上一起算（下面 §10 展开）
 vllm serve meta-llama/Llama-3.1-70B-Instruct \
   --tensor-parallel-size 2 \
   --quantization fp8 --kv-cache-dtype fp8_e4m3 \
@@ -117,7 +168,7 @@ vllm serve meta-llama/Llama-3.1-70B-Instruct \
 
 - **TTFT** = 首 token 到达时间（含网络 + 排队 + prefill）
 - **TPOT / ITL** = 首 token 之后的平均产出间隔
-- **goodput** = 每秒完成、**且同时满足 TTFT 与 TPOT SLO** 的请求数
+- **goodput** = 每秒完成、**且同时满足 TTFT 与 TPOT SLO** 的请求数（SLO：service level objective，你对外承诺的服务指标，如"P95 TTFT ≤ 2s"，写法与错误预算见 [`05/01`](../05-reliability/01-slo-and-error-budget.md)）
 
 throughput 会一路涨到 GPU 打满，goodput 会在某个批大小之后**崩到 0**：
 
@@ -149,7 +200,7 @@ throughput 会一路涨到 GPU 打满，goodput 会在某个批大小之后**崩
 
 ## 5. PD 分离（Prefill/Decode Disaggregation）
 
-把 prefill 和 decode 放到**不同的 GPU 池**，中间通过 RDMA 传 KV cache。
+把 prefill 和 decode 放到**不同的 GPU 池**，中间通过 RDMA（remote direct memory access：一台机器的网卡直接读写另一台机器的内存，不经过双方 CPU 和操作系统内核，因此延迟低、不吃 CPU）传 KV cache。
 
 ```
                     ┌──────────────────────────────────┐
@@ -173,7 +224,7 @@ throughput 会一路涨到 GPU 打满，goodput 会在某个批大小之后**崩
 
 ### 硬性前置条件：RDMA
 
-Dynamo 走 UCX/NIXL，要求 InfiniBand 或 RoCE，并且需要：
+Dynamo 走 UCX/NIXL，要求 InfiniBand 或 RoCE（两种支持 RDMA 的网络：前者是专用高速互联，后者是"在以太网上跑 RDMA"；普通 10 GbE 以太网两者都不是），并且需要：
 
 ```yaml
 env:
@@ -211,7 +262,7 @@ NVIDIA 官方文档罕见地明确反驳了自家方案："**It is not automatic
 
 ### 生产模板（可直接抄的 SLA 形状）
 
-[vLLM 上 GLM-5.2 / 24× B300 的 PD 分离部署](https://vllm.ai/blog/2026-07-23-glm-5.2-nvfp4-b300-pd)：744B MoE（40B 激活）NVFP4，**4 个 prefill 节点（TP1 DP4 EP）+ 1 个 decode 节点（TP1 DP8 EP）**，SLA 定为 mean TTFT ≤ 2.5 s、mean TPOT ≤ 20 ms，实测 TPOT 17 ms（基线约 40 ms）。注意 P:D = 4:1 是**从这份负载的 ISL/OSL 推出来的，不是通用常数**。
+[vLLM 上 GLM-5.2 / 24× B300 的 PD 分离部署](https://vllm.ai/blog/2026-07-23-glm-5.2-nvfp4-b300-pd)：744B MoE（mixture of experts，混合专家：模型内部有很多组"专家"子网络，每个 token 只激活其中几组，所以总参数量很大而每次实际算的量小；下面 §10 展开）（40B 激活）NVFP4，**4 个 prefill 节点（TP1 DP4 EP）+ 1 个 decode 节点（TP1 DP8 EP）**，SLA 定为 mean TTFT ≤ 2.5 s、mean TPOT ≤ 20 ms，实测 TPOT 17 ms（基线约 40 ms）。注意 P:D = 4:1 是**从这份负载的 ISL/OSL 推出来的，不是通用常数**。
 
 分离的维度在 2026 年还在扩展：Encoder 分离（EPD）、Hybrid SSM 分离、[Attention/FFN 分离（AFD，实验性）](https://vllm.ai/blog/2026-07-23-vllm-afd-plugin)。判据永远是同一条：**这两段的算力/带宽/显存 profile 是否显著不同 + 中间态传输是否便宜**。
 
@@ -341,6 +392,8 @@ AL (accept length) = 每个 target 前向步平均接受的 token 数
 | **SP**（序列并行，sequence parallelism） | 序列维切 | ring/all-gather | 超长上下文 prefill；配合 TP 省激活显存 |
 | **DP**（数据并行/多副本，data parallelism） | 整模型多份 | 无 | 放得下就优先——**没有通信就是最好的通信** |
 
+表里三个通信原语：**all-reduce**（每张卡各算一部分，最后把所有卡的结果加起来再发回给每张卡）、**P2P**（点对点，只在相邻两张卡之间传）、**all-to-all**（每张卡都要把不同的数据分别发给其他每一张卡，是这几种里最贵的）。**NVLink** 是同一台机器内 GPU 之间的专用高速互联，带宽比跨机网络高约一个数量级；"NVLink 域"就是被它连在一起的那几张卡。
+
 **决策顺序**：能 DP 就 DP → 放不下就在单节点内 TP → 还放不下才跨节点 PP 或 EP。
 
 ### MoE 的头号瓶颈是 all-to-all
@@ -369,6 +422,8 @@ AL (accept length) = 每个 target 前向步平均接受的 token 数
 | **MIG** | ✅ 硬件级 | ✅ | 跨租户；但仅限支持的卡，**profile 必须静态规划**，碎片浪费 10–30% |
 | **MPS** | ❌ | ❌ 单 client 崩溃影响同卡其他 client | **仅同租户内**的可信 CUDA 负载 |
 | **time-slicing** | ❌ | ❌ | 开发/测试环境；**绝不跨租户** |
+
+三种共享方式的机制：**MIG**（multi-instance GPU）在硬件层把一张卡切成几个各有独立显存与计算单元的小卡；**MPS**（multi-process service）让多个进程的 kernel 在同一个 GPU 上下文里并发跑，共享显存、互不设防；**time-slicing** 是驱动按时间片轮流调度多个进程，显存也不隔离。
 
 **跨租户只有 MIG 或整卡。** 把 MPS 当隔离手段是 2026 年仍然常见的严重错误。
 
@@ -440,7 +495,9 @@ P:D 副本比 ≈ 5:2
 | **前缀缓存预热（warm-up）到稳态命中率** | **数分钟到数十分钟** |
 | **合计冷启动（cold start）** | **5–15 分钟** |
 
-**HPA 那套"CPU > 70% 就扩容"在 GPU 上是不成立的。** 正确形态：
+（冷启动 cold start：从零把一个实例拉起来到它能正常接流量所需的时间。上表说明 GPU 的这个数比无状态 Web 服务大两个数量级。）
+
+**HPA（Horizontal Pod Autoscaler，Kubernetes 按指标自动增减 Pod 数的组件）那套"CPU > 70% 就扩容"在 GPU 上是不成立的。** 正确形态：
 
 1. **预热池（warm pool）**：常驻 15–25% 的空闲容量，接受这笔成本。
 2. **排队而非弹性**：过载（overload）时进入准入队列（admission queue） + 明确的 429 与 `Retry-After`，而不是指望扩容救场。
@@ -514,6 +571,14 @@ API （对标 Claude Haiku 4.5：$1/M 输入、$5/M 输出）：
 9. **跟 latest 版本**。vLLM 两周一个 minor 且 v0.25.0 直接删了 legacy attention 路径；SGLang 一个月三个版本。**生产必须锁版本（version pinning） + 有回归基线（regression baseline）**。
 10. **信"博客里的 GA"**。2026 年大量能力仍是实验态：AFD 明确 experimental、Mooncake 集成未合入主干、Elastic EP 只支持 TP=1、多层 MTP 未稳定。逐项核对 release note。
 11. **用 CPU/GPU 利用率驱动 HPA**。decode 阶段 GPU 利用率读数很高而 MFU 只有 5%——这个指标对 LLM 服务几乎没有信息量。用 goodput、队列深度、`gpu_cache_usage_perc` 和抢占计数。
+
+---
+
+## 这一章的三句话
+
+1. **decode 阶段的 GPU 不是在算，是在搬。** 所以 LLM 推理系统的中心是显存而不是算力 —— KV cache 装得下几个请求，就是你的并发上限；容量规划的第一条公式是显存账，不是 FLOPS 账。
+2. **只写一个延迟指标的 SLO 等于没有 SLO。** 因为让 TTFT 达标最省事的手段（把批做小、抢占别人）恰好是让 TPOT 崩掉的手段，反之亦然；能用来做容量规划的只有同时约束两者的 goodput，而工作点必须取在 goodput 峰值的左侧。
+3. **2026 年最大的性能杠杆是"不重算"，而它同时是最大的跨租户泄露面。** 前缀缓存加上缓存感知路由能把 P90 TTFT 拉开 57–170 倍，同一份共享 KV cache 也能被逐 token 反推出别人的 prompt —— 这两件事必须放在同一次决策里权衡，默认答案是"同租户内共享、跨租户关闭"。
 
 ---
 
