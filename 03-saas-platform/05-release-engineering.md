@@ -126,6 +126,40 @@ def is_enabled(flag_key, entity_id, rollout_bps):        # bps = 万分比
 - **用"昨天同期"做基线**：周期性、外部事件、其他团队的发布全都会污染它。**必须是并发基线组。**
 - **回滚后不冻结**：事故会在 40 分钟后原样重演。
 
+上面的清单和阶梯是**判据**，下面这张状态机是**可达性**——把 1%/5%/25%/50%/100% 的阶梯收敛成三档后，一次金丝雀真正能走到的终局只有两个，而中间那个 `Hold` 才是线上最常出现、也最少被写进 runbook 的态。
+
+```mermaid
+stateDiagram-v2
+    state "Baking 1 percent" as B1
+    state "Baking 10 percent" as B10
+    state "Baking 50 percent" as B50
+    state "Full rollout" as Full
+    state "Auto rollback" as RB
+    state "Hold for human" as Hold
+
+    [*] --> B1
+    B1 --> B10: gate pass and sample threshold met
+    B10 --> B50: gate pass after bake time
+    B50 --> Full: gate pass after bake time
+    Full --> [*]
+
+    B1 --> RB: gate fail
+    B10 --> RB: gate fail
+    B50 --> RB: gate fail
+    RB --> [*]
+
+    B1 --> Hold: sample below threshold
+    B10 --> Hold: concurrent baseline group missing
+    B50 --> Hold: business KPI window not closed
+
+    Hold --> Hold: waiting with bake clock paused
+    Hold --> B1: telemetry fixed and stage restarted
+    Hold --> RB: human aborts or hold TTL expires
+    Hold --> Full: human overrides the gate
+```
+
+> 📖 **读图要点**：两条最该被追问的边其实是**画不出来的那条**和**最危险的那条**。`RB` 没有任何回到 `B1/B10/B50` 的边——回滚即冻结流水线，重新发布必须由人重新起一次流程；而 `Hold --> Full`（人工覆盖门禁）是唯一绕过所有自动判据直达全量的路径，绝大多数"金丝雀明明开着却还是全站挂了"的事故都走的这条边。另外 `Hold` 不通向 `[*]`：它自己永远不会结束，必须靠 TTL 或人来推一把，所以 Hold 必须配告警和超时默认动作（默认应是回滚，不是放行）。
+
 ---
 
 ## 4. 数据库 Schema 迁移六步法（expand–migrate–contract）

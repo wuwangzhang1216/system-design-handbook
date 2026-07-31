@@ -233,6 +233,52 @@ Vitess（[vitess.io](https://vitess.io/)）的 keyspace/shard、Elasticsearch �
 3. **忘记删除**（delete）与 TTL 过期在双写期的处理。回填时那行已被删，双写把它写回去了 —— 幽灵数据（resurrected row / zombie record）。
 4. **P4 没有做"防双主（split-brain）"**。切换瞬间两边都在写同一行 = 数据分叉。用短暂只读窗口或全局租约。
 
+**上面的方框图讲的是"有哪几个阶段"，下面这张时序图讲的是另一件事：在任意时刻，用户的读和写分别落在哪一边 —— 以及四个回滚点各自把你退回到哪个时刻。**
+
+```mermaid
+sequenceDiagram
+    participant App as App
+    participant Old as OldShard
+    participant New as NewShard
+    participant Ver as Verifier
+
+    Note over App,New: Step 1 dual write on. Old is still the only source of truth
+    App->>Old: write and wait for ack
+    App->>New: write without blocking the request
+    New-->>App: a failure here only bumps a metric
+    Note over App,New: Observe 24 to 72h. Rollback point A is flipping write_new off
+
+    Note over Ver,New: Step 2 backfill history in rate limited chunks
+    Ver->>Old: read chunk by primary key range
+    Ver->>New: UPSERT chunk without overwriting dual written rows
+    Note over Ver,New: Rollback point B is truncating New. It still serves zero reads
+
+    Note over App,Ver: Step 3 verify and quantify the gap
+    Ver->>Old: checksum per key range
+    Ver->>New: checksum per key range
+    App->>Old: read that is actually served to the user
+    Ver->>New: shadow read of the same key for comparison
+    Ver-->>App: gate is diff rate under 0.001% for 3 to 7 straight days
+    Note over App,Ver: Users have still never seen one byte from New
+
+    Note over App,New: Step 4 ramp read_new 1% 5% 25% 50%
+    App->>New: read for the ramped slice
+    New-->>App: response
+    Ver-->>App: on mismatch route that key back to Old and page
+    Note over App,New: Rollback point C is read_new to 0 and it lands in seconds
+
+    Note over App,New: Step 5 read_new is 100% while every write still goes to both
+    App->>New: all reads
+    App->>Old: write and wait for ack
+    Note over App,Old: Rollback point D is still cheap because Old is complete
+
+    Note over App,New: Step 6 stop dual write and promote New
+    App->>New: write and wait for ack
+    Note over App,Old: ONE-WAY DOOR. Old goes stale so any rollback now needs a reverse backfill
+```
+
+> 📖 **读图要点**：盯住 `App` 这条生命线上"读"箭头指向谁 —— 直到 Step 3 结束，它一根都没指向 `New`，用户从没读过一个来自新库的字节。校验的全部价值就买在这个"零用户暴露"的窗口里，跳过它等于把差异留给 Step 4 的真实用户去发现。另一处是 Step 5 与 Step 6 之间那道分界：前五步的回滚都只是改一个开关（A 关双写、B 清空新库、C 把 read_new 调回 0、D 靠反向双写兜底），代价是分钟级；跨过最后一条 Note，`Old` 从这一刻起开始变旧，回滚从"改开关"变成"再做一次反向回填"。这是整个剧本唯一的单向门，也是唯一需要提前写好审批和演练的一步。
+
 ---
 
 ## 7. 单元化（Cell / cell-based architecture）：从"扩展"变成"复制"

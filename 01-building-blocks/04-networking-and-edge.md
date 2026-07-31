@@ -137,6 +137,32 @@ Postgres 每连接约 5–10 MB 内存 + 上下文切换开销
 
 **什么时候需要 WebSocket**：协作编辑（高频双向）、多人游戏、需要客户端持续推送状态（如实时光标位置）。
 
+**下面这张图要让你看清一件表格里写不出来的事：断线之后，服务端是从第 4 个 event 接着发，而不是把已经生成过的 token 从头重放一遍。**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant LB as LoadBalancer
+    participant S as AgentService
+    C->>LB: GET /stream as SSE
+    LB->>S: forward to a backend instance
+    S-->>C: id=1 data token1
+    S-->>C: id=2 data token2
+    S-->>C: id=3 data token3
+    Note over C,LB: 网络抖动 / LB 空闲超时 —— 连接被切断
+    LB--xC: stream broken
+    Note over C: 浏览器自动记住 last id = 3
+    C->>LB: reconnect with header Last-Event-ID 3
+    LB->>S: forward with Last-Event-ID 3
+    S->>S: seek session buffer to id 4
+    S-->>C: id=4 data token4
+    S-->>C: id=5 data token5
+    Note over C,S: 从 4 续传而不是从 1 重跑 —— 这是 SSE 相对 WebSocket 的核心优势，对几分钟的 Agent 任务至关重要
+```
+
+> 📖 **读图要点**：全图的重量都压在重连那一跳带的 `Last-Event-ID` 上——客户端只需要记住最后一个 id，续传点就由服务端算出来。WebSocket 在协议层没有这个约定，重连后服务端不知道对方收到了哪里，同样的语义得你在应用层重造一遍（而且重连本身也要自己写）。另一处容易忽略：重连是一个全新的 HTTP 请求，LB 可能把它路由到**另一个实例**，所以续传所需的会话缓冲必须在实例之外。
+
 ### 长连接的实际问题
 
 ```

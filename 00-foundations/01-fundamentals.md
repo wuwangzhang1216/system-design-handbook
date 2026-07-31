@@ -138,11 +138,58 @@ RETURNING id;
 --     - state=IN_PROGRESS → 409，让客户端退避重试
 ```
 
+**把上面这段 SQL 展开成时间轴：同一个 key 的第二次请求，走的是一条和第一次完全不同的路径。**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant API as Payment API
+    participant IDEM as DB idempotency_records
+    participant BIZ as DB business tables
+
+    Note over C,BIZ: all three branches below carry the SAME Idempotency Key K
+    C->>API: POST /v1/payments with Idempotency Key K
+    API->>IDEM: INSERT key=K state=IN_PROGRESS ON CONFLICT DO NOTHING
+    alt insert succeeded so this is the first request
+        IDEM-->>API: row created and lease held
+        API->>BIZ: debit account inside the same transaction
+        BIZ-->>API: business rows committed
+        API->>IDEM: set state=COMPLETED and store response body
+        API-->>C: 201 Created
+    else conflict with state COMPLETED and identical request_hash
+        IDEM-->>API: stored response body
+        API-->>C: 200 replayed response and no second debit
+        Note over API,BIZ: business tables are never touched on this path
+    else conflict with state IN_PROGRESS and lease still valid
+        IDEM-->>API: another worker is still mid flight
+        API-->>C: 409 so the client backs off and retries later
+    end
+```
+
+> 📖 **读图要点**：第 4–6 步必须是不可分割的一段——业务写和 `state=COMPLETED` 落在同一个事务里，否则时间轴上会出现"钱扣了但记录没写"的窗口，而第 7 步的 201 只是这段事务提交之后的回执。另外注意第三条分支返回的是 409 而不是"等它做完"：服务端此刻无法判断持有 lease 的那个进程是慢还是已经死了，让客户端退避比让连接挂着更安全。
+
 **四个容易漏掉的点：**
 1. **必须校验 request_hash**。否则同一个 key 带不同 body 会返回错误的缓存结果。
 2. **IN_PROGRESS 需要超时回收**。进程崩溃会留下永久卡住的键，加 `lease_expires_at`。
 3. **幂等记录和业务写必须同事务**，否则业务成功但记录失败 → 重试会重复执行。
 4. **TTL 要 ≥ 客户端最大重试窗口（retry window）**，通常 24h–7d。
+
+**第 2 点值得单独看它的状态可达性：把 Reclaimable 那条边删掉，InProgress 就变成了吸收态。**
+
+```mermaid
+stateDiagram-v2
+    [*] --> InProgress: INSERT succeeds and lease_expires_at is set
+    InProgress --> InProgress: duplicate request gets 409 and backs off
+    InProgress --> Completed: business txn commits and response body stored
+    InProgress --> Reclaimable: lease_expires_at passed while the worker was dead
+    Reclaimable --> InProgress: another worker takes over and renews the lease
+    Completed --> Completed: duplicate request replays the cached response
+    Completed --> [*]: TTL sweeper drops the record after the retry window
+    note right of Reclaimable: without this edge a crashed worker pins the key in IN_PROGRESS forever
+```
+
+> 📖 **读图要点**：Completed 是通向 `[*]` 的唯一出口，而 lease 过期是 InProgress 唯一的"非正常"出口。没有 `InProgress → Reclaimable → InProgress` 这条回收边，进程崩溃后该 key 就永远卡在 IN_PROGRESS 自环上——客户端拿到的是无限的 409，且因为 TTL 只清 COMPLETED 记录，这个键连过期都过期不掉。
 
 ### 幂等的三种实现层次
 

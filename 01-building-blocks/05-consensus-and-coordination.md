@@ -42,6 +42,34 @@
 6. 下次心跳告知 Follower 提交点，Follower 也应用
 ```
 
+**把上面 6 步铺到时间轴上，会露出一个列表写不出来的事实：客户端拿到 OK 的那一刻，最慢的那个 follower 还没回话。**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant L as Leader
+    participant F1 as Follower1
+    participant F2 as Follower2
+    C->>L: write x=5
+    L->>L: append entry to local log as uncommitted
+    par AppendEntries to F1
+        L->>F1: AppendEntries with entry
+    and AppendEntries to F2
+        L->>F2: AppendEntries with entry
+    end
+    F1-->>L: ack
+    Note over L,F1: 多数派 = leader 自己 + F1 —— 此刻已经 committed
+    L->>L: apply to state machine
+    L-->>C: OK
+    F2-->>L: ack arrives late
+    L->>F2: next heartbeat carries commitIndex
+    F2->>F2: apply to state machine
+    Note over C,F2: 写延迟 = 到第 N/2+1 快的节点的一次 RTT —— 不等最慢的 follower
+```
+
+> 📖 **读图要点**：看第 7 步和第 8 步的先后——客户端已经收到 OK，F2 的 ack 才姗姗来迟。"committed"是**计数**达成的，不是"所有人都收到"达成的，所以写延迟由第 N/2+1 快的节点决定；这就是为什么节点数从 3 加到 7 会让写变慢（要等的名次更靠后），也是为什么 F2 落后不影响可用性。还要注意 F2 是在**下一次心跳**才知道提交点的——follower 上的读永远可能落后一个心跳周期，这正是"跟随者读"需要 ReadIndex/租约读来兜底的原因。
+
 **关键推论：**
 - 写延迟 = **1 次到"第 N/2+1 快的节点"的 RTT**（不是最慢的，也不是最快的）
 - 3 节点跨 AZ：写延迟 ≈ 1–3 ms
@@ -118,6 +146,32 @@ end
 - 数据库：`UPDATE ... WHERE fence_token < $new_token`
 - 对象存储：条件写入（If-Match ETag）
 - 文件：租约 + epoch 号
+
+**严格按时间轴走一遍，才能看清"两个客户端同时自认为持锁"这件事根本没有被阻止——被阻止的只是旧持有者的那一次写。**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as ClientA
+    participant B as ClientB
+    participant LS as LockService
+    participant ST as Storage
+    A->>LS: acquire lock
+    LS-->>A: granted token=33
+    Note over A: GC 暂停 40s —— 跨越了 30s 的锁过期时间，A 自己毫不知情
+    LS->>LS: lease of A expires
+    B->>LS: acquire lock
+    LS-->>B: granted token=34
+    B->>ST: write data with token=34
+    ST->>ST: token 34 beats last_token 33 so accept and bump last_token=34
+    ST-->>B: OK
+    A->>ST: write data with token=33
+    ST->>ST: token 33 is stale versus last_token 34
+    ST--xA: rejected
+    Note over LS,ST: 安全性来自 Storage 的单调检查，锁服务只负责发号
+```
+
+> 📖 **读图要点**：注意 A 的 GC 暂停横跨了"锁过期"和"B 加锁"两件事——在锁服务看来一切正常，在 A 看来它从没失去过锁，**没有任何超时机制能消除这个重叠区**。整张图里唯一不可达的边是最后那条"旧 token 写入成功"，而它之所以不可达，只因为 Storage 记住了 `last_token=34`。把 Storage 换成一个不检查 token 的对象存储，这条边立刻可达，你得到的就是一次静默覆盖写——锁服务那边什么告警都不会有。
 
 ### 什么时候可以用"不安全"的锁
 

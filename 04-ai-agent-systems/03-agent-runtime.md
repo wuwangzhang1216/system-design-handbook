@@ -60,6 +60,38 @@ def agent_run(run_id, task, budget: Budget, deadline_ts):
 | 5 回填 | 原样塞入几十 KB 输出；顺序随完成先后变 | 上下文最大污染源；前缀漂移（prefix drift） → 缓存不命中 | 截断（truncation） + 落盘只回引用（§3）；按 `tool_use_id` 定序 |
 | 6 终止 | 判据放在循环底部 | 恢复后会多跑一轮、多花一次钱 | 放顶部，恢复即重新判定 |
 
+**伪代码是"从上往下"读的，看不出同一轮里时间怎么交错。下图把一轮拉到时间轴上：模型只被调用两次，夹在中间的那段并行工具执行才是这一轮墙钟时间的大头。**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as User
+    participant L as AgentLoop
+    participant M as Model
+    participant S as Sandbox
+    participant K as MCPServer
+
+    U->>L: submit task
+    Note over L: assemble stable prefix then append history only
+    L->>M: stream call with tools
+    M-->>L: assistant text plus two tool_use blocks
+    par run command in sandbox
+        L->>S: exec tool_use tu_1
+        S-->>L: stdout truncated plus artifact ref
+    and call remote MCP tool
+        L->>K: tools/call tu_2
+        K-->>L: structured result
+    end
+    Note over L,K: parallel read tools are the main latency lever, writes stay serial
+    L->>L: order results by tool_use_id then checkpoint
+    L->>M: second call with tool results appended at the tail
+    Note over L,M: appending only at the tail keeps the prefix cache warm
+    M-->>L: final answer as token stream
+    L-->>U: stream deltas then run.finished
+```
+
+> 📖 **读图要点**：两个工具落在同一个 `par` 块里，这一轮的工具耗时是 max(沙箱, MCP) 而不是两者之和——这是延迟优化最大的一根杠杆，也是"读并行"存在的唯一理由。另一处容易被忽略：第二次调模型时新增内容**全部追加在消息尾部**，一旦把工具结果插到工具块或系统提示之后的中间位置，前缀缓存立刻整段失效（对应上表第 1 行）。
+
 ---
 
 ## 2. 终止条件：Agent 系统的第一大 bug 源
@@ -289,6 +321,35 @@ def exec_with_idempotency(call, key):
 ```
 
 三条不显然的设计：① **RUNNING 靠租约（lease）而不是心跳标志位** —— worker 挂了租约自然过期、状态回 PENDING 被别人接走，这是 at-least-once，所以幂等键必须有；② **WAITING_FOR_HUMAN 是持久状态，不是内存里的 `await`**，进程重启后审批请求必须还在；③ **CANCELLED 不等于回滚（rollback）** —— 已发出的邮件收不回来，取消只保证"不再产生新的副作用"。
+
+**上面那张图是调度器视角的流转；下图沿用同一套状态名，补两个它没画的态——`SUSPENDED`（checkpoint 已落盘、等着被恢复）与 `FAILED`（错误已发生、还没决定重试还是收尾），以及由此暴露出来的可达性：哪些状态还有回到 `RUNNING` 的边，哪些一进去就再也出不来。**
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING
+    PENDING --> RUNNING: lease acquired
+    RUNNING --> WAITING_FOR_HUMAN: high impact tool call
+    WAITING_FOR_HUMAN --> RUNNING: approved or rejected
+    WAITING_FOR_HUMAN --> EXPIRED: approval TTL of 24h elapsed
+    RUNNING --> SUSPENDED: checkpoint flushed on deadline or disconnect
+    SUSPENDED --> RUNNING: resume only if code_version matches
+    RUNNING --> CANCELLED: cancel flag propagated into running tools
+    RUNNING --> FAILED: tool or model error
+    FAILED --> SUSPENDED: retryable so keep the checkpoint
+    RUNNING --> EXHAUSTED: turns or tokens or usd cap hit
+    RUNNING --> SUCCEEDED: deterministic validator passed
+    note right of EXHAUSTED
+        terminal by design
+        no resume edge back to RUNNING
+    end note
+    SUCCEEDED --> [*]
+    CANCELLED --> [*]
+    EXPIRED --> [*]
+    FAILED --> [*]
+    EXHAUSTED --> [*]
+```
+
+> 📖 **读图要点**：`SUSPENDED` 与 `WAITING_FOR_HUMAN` 都有一条指回 `RUNNING` 的边——它们是"暂停"；`EXHAUSTED` 只有指向 `[*]` 的出边——它是"结束"。把这两类塞进同一个 `PAUSED` 状态是设计期最贵的错误：恢复逻辑会尝试重启一个已经烧完预算的 run，而闸门在循环顶部又立刻再判一次，白付一次 input token。还要注意 `FAILED --> SUSPENDED` 这条边：可重试的失败必须保住 checkpoint 才有得恢复，不可重试的直接落终态，二者在写 `finalize()` 时就要分流。
 
 ### 持久化工作流引擎
 

@@ -98,6 +98,31 @@
 
 **设计规则：把不可补偿的操作尽量往后排，并让 pivot 尽可能靠后。** 如果你的流程里有两个互相独立的不可补偿操作（扣款 + 调用一次 $2 的 LLM 批处理），你就有两个 pivot —— 这时必须引入**预留（reservation）**（下面）把其中一个变成可补偿的。
 
+**上面那张 ASCII 图画的是主干路径；下面这张沿用同一套状态名，补的是「可达性」：每个正向态失败后精确落到哪里，以及 `NEEDS_HUMAN` 的出边通向何处。**
+
+```mermaid
+stateDiagram-v2
+    [*] --> CREATED
+    CREATED --> INV_RESERVED: T1 ReserveInventory ok
+    CREATED --> FAILED_CLEAN: T1 rejected and there is nothing to undo
+    INV_RESERVED --> PAY_AUTHORIZED: T2 AuthorizePayment ok
+    INV_RESERVED --> COMPENSATING: T2 rejected
+    PAY_AUTHORIZED --> PAID: T3 CapturePayment ok and the pivot is now crossed
+    PAY_AUTHORIZED --> COMPENSATING: T3 declined while the money never moved
+    PAID --> SHIPPED: T4 CreateShipment ok
+    PAID --> NEEDS_HUMAN: T4 failed N times and no rollback edge exists
+    SHIPPED --> COMPLETED: T5 confirmation email sent
+    COMPENSATING --> COMPENSATED: every compensation ran in reverse order
+    COMPENSATING --> NEEDS_HUMAN: a compensation failed N times
+    NEEDS_HUMAN --> COMPENSATING: operator retries the compensation
+    NEEDS_HUMAN --> COMPLETED: operator drives the saga forward by hand
+    COMPLETED --> [*]
+    COMPENSATED --> [*]
+    FAILED_CLEAN --> [*]
+```
+
+> 📖 **读图要点**：`PAID` 和 `SHIPPED` 都没有指回 `COMPENSATING` 的边 —— 越过 pivot 之后「回滚」在可达性上根本不存在，这条**缺失的边**才是 pivot 的真正定义；所以 T4 卡住时唯一的出口是 `NEEDS_HUMAN`，不是回滚。另一处是 `NEEDS_HUMAN` **不是终态**：它同时有回 `COMPENSATING`（人工重试补偿）和去 `COMPLETED`（人工把 saga 推完）两条出边，对应下面第 2 条硬规则——"补偿失败"这个终态在图上必须不可达。
+
 ### 补偿事务的正确写法
 
 补偿**不是回滚（rollback）**，是一笔新的正向业务操作：
@@ -115,6 +140,36 @@
 2. **补偿必须能重试到成功，不允许"补偿失败"这个终态**。补偿失败只能进 `NEEDS_HUMAN` 队列 + 告警，绝不能静默丢弃 —— 那是钱漏出去的地方。
 3. **补偿要能处理"还没执行就来补偿"**（正向请求超时但实际成功/失败未知）。用同一个幂等键（idempotency key）写一条 tombstone，让后到的正向请求被拒绝。
 4. **补偿要留痕**：补偿本身是一个领域事件（`InventoryReleased`），不是一次 UPDATE。
+
+**状态机说明「能到哪」，这张时序图说明「按什么顺序发出去、每次带什么幂等键」—— 补偿的逆序和补偿自身的重试，只有摊在时间轴上才看得出来。场景取 pivot 那一步失败（T3 Capture 被拒），因为只有它会同时触发两条补偿。**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant O as Orchestrator
+    participant I as Inventory
+    participant P as Payment
+    participant H as OpsQueue
+
+    O->>I: T1 ReserveInventory with idempotency key T1
+    I-->>O: reservation r31 is HELD
+    O->>P: T2 AuthorizePayment with idempotency key T2
+    P-->>O: authorization h77 is held and the money has not moved
+    O->>P: T3 CapturePayment with idempotency key T3
+    P-->>O: 402 capture declined
+    Note over O,P: the pivot never committed so rollback is still reachable
+    O->>P: C2 Void h77 with idempotency key C2
+    P-->>O: h77 voided
+    O->>I: C1 ReleaseInventory r31 with idempotency key C1
+    I-->>O: 503 gateway timeout
+    O->>I: C1 retried with the SAME idempotency key C1
+    I-->>O: 503 gateway timeout again
+    Note over O,I: reusing the key means a late success cannot release the stock twice
+    O->>H: escalate to NEEDS_HUMAN with saga id and step cursor
+    H-->>O: acknowledged while the saga stays in COMPENSATING
+```
+
+> 📖 **读图要点**：补偿的调用顺序是 C2 → C1（先 Void 授权，再 release 库存），恰好是正向 T2 → T1 的逆序 —— 若反过来先放库存，中间那段窗口里货已经可以被别人买走，而客户的授权还挂着。第二处是补偿用的是 **Void 而不是 refund**：pivot 没提交，钱从来没动过，退款是另一件事（见下面 TCC 表"支付"那一行：`Cancel = Void`，不是 refund）。第三处是结尾：`C1` 连续失败后 saga **没有**走向任何终态，而是发给 OpsQueue 并停在 COMPENSATING；两次重试用同一个 `C1` 幂等键，所以哪怕第一次其实在下游成功了，重试也不会把库存放两遍。
 
 ### 不可补偿操作怎么办：语义锁（semantic lock）与预留（TCC）
 

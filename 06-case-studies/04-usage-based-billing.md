@@ -185,6 +185,42 @@ partition = f(hash(tenant_id) → 分区组) + (hash(request_id) % 16 → 组内
 
 **账期关闭（period close）必须有明确的"关闭时刻"和"关闭后不可变"语义**：finalize 时把该账期聚合结果快照进不可变表（`usage_snapshots`），发票行引用快照 ID。之后无论上游怎么重算，这张发票的依据不变。
 
+**上面那张表讲的是"怎么处理"，但真正决定处理方式的是事件落在关账时刻的哪一侧。同一条事件、同一个账期归属，只因为到达时间差了几分钟，走的就是两条完全不同的链路：**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Svc as Service
+    participant MP as MeteringPipeline
+    participant Agg as Aggregator
+    participant Led as Ledger
+    participant Inv as Invoice
+
+    Note over Svc,Inv: Period P is still open
+    Svc->>MP: emit event with event_time in P and idem_key
+    MP->>MP: dedup inside the 32d window
+    MP->>Agg: deduped event
+    Agg->>Agg: upsert 1min bucket then roll up to hourly
+    Agg->>Led: post usage into period P
+    Note over Agg,Led: watermark is behind close so the ledger of P is still mutable
+    Led->>Inv: finalize P and freeze usage_snapshot
+    Inv-->>Svc: invoice of P issued with a locked amount
+    Note over Led,Inv: PERIOD CLOSE. snapshot and invoice amount are immutable from here
+    Svc->>MP: emit event with event_time in P arriving after close
+    MP->>MP: dedup says this key was never seen
+    MP->>Agg: deduped late event
+    Agg->>Led: this event belongs to the already closed period P
+    Note over Led: rewriting P is forbidden. only carrying forward is legal
+    alt inside the grace window of 3 days
+        Led->>Inv: prior period adjustment line on the invoice of P plus 1
+        Inv-->>Svc: adjustment is customer visible and invoice of P stays untouched
+    else past the grace window
+        Led->>Led: write a discarded_events row and raise an alert
+    end
+```
+
+> 📖 **读图要点**：关账那两步之后，图里再没有任何一条箭头指回 `Invoice` 的 P 期 —— 迟到事件只能向右（下一期的 adjustment line）或向下（`discarded_events`），不能向左。这条"缺失的边"就是会计不可变性在时间轴上的形状；ASCII 表格能列出三种处理方式，却画不出"处理方式由到达时刻单向决定、且回头路根本不存在"这件事。
+
 ### 对账：三方比对（three-way reconciliation），每天跑
 
 ```sql

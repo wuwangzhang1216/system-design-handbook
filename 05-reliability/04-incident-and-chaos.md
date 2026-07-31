@@ -55,6 +55,37 @@
 
 **安全事件走独立流程**。数据泄露（data breach）有法定通报时限（GDPR 72 小时），流程和技术事故不同，涉及法务与不同的证据保全要求。
 
+**上面的表把级别讲清楚了，但表格画不出两件事：级别是可以在事故中途来回改的，以及"止血"在流程上排在"搞清楚为什么"之前。**
+
+```mermaid
+stateDiagram-v2
+    [*] --> Detected
+    Detected --> FalseAlarm: no user impact, monitoring noise only
+    FalseAlarm --> [*]
+    Detected --> Sev3: non core feature degraded, workaround exists
+    Detected --> Sev2: core feature degraded, or one large customer fully down
+    Detected --> Sev1: core unavailable for many users, data loss, or security event
+    Sev3 --> Sev2: 24h with no progress
+    Sev2 --> Sev1: 30min with no progress, escalating early is never punished
+    Sev1 --> Sev2: blast radius shrank after partial mitigation
+    Sev3 --> Mitigating
+    Sev2 --> Mitigating
+    Sev1 --> Mitigating
+    Mitigating --> Monitoring: user impact stopped, root cause still unknown
+    Monitoring --> Mitigating: metrics regress inside the observation window
+    Monitoring --> Resolved: clean for one full traffic cycle
+    Resolved --> PostmortemDue: Sev1 and Sev2 always, within 5 business days
+    Resolved --> [*]: Sev3 only, and only if postmortem was explicitly waived
+    PostmortemDue --> [*]: causal chain written, action items have owner and due date
+    note right of Mitigating
+        Stop the bleeding first.
+        Root cause analysis is not on this path,
+        it happens inside PostmortemDue.
+    end note
+```
+
+> 📖 **读图要点**：三个 Sev 状态的出边**全部直接指向 `Mitigating`**，路径上根本没有一个叫 "RootCauseFound" 的状态 —— 这不是画漏了，而是流程的核心：回滚、切流、开降级开关都不需要先知道为什么坏。真正需要盯住的是两条边：`Monitoring --> Mitigating` 说明"指标看起来好了"不等于 Resolved，观察期内反弹就得退回去止血；而 `PostmortemDue` 是 Sev-1/Sev-2 通向 `[*]` 的**唯一出口**，Sev-3 那条绕过它的边还得先显式豁免 —— 复盘是状态机的一部分，不是事后可选的自觉行为。
+
 ---
 
 ## 4. 事故时间线：每一段要压缩什么

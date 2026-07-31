@@ -157,6 +157,45 @@ COMMIT;   -- 原子：要么都写，要么都不写
 
 **关键点**：Relay 是 at-least-once 的（发了但没标记已发 → 重发）。所以**下游必须幂等**。
 
+**上面的 ASCII 图画的是拓扑；下面这张画的是时间。重点看第 8 步之后：Kafka 已经 ack 了，但 Relay 在持久化"已发送"位点前挂掉——这一瞬间的裂缝，就是所有重复消息的来源。**
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant S as Service
+    participant DB as OrderDB_Outbox
+    participant R as CDC_Relay
+    participant K as Kafka
+    participant C as Consumer
+    S->>DB: BEGIN insert order row
+    S->>DB: insert outbox row msg_id=M1
+    S->>DB: COMMIT
+    Note over S,DB: atomic. one local transaction. no 2PC
+    DB-->>S: 200 order created
+    R->>DB: tail WAL from stored LSN
+    DB-->>R: OrderCreated msg_id=M1
+    R->>K: produce M1
+    K-->>R: ack persisted to partition
+    R--xDB: commit new LSN FAILS then crash
+    Note over R,DB: send succeeded but progress did not
+    K->>C: deliver M1
+    C->>C: insert M1 into processed_ids
+    C->>C: apply business effect once
+    Note over R,DB: Relay restarts from the OLD stored LSN
+    R->>DB: tail WAL from stored LSN
+    DB-->>R: OrderCreated msg_id=M1 again
+    R->>K: produce M1 again
+    K->>C: deliver M1 again
+    alt M1 already in processed_ids
+        C->>C: skip. no business effect
+    else first time seen
+        C->>C: apply and record M1
+    end
+    Note over K,C: duplicates are designed in. idempotency is the contract
+```
+
+> 📖 **读图要点**：盯住第 9 步那个 `--x` 和它后面的第 10–12 步——位点没存住这件事，**完全不妨碍**消息被投递、被消费、在消费者侧产生真实的业务效果。第 8 步的 ack 和第 9 步的位点持久化之间不存在任何原子性，所以"发一次且只发一次"在这条链路上物理不可能；能做的只有把去重责任推到最右边那个 `processed_ids` 上。
+
 ### CDC（Change Data Capture）的两种用法
 
 **1. Outbox 的 Relay**（推荐）：只捕获 outbox 表，事件是**有意设计的领域事件（domain event）**。
@@ -195,6 +234,25 @@ COMMIT;   -- 原子：要么都写，要么都不写
 - 必须有**告警**（DLQ 深度 > 0 就该有人看）
 - 必须有**重放工具**（修好 bug 后把 DLQ 消息放回主队列）
 - DLQ 消息要保留原始上下文（原 topic、offset、失败原因、重试次数、trace_id）
+
+**把上面那条线性的"重试 → DLQ"展开成状态机，你会发现它其实有环、而且有一条谁都不画的边：**
+
+```mermaid
+stateDiagram-v2
+    [*] --> Queued
+    Queued --> InFlight: consumer polls and lease starts
+    InFlight --> Acked: handler succeeds
+    Acked --> [*]
+    InFlight --> RetryBackoff: transient error such as 503 or lock conflict
+    RetryBackoff --> InFlight: backoff expires and attempts plus 1
+    InFlight --> DeadLetter: permanent error such as schema or business reject
+    RetryBackoff --> DeadLetter: attempts exceed max
+    DeadLetter --> Queued: replayed after the bug is fixed
+    DeadLetter --> [*]: discarded after human review
+    InFlight --> Queued: visibility timeout no heartbeat renewal DUPLICATE DELIVERY
+```
+
+> 📖 **读图要点**：两条边最值得盯。一是 `DeadLetter --> Queued`——DLQ 是个**可回到起点的中转站**，没有这条边的系统等于把消息扔进黑洞。二是 `InFlight --> Queued` 那条可见性超时边：消费者可能**正在成功处理**，只是慢过了租约，消息已被重新投递；这条边和"永久错误"完全无关，却是线上重复消费最常见的真实来源，也是为什么慢处理必须**续约心跳**而不是简单调大超时。
 
 ### 延迟队列 / 重试队列的实现
 

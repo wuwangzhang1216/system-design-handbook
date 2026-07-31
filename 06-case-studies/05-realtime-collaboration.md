@@ -334,6 +334,32 @@ State vector 的大小 = 曾经编辑过该文档的客户端数 × ~16 B。一�
 
 **"CRDT 保证收敛"和"CRDT 保证结果可用"是两件事。** 收敛只保证所有人看到同一份乱码。超过阈值就要把控制权还给人 —— 这是把算法保证翻译成产品保证的关键一步。
 
+**上表按离线时长分了四档，但客户端实际是个状态机：它不知道自己会离线多久，只能在缓冲的过程中撞到上限时改变行为。把这些态和它们之间走得通、走不通的边画出来，上表的四档就落到了具体的转移上：**
+
+```mermaid
+stateDiagram-v2
+    [*] --> Disconnected
+    Disconnected --> Connecting: user opens the doc
+    Connecting --> Disconnected: auth rejected or handshake timeout
+    Connecting --> Synced: SyncStep2 applied both ways
+    Synced --> EditingLocal: local op applied optimistically
+    EditingLocal --> Synced: server acks all pending ops
+    Synced --> OfflineBuffering: link lost
+    EditingLocal --> OfflineBuffering: link lost with unacked ops
+    OfflineBuffering --> OfflineBuffering: append op to the IndexedDB buffer
+    OfflineBuffering --> SuggestionMode: buffer cap hit or offline beyond 24h
+    OfflineBuffering --> Reconnecting: link is back
+    Reconnecting --> OfflineBuffering: handshake failed so keep buffering
+    Reconnecting --> Merging: state vectors exchanged
+    Merging --> Synced: converged and result is acceptable
+    Merging --> ConflictReview: divergence too large for silent merge
+    ConflictReview --> Synced: human accepts the merged document
+    SuggestionMode --> Synced: suggestions reviewed then applied or dropped
+    Disconnected --> [*]
+```
+
+> 📖 **读图要点**：只有 `Merging` 有一条通向人的出边（`ConflictReview`）—— 自动路径上人最多被打扰一次，这是设计的目标而不是巧合。同样关键的是 `OfflineBuffering` 那条指向 `SuggestionMode` 的边：缓冲**有上限**，撞到上限时切换的是**产品语义**（编辑降级为 suggestion）而不是继续攒或者丢。还有一条**不存在的边**值得盯一眼：`EditingLocal` 没有任何路径直达 `ConflictReview` —— 本地编辑在被合并之前永远不产生冲突，冲突只诞生在 `Merging` 这一个点上。
+
 ### 4.6 权限与实时鉴权变更
 
 **三个必须分开的时点：**

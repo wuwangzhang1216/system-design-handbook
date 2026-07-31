@@ -372,6 +372,41 @@ user_token ──> agent ──> MCP ──> API    user_token ──> agent
 
 `act`（actor）声明是 [RFC 8693](https://www.rfc-editor.org/rfc/rfc8693.html) 定义的**委派链（delegation chain）**表示法 —— 下游服务据此在审计日志里同时记录"代表谁"和"谁在执行"。这一条几乎是所有 Agent 合规要求的地基。
 
+上面的 ASCII 图画的是**令牌的结构**；下面这张图画的是**时间上的先后**——哪一步之前用户令牌还在 App 手里、从哪一步起 Agent 上下文里只剩下那个 5 分钟窄 scope 的令牌，以及下游是在哪一刻做的受众与 scope 校验。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as User
+    participant App as App
+    participant IdP as IdP
+    participant AR as AgentRuntime
+    participant API as DownstreamAPI
+
+    U->>App: OIDC login via browser redirect
+    App->>IdP: authorization_code + PKCE S256
+    IdP-->>App: user_token<br/>aud=app scope=full exp=1h
+    Note over U,App: The user token is held by App only. It is never placed into the agent context.
+
+    App->>IdP: POST /token grant_type=token-exchange<br/>subject_token=user_token actor_token=agent_id<br/>resource=api.crm scope=contacts.read
+    IdP->>IdP: verify user consent AND agent grant ceiling
+    IdP-->>App: agent_token<br/>sub=user_bob act=agent_a7<br/>aud=api.crm scope=contacts.read exp=300s
+
+    App->>AR: start task carrying agent_token only
+    AR->>API: GET /contacts with Authorization=agent_token
+    API->>API: check aud==self AND scope AND exp
+    API-->>AR: 200 contacts
+    Note over AR,API: Had user_token been passed through here the audit log would name user_bob as the only actor and a hijacked agent would hold full scope for one hour.
+
+    AR->>API: POST /contacts which is outside scope
+    API-->>AR: 403 WWW-Authenticate insufficient_scope
+    AR-->>App: report insufficient scope
+    App->>IdP: new exchange scope=contacts.write exp=300s
+    Note over App,IdP: Step up is performed by App against IdP. The agent can never widen its own scope.
+```
+
+> 📖 **读图要点**：注意第 7–8 步——`agent_token` 是**唯一**越过 App → AgentRuntime 边界、并被拿去调下游的凭证，`user_token` 那条生命线在第 3 步之后就再没离开过 App；这正是"直接把用户全权令牌塞进 Agent 上下文"错在哪里。还要注意最后的 403 是**回到 App 再去 IdP 换新令牌**，而不是 Agent 自己拿着旧令牌重试——提权的发起方永远不是 Agent。
+
 **跨应用委派**：企业场景下的新路径是 **ID-JAG / [Cross-App Access (XAA)](https://oauth.net/cross-app-access/)** —— 应用把 OIDC ID token 在企业 IdP 处按 RFC 8693 换成短生命周期的 JWT Authorization Grant，再换成目标资源应用的 access token，**无需每次用户交互同意**。ID-JAG 已被 IETF OAuth WG 采纳为工作组文档，Okta 以 XAA 品牌落地（有公开 sandbox）。它正好补上 MCP 规范"禁止透传但没规定怎么取上游 token"的空白。
 ⚠️ 目前主要由单一厂商推动，**跨 IdP 互操作性尚未被广泛验证**，写进架构前先做 POC。
 
