@@ -2,7 +2,7 @@
 
 > 概念你已经懂了。这张表解决的是另一件事：**英文面试时，那个词能不能在半秒内出口**。
 > 三类词会让你当场卡住 —— **中文直译会错的**（限流不是 limit current，链路不是 link，雪崩不是 avalanche）、**有固定行话必须整块背的**（cache stampede / fencing token / blast radius / lethal trifecta）、**发音或重音错到对方听不懂的**（idempotent、quorum、canary、choreography）。
-> 全表 445 条，14 组主题，每条给一句**面试里真会说出口的整句**，不是词典释义。
+> 全表 545 条，15 组主题，每条给一句**面试里真会说出口的整句**，不是词典释义。
 
 ---
 
@@ -222,7 +222,7 @@
 | 窗口聚合 | windowed aggregation | | "Windowed aggregation emits a preliminary result at the watermark." |
 | 事务性入队 | transactional enqueue | | "Transactional enqueue solves the dual-write problem for free." |
 | 数据库即队列 | database as a queue | | "Use the database as a queue with SKIP LOCKED — it holds up to a few thousand TPS." |
-| 削峰 | smooth traffic spikes / buffer the burst ⚠ | ⚠ 见第 14 组，绝不要直译 | "If you're only smoothing a 2x spike, just add machines instead." |
+| 削峰 | smooth traffic spikes / buffer the burst ⚠ | ⚠ 见第 15 组，绝不要直译 | "If you're only smoothing a 2x spike, just add machines instead." |
 | 饥饿 | starvation ⚠ | ⚠ 不是 hunger | "Interactive tasks must not starve behind batch — separate queues or weighted round-robin." |
 | 公平队列 | fair queuing | | "Round-robin is wrong when request cost varies — you want deficit-based fair queuing." |
 | 两将军问题 | Two Generals Problem | 首字母大写 | "End-to-end exactly-once delivery is impossible — that's the Two Generals Problem." |
@@ -303,6 +303,26 @@
 | 无协调 | coordination-free ◆ | | "ULIDs are coordination-free and still roughly sortable." |
 | 租约配额 | leased quota / quota pre-allocation | | "Each instance leases a slice of the global quota and decrements locally." |
 | 单点故障 | single point of failure (SPOF) | 读 "spoff" 或字母 | "DNS is the most underrated single point of failure." |
+
+**复制模式**（[`01/06`](../01-building-blocks/06-replication.md)）：中文一个"复制"对应英文一整套区分度很高的词，说错等于把方案讲成另一个方案。
+
+| 中文 | English | 常见误译 / 注意 | 面试例句 |
+|---|---|---|---|
+| 同步 / 异步 / 半同步复制 | synchronous / asynchronous / semi-synchronous replication | ⚠ 半同步是 semi-synchronous，不说 half-sync | "Semi-synchronous replication silently falls back to async after the timeout — that's the failure everyone forgets." |
+| 恢复点目标 / 恢复时间目标 | recovery point objective (RPO) / recovery time objective (RTO) | 读字母 | "Async replication means your RPO is whatever the replication lag happened to be at the moment of failure." |
+| 复制槽 | replication slot | | "A replication slot pins WAL on the primary, so one dead replica can fill the primary's disk." |
+| 物理复制 / 逻辑复制 | physical / logical replication | ⚠ 不说 byte-level / row-level replication | "Logical replication is what lets you replicate across major versions during an upgrade." |
+| 级联复制 | cascading replication | | "Cascading replication keeps the primary sending one stream instead of ten." |
+| 单调读 | monotonic reads ◆ | ⚠ 复数 s 不能丢；不是 monotonous | "Pinning a user to one replica is the cheapest way to get monotonic reads." |
+| 一致前缀读 | consistent prefix reads ◆ | | "Cross-shard causality breaks consistent prefix reads — you see the reply before the question." |
+| 多主复制 | multi-leader replication ⚠ | ⚠ multi-master 已弃用，别用 | "Multi-leader only works when you can design the conflict domain down to the empty set." |
+| 无主复制 | leaderless replication | Dynamo 那一系 | "Leaderless replication trades a coordinator for read repair plus anti-entropy." |
+| 读修复 | read repair | | "Read repair only fixes the keys someone actually reads — cold keys need anti-entropy." |
+| 反熵 | anti-entropy ◆ | 连字符不能丢 | "Anti-entropy uses Merkle trees so you only ship the ranges that actually differ." |
+| 宽松多数派 | sloppy quorum ◆ | ⚠ 不是 loose quorum | "Sloppy quorum keeps you writable during a partition, but it drops the overlap guarantee." |
+| 暗示移交 | hinted handoff ◆ | | "Hinted handoff hands the write back once the real owner comes home." |
+| 最后写入者胜 | last-write-wins (LWW) ⚠ | ⚠ 它不是冲突解决，是有名字的静默丢数据 | "Last-write-wins isn't conflict resolution — it's silent data loss with a policy name on it." |
+| 脑裂防护 | split-brain protection / fencing | | "Automatic failover without fencing is how you get two primaries and a three-day reconciliation." |
 
 ---
 
@@ -435,7 +455,7 @@
 
 | 中文 | English | 常见误译 / 注意 | 面试例句 |
 |---|---|---|---|
-| 分片 | sharding ⚠ | ⚠ 见第 14 组。名词 shard，动作 shard / re-shard | "Sharding is a quarter of work and a one-way door." |
+| 分片 | sharding ⚠ | ⚠ 见第 15 组。名词 shard，动作 shard / re-shard | "Sharding is a quarter of work and a one-way door." |
 | 分片键 | shard key / partition key | | "The shard key is the one-way door in this design, so I'll spend extra time on it." |
 | 逻辑分片 | logical shard | | "Fix 1024 logical shards up front; only the physical database count changes." |
 | 再平衡 | rebalancing | | "Rebalancing moves whole logical shards, one at a time." |
@@ -562,11 +582,129 @@
 
 ---
 
-## 14. 最容易说错的 30 个
+## 14. ML 系统、特征与实验
 
-**这一节是本文件的核心。**上面 13 组是"你不知道的词"，这一节是"**你以为你知道、但一说出口就露馅的词**"。
+这一组对应 [`08-ml-systems/`](../08-ml-systems/) 与 [`06/18`–`06/21`](../06-case-studies/) 四道设计题。
+**三个词组内自带歧义，说之前必须先定义**：`recall` 在排序里是漏斗第一级（阶段），在指标里是召回率；
+`reranking` 在 RAG 里指检索后重排文档，在排序系统里指漏斗第四级；`calibration` 在质量语境里是概率校准，在量化语境里是定标步骤。
 
-### 14.1 名词类（15 个）
+### 14.1 模型生命周期与服务
+
+| 中文 | English | 常见误译 / 注意 | 面试例句 |
+|---|---|---|---|
+| 模型注册表 | model registry | | "The registry stores pointers and metadata; the weight bytes live in object storage." |
+| 血缘 | lineage ♪ | LIN-ee-ij | "Without lineage back to the dataset snapshot, that AUC number is unverifiable." |
+| 检查点 | checkpoint | ⚠ 不只是权重，含优化器状态 | "Checkpoints are sized by write bandwidth but restored by read bandwidth — those differ by the replica count." |
+| 优化器状态 | optimizer state | | "Adam's optimizer state is four times the parameter bytes in FP32." |
+| 分片检查点 | sharded checkpoint | | "Each rank writes only its own shard, so restore has to reassemble at the current parallelism." |
+| 张量安全格式 | safetensors ◆ | 一个词，全小写 | "We only accept safetensors — loading a pickle is executing a stranger's code on a GPU node." |
+| 算子集版本 | opset version | ONNX 专用 | "The export succeeded but the runtime doesn't support that opset version." |
+| 别名 / 指针 | alias / pointer ◆ | ⚠ MLflow 的 Model Stages 已弃用，现在说 alias | "Serving code references `@champion`, never a version number — rollback is a pointer flip." |
+| 提升 | promotion | | "Promotion moves the same immutable artifact from staging to prod; not a single byte changes." |
+| 模型版本四元组 | model version quadruple ◆ | 本书用法：weights + feature pipeline + dependency lock + config | "Rolling back only the weights gives you a combination that was never tested." |
+| 冷启动 | cold start | | "Ten of the eleven minutes are image pull and unpack — nothing to do with your model." |
+| 预热 | warmup | ⚠ 一个词，不是 warm-up run | "Warmup has to be part of the readiness probe, not a line in the startup script." |
+| 预热池 | warm pool ◆ | | "The warm pool absorbs the scale-up window; autoscaling is an order of magnitude too slow for the spike." |
+| 就绪探针 | readiness probe | | "It passes the liveness probe and fails every request — the readiness probe is the one that matters." |
+| 双缓冲切换 | double buffering | | "Load and warm the new model beside the old one, then flip the pointer and drain." |
+| 排空 | drain | | "Drain means stop sending new requests and let the in-flight ones finish." |
+| 显存超售 | GPU memory overcommit | ⚠ 显存说 GPU memory / VRAM，不说 video memory | "GPU memory can't be overcommitted — the only thing you can oversubscribe is time." |
+| 抖动 | thrashing ♪ | THRASH-ing | "Past that model count the pool starts thrashing and loading eats most of the GPU time." |
+
+### 14.2 推理与性能
+
+| 中文 | English | 常见误译 / 注意 | 面试例句 |
+|---|---|---|---|
+| 在线 / 批量推理 | online / batch inference | ⚠ 不说 real-time inference（含糊） | "Most 'must be online' requirements don't survive one follow-up question." |
+| 动态批处理 | dynamic batching ◆ | ⚠ 与 LLM 的 continuous batching 不是一回事 | "Dynamic batching is request-level; continuous batching is iteration-level. Ranking models can't do the latter." |
+| 凑批窗口 | max queue delay ◆ | | "Max queue delay is a throughput knob below saturation and a pure latency tax above it." |
+| 分桶 | bucketing | | "We bucket by input length so short requests don't pay for the longest one in the batch." |
+| 补齐浪费 | padding waste | | "Half the FLOPs in that batch were padding." |
+| 及早丢弃 | early drop / deadline-aware dropping ◆ | | "On dequeue we check the remaining budget and drop instead of burning a forward pass." |
+| Roofline 模型 | roofline model ◆ | | "Run the roofline first — memory-bound and launch-bound models need opposite fixes." |
+| 访存受限 / 算力受限 | memory-bound / compute-bound ◆ | | "Small-batch ranking models are launch-bound, so quantization buys you almost nothing." |
+| 内核启动开销 | kernel launch overhead ◆ | | "Two hundred kernels at five microseconds each is a millisecond before any real work." |
+| 算子融合 | operator fusion | | "Operator fusion keeps the intermediate in registers instead of round-tripping through HBM." |
+| CUDA Graph | CUDA graph ◆ | 产品名，两个词 | "CUDA graph capture takes 30 to 60 seconds, so it has to happen during warmup." |
+| 训练后量化 / 量化感知训练 | post-training quantization (PTQ) / quantization-aware training (QAT) | 读字母 | "We start with PTQ; QAT only if the accuracy drop is over two points." |
+| 量化校准 | calibration (quantization) ⚠ | ⚠ 与"概率校准"同名异义，先说清是哪个 | "Calibration here means collecting per-tensor ranges, not probability calibration." |
+| MFU | model FLOPs utilization (MFU) ◆ | ⚠ 与 `nvidia-smi` 的 utilization 完全不同 | "GPU utilization only tells you the card isn't idle; MFU tells you where the FLOPs went." |
+
+### 14.3 特征与数据
+
+| 中文 | English | 常见误译 / 注意 | 面试例句 |
+|---|---|---|---|
+| 训练/服务偏斜 | training-serving skew ◆⚠ | ⚠ 全书统一用连字符形式，不写 training/serving 或 train-serve | "Training-serving skew doesn't throw — the offline metric goes up and the online one goes down." |
+| 特征穿越 / 数据泄漏 | data leakage ◆ | ⚠ 不是 feature crossing（那是特征交叉） | "Leakage is the one bug that makes your offline metric better, which is why nothing catches it." |
+| 时间点正确性 | point-in-time correctness ◆ | | "Every training row may only see feature values that existed before its label timestamp." |
+| as-of join | as-of join ◆ | 不翻译 | "The as-of join is where point-in-time correctness actually gets enforced." |
+| 实体 | entity | 特征平台语境 | "The entity decides what key the online store is read by." |
+| 特征视图 | feature view / feature group | | "Latency is decided by the number of feature views, not the number of features." |
+| 在线存储 / 离线存储 | online store / offline store | | "The online store holds current values; the offline store holds every timestamped version." |
+| 物化 | materialization | ⚠ 与 materialized view 同根，别混 | "Materialization lag is exactly how stale the online value is." |
+| 特征新鲜度 | feature freshness | | "We publish a freshness tier per feature and alert on value age, not on job success." |
+| 特征日志 | feature logging ◆ | | "Feature logging is the only fix that drives skew to zero instead of just detecting it." |
+| 回填 | backfill | | "The backfill took forty hours because one hot merchant key held a single task for eleven of them." |
+| 请求时变换 | on-demand transformation | | "Distance-to-driver has to be an on-demand transformation — it doesn't exist until the request does." |
+| 特征时间旅行 | feature time travel ◆ | 回滚场景专用 | "The old weights met features that didn't exist when it trained — that's feature time travel." |
+
+### 14.4 质量、实验与漂移
+
+| 中文 | English | 常见误译 / 注意 | 面试例句 |
+|---|---|---|---|
+| 离线指标 | offline metric | | "Offline metrics are for pruning; nothing ships on them alone." |
+| AUC / GAUC | AUC / grouped AUC (GAUC) ◆ | 读 "A-U-C" / "G-A-U-C" | "Global AUC can rise because active and dormant users got more separable — GAUC is the one that tracks online." |
+| 时间序划分 | temporal split / out-of-time split ◆ | ⚠ 不能 random split | "Random splitting time-series logs lets the model see its own future." |
+| 分流单元 | randomization unit ◆ | ⚠ 不是 bucket unit | "If a logged-out user gets a new device ID, your randomization unit isn't stable." |
+| 曝光 | exposure | ⚠ 实验里的 exposure ≠ 排序里的 impression | "Exposure is the only admission record analysis can trust." |
+| 分层与正交 | layer / orthogonality ♪ | or-thog-uh-NAL-i-tee | "The salt has to include the layer ID, or the layers stop being orthogonal." |
+| 互斥组 | mutual exclusion group | | "Two experiments changing the same rendered output belong in the same layer, not in different ones." |
+| 分流比例失配 | sample ratio mismatch (SRM) ◆ | 读 "S-R-M" | "SRM has to be a hard gate, not a yellow banner — broken randomization gives you an arbitrary sign." |
+| 最小可检测效应 | minimum detectable effect (MDE) ◆ | 读字母 | "Tightening the MDE five times costs twenty-five times the samples — it's a square relationship." |
+| 统计功效 | statistical power | | "Eighty percent power is the default, and most teams never check they have it." |
+| 偷看 | peeking ◆ | ⚠ 不是 sneak look | "Peeking four mornings in a row turns a five percent false positive rate into twenty." |
+| 方差缩减 / CUPED | variance reduction / CUPED ◆ | 读 "CUE-ped" | "Don't put CUPED's gain in the capacity model — measure the effective traffic multiplier per metric." |
+| 护栏指标 | guardrail metric ◆ | | "A guardrail metric never has to improve; it just isn't allowed to get worse." |
+| 触发分析 | triggered analysis ◆ | | "Only three percent of sessions reach that page, so untriggered analysis dilutes the effect thirty-three times." |
+| 交错实验 | interleaving ◆ | | "Interleaving is 50 to 100 times more sensitive, but it agrees with A/B on direction only about 82 percent of the time." |
+| 影子部署 | shadow deployment / traffic mirroring ◆ | | "Shadow deployment proves it doesn't crash — it can tell you nothing about business metrics." |
+| 位置偏差 | position bias ◆ | | "Without correcting position bias you teach the model that 'was ranked first' means 'should be first'." |
+| 新奇效应 / 首因效应 | novelty effect / primacy effect ♪ | PRY-muh-see | "The novelty effect decays in two weeks; only a long-term holdout can see through it." |
+| 数据漂移 | data drift / covariate shift ◆ | ⚠ 与概念漂移必须分开说 | "Data drift means P of X moved; concept drift means the rule itself moved." |
+| 概念漂移 | concept drift ◆ | | "Nothing that ignores Y can detect concept drift — that's PSI's structural blind spot." |
+| 标签漂移 | label shift / prior shift | | "Label shift breaks your threshold and your calibration before it breaks your ranking." |
+| 静默降级 | silent degradation ◆ | ⚠ 不说 silent failure（含糊） | "Silent degradation is the default failure mode: 200 OK, flat p99, quietly wrong." |
+| 概率校准 | calibration (probability) ◆ | ⚠ 与量化的 calibration 同名异义 | "If the model says seventy percent, seventy percent of those had better convert." |
+| 期望校准误差 | expected calibration error (ECE) | 读字母 | "We alert on ECE doubling, not on the raw score distribution moving." |
+| 对抗验证 | adversarial validation ◆ | | "Adversarial validation catches joint-distribution shift when every marginal looks fine." |
+| 反馈回路 | feedback loop ◆ | 恶性的那种叫 degenerate feedback loop | "The model decides what users see, which decides the next training set — that's the loop." |
+| 曝光偏差 | exposure bias ◆ | | "Exposure bias looks like a win on CTR and shows up as long-tail collapse a quarter later." |
+| 探索流量 | exploration traffic ◆ | | "Without a standing slice of exploration traffic you cannot do unbiased offline evaluation at all." |
+| 级联模型 | model cascade ◆ | ⚠ 与 LLM 的 cascade routing 不是一回事 | "Changing the retrieval stage changes the input distribution of every stage below it." |
+| 黄金数据集 | golden dataset ◆ | | "The golden dataset is frozen and human-labeled; every release diffs against it row by row." |
+| 标签延迟 | label delay / label lag ◆ | | "Credit default labels arrive 6 to 24 months late, so proxy metrics are all you have." |
+| 模型金丝雀 | model canary ◆ | ⚠ 判据与服务金丝雀完全不同 | "Detecting a one percent CTR change needs about 2.98 million users per arm — the canary window can't provide that." |
+
+### 14.5 推荐与排序漏斗
+
+| 中文 | English | 常见误译 / 注意 | 面试例句 |
+|---|---|---|---|
+| 召回（阶段） | candidate retrieval ◆⚠ | ⚠ **不要说 recall** —— 那是指标"召回率"，同一句里会撞车 | "Candidate retrieval takes ten million items down to a few thousand for basically no compute." |
+| 粗排 | pre-ranking ◆ | | "Pre-ranking is the cheap model that can afford to score a few thousand candidates." |
+| 精排 | ranking ◆ | | "Ranking is where the hundreds of crossed features live, and it only gets a thousand candidates." |
+| 重排（漏斗第四级） | re-ranking ⚠ | ⚠ 与第 13 组 RAG 的 reranking 同名异义，先说清哪个 | "Re-ranking applies diversity and business rules on top of the ranking scores." |
+| 双塔模型 | two-tower model ◆ | | "The item tower runs offline, which is the only reason vector retrieval over ten million items is possible." |
+| 特征取数 | feature fetch | | "About half the latency budget goes to feature fetch, not to the model." |
+| 曝光日志 | impression log ◆ | ⚠ 与实验里的 exposure 分开说 | "The impression log is the only source of training samples, so any fallback pollutes the next model." |
+| 兜底列表 | fallback list ◆ | | "The fallback list is precomputed offline — if it needs the online path, it isn't a fallback." |
+
+---
+
+## 15. 最容易说错的 30 个
+
+**这一节是本文件的核心。**上面 14 组是"你不知道的词"，这一节是"**你以为你知道、但一说出口就露馅的词**"。
+
+### 15.1 名词类（15 个）
 
 | 中文 | ❌ 中式英文 | ✅ 地道说法 | 面试例句 |
 |---|---|---|---|

@@ -49,6 +49,7 @@
        │
        ├──▶ 01 构件层   01/02 缓存 ←⑥⑪   ｜ 01/01 存储 ←⑦⑪     ｜ 01/03 消息 ←⑧⑪+幂等键
        │                01/04 网络 ←①②⑨  ｜ 01/05 共识 ←⑤⑥⑦+CAP
+       │                01/06 复制 ←⑤⑥+01/05（fencing token）→ RPO/RTO · 会话保证 · Quorum
        │
        ├──▶ 05 可靠性   05/01 SLO ←③⑩    ｜ 05/03 韧性 ←②⑩+背压 ｜ 05/02 可观测 ←③+尾延迟
        │                05/05 扩展 ←④⑤   ｜ 05/04 事故 ←05/01+05/03
@@ -58,14 +59,38 @@
        │
        ├──▶ 03 SaaS 平台 ←02/03（租户模型）+ 01/02 + 01/03 + 05/01
        │
-       └──▶ 04 AI 专章（可选，仅 AI 岗）←01/02 + 02/03 + 幂等 + 背压
+       ├──▶ 04 AI 专章（可选，仅 LLM/Agent 岗）←01/02 + 02/03 + 幂等 + 背压
+       │
+       └──▶ 08 ML 专章（可选，仅 ML Systems 岗）
+                │
+                └─ 08/01 ML 与普通系统的差别 ←⑥⑩⑪ + 05/01（SLO）   ← 本章唯一没有 ML 前置的一篇
+                        │
+                        ├──▶ 08/02 生命周期 ←01/01 §7（对象存储）+ 01/06（产物分发要强一致）
+                        │        └──▶ 08/03 加载与预热 ←08/02（版本四元组）+ 05/05（扩容时延）
+                        │                 └──▶ 08/04 在线推理 ←②③⑧ + 背压 + 05/03 §6（负载卸载）
+                        │                          └──▶ 08/05 推理优化 ←08/04（批处理是前提）
+                        │
+                        ├──▶ 08/06 特征平台 ←01/02+01/03+01/06 §10（复制方向相反）
+                        │        └──▶ 08/07 质量与实验 ←08/06（偏斜会伪装成指标变好）+ 00/02（样本量是容量题）
+                        │                 ├──▶ 08/08 漂移与监控 ←05/02+05/01 §6（多窗口告警）
+                        │                 └──▶ 08/09 模型部署 ←03/05 §3（渐进式交付）+ 08/07 §4（样本量）
+                        │
+                        └─ 06/18 · 19 · 20 · 21 ←── 08 章全部 + 01 + 05
 
-  06 案例 17 篇 ←── 以上全部（每篇开头的「读这道题之前」列出了它自己的那一份）
-  07 面试 ←── 无前置，任何时候都可以查；07/04 术语表是全书 445 条的索引
+  06 案例 21 篇 ←── 以上全部（每篇开头的「读这道题之前」列出了它自己的那一份）
+  07 面试 ←── 无前置，任何时候都可以查；07/04 术语表是全书 545 条的索引
 ```
 
-> 📖 读图要点：**05 可靠性排在 02 架构模式之前**不是笔误 —— 05/01 和 05/03 只依赖 00 章，
+> 📖 读图要点一：**05 可靠性排在 02 架构模式之前**不是笔误 —— 05/01 和 05/03 只依赖 00 章，
 > 而 02/02 依赖 01/03。先读 05 的人不会遇到未定义的词，反过来会。
+>
+> 📖 读图要点二：**08 章内部有两条独立的链，不是一条直线。**
+> 左链（02→03→04→05）是"模型怎么被服务出去"，右链（06→07→08/09）是"模型好不好、还好不好"。
+> 两条链只在 08/01 汇合，所以时间紧的人可以只走一条 —— 面推理引擎走左链，面排序/推荐走右链。
+> **但 08/06（训练服务偏斜）是唯一两条链都依赖的一篇**：它错了，左链的批处理调得再好也在给一个喂错输入的模型加速。
+>
+> 📖 读图要点三：**04 和 08 之间没有箭头。** 它们各自从 01 / 05 长出来，互不为前提 ——
+> 这就是为什么按 JD 选一章读是安全的，不存在"不读 04 就看不懂 08"。
 
 ## 3. 最短路径：零基础读者的读法
 
@@ -83,11 +108,12 @@
 | ⑬ | [00/02 容量估算](02-capacity-estimation.md) | 排队论（80% 利用率为什么危险）、$/请求 —— 让取舍能吵出数字 |
 | ⑭ | [00/03 取舍框架](03-tradeoff-framework.md) | 单向门 / ADR / 复杂度预算 —— 让判断能被辩护 |
 | ⑮ | [01/02 缓存](../01-building-blocks/02-caching.md) → [01/01 存储](../01-building-blocks/01-storage-engines.md) → [01/03 消息](../01-building-blocks/03-messaging-and-streams.md) | ⑪ 的三个优化各自展开成一篇；Outbox 是 02/02 的前提 |
-| ⑯ | [01/04 网络](../01-building-blocks/04-networking-and-edge.md) → [01/05 共识](../01-building-blocks/05-consensus-and-coordination.md) | ①⑨ 展开成边缘与长连接；⑤⑥ 展开成 Raft、租约、fencing token |
+| ⑯ | [01/04 网络](../01-building-blocks/04-networking-and-edge.md) → [01/05 共识](../01-building-blocks/05-consensus-and-coordination.md) → [01/06 复制](../01-building-blocks/06-replication.md) | ①⑨ 展开成边缘与长连接；⑤⑥ 展开成 Raft、租约、fencing token，再展开成复制模式与 quorum |
 | ⑰ | [05/01 SLO](../05-reliability/01-slo-and-error-budget.md) → [05/03 韧性](../05-reliability/03-resilience-patterns.md) → [05/02](../05-reliability/02-observability.md) → [05/05](../05-reliability/05-scaling-playbook.md) → [05/04](../05-reliability/04-incident-and-chaos.md) | ⑩ 展开成可量化的承诺；背压展开成超时/重试/熔断/降级 |
 | ⑱ | [02/01](../02-architecture-patterns/01-microservices-vs-modular-monolith.md) → [02/03](../02-architecture-patterns/03-multi-tenancy.md) → [02/02](../02-architecture-patterns/02-event-driven-and-cqrs.md) → [02/04](../02-architecture-patterns/04-api-design-and-versioning.md) → [02/05](../02-architecture-patterns/05-data-platform.md) | 从"组件"升到"判断"：边界、隔离、Saga、契约 |
 | ⑲ | [03 SaaS 平台](../03-saas-platform/) | 需要 02/03 的租户模型 + 01/03 的事件管道，所以排在这里 |
 | ⑳ | [06 案例](../06-case-studies/) → [07 面试](../07-interview/) | 案例只是上面所有概念的组合题；07 从头到尾都可以随时查 |
+| ㉑ | *（仅 ML Systems 岗）* [08 ML 专章](../08-ml-systems/) → [06/18–21](../06-case-studies/) | 前置是 ⑮⑯⑰ 全部（缓存、存储、消息、复制、SLO、韧性、可观测）。入口是 [08-ml-systems/README.md 考点映射表](../08-ml-systems/README.md)，它把 syllabus 逐项指到小节 |
 
 > ⚠️ **这是"不跳"的顺序，不是"备考"的顺序。** 备考要按重要性和时间预算排，那在 [START-HERE.md](../START-HERE.md) 的四周计划里
 > —— 它在段 A 之后立刻跳到 07/03 速查表和案例，把 ⑮–⑲ 打散成「哪一节这周用得上就读哪一节」，因为面试的收益不按依赖顺序分布。
@@ -132,8 +158,30 @@
 | 单向门 / 双向门 · 可逆性 | [00/03 §2](03-tradeoff-framework.md) | 06/08 §4.3（301 的例子） |
 | ADR · 演进式架构 · 复杂度预算 | [00/03 §4 §5 §6](03-tradeoff-framework.md) | 02/01 §4 §5 |
 | 投递语义 · Outbox · CDC | [01/03 §3 §4](../01-building-blocks/03-messaging-and-streams.md) | 02/02 §3（Saga 编排器）、02/05 |
+| 同步/异步/半同步复制 · RPO / RTO | [01/06 §1 §2](../01-building-blocks/06-replication.md) | 05/05 §4、05/01 §2 |
+| 读己之写的三种解法 · 单调读 · 一致前缀读 | [01/06 §4](../01-building-blocks/06-replication.md) | 02/02 §5（consistency token）、02/04 §5 |
+| 故障转移 · 脑裂防护 · 多主与冲突解法 | [01/06 §5 §7 §8](../01-building-blocks/06-replication.md) | 01/05 §8、06/05（协作编辑的 CRDT） |
+| Quorum `W+R>N` · 读修复 · 反熵 · hinted handoff | [01/06 §9](../01-building-blocks/06-replication.md) | 06/12（分布式缓存）、07/02 §Dynamo |
 | 租户隔离四级 · 噪音邻居 | [02/03 §1 §5](../02-architecture-patterns/03-multi-tenancy.md) | 03/01、03/04 |
 | SLI / SLO / 错误预算 / 燃尽率 | [05/01 §1 §5](../05-reliability/01-slo-and-error-budget.md) | 05/04 §3（严重级别）、03/05 §3 |
+| 冷启动 · 预热 · 预热池 | [04/01 §12](../04-ai-agent-systems/01-llm-serving-infra.md) | [08/03 §2 §3 §5](../08-ml-systems/03-model-loading-and-warmup.md)（九项分解、收敛判据、容量公式） |
+| 双缓冲切换 · 排空 · 显存超售 | [08/03 §6 §7](../08-ml-systems/03-model-loading-and-warmup.md) | 04/01 §11（GPU 多租户） |
+| ML 双指标 SLO（延迟 + 质量） | [08/01 §6](../08-ml-systems/01-ml-system-overview.md) | 05/01 §9（AI 系统的 SLI）、[08/09 §2](../08-ml-systems/09-model-deployment.md)（金丝雀看哪个） |
+| 模型版本四元组 · 不可变提升 | [08/02 §3 §8](../08-ml-systems/02-model-lifecycle.md) | [08/09 §4](../08-ml-systems/09-model-deployment.md)（只回滚权重会发生什么） |
+| 训练/服务偏斜 · 特征穿越 · 时点正确性 | [08/01 术语表 + §4](../08-ml-systems/01-ml-system-overview.md) | [08/06 §2 §3](../08-ml-systems/06-feature-and-data.md)（五种成因、as-of join）、06/19 §4.3 §4.6 |
+| 数据漂移 vs 概念漂移 · 静默降级 | [08/01 术语表 + §4](../08-ml-systems/01-ml-system-overview.md) | [08/08 §1 §2 §3](../08-ml-systems/08-drift-and-monitoring.md)（PSI 的两个错误用法） |
+| 反馈回路 · 级联模型误差累积 | [08/01 §4](../08-ml-systems/01-ml-system-overview.md) | [08/08 §9](../08-ml-systems/08-drift-and-monitoring.md)、[08/09 §7](../08-ml-systems/09-model-deployment.md)（改一级会动下游输入分布） |
+| 特征日志 · 影子部署 · 黄金数据集 | [08/01 术语表 + §5](../08-ml-systems/01-ml-system-overview.md) | [08/06 §7](../08-ml-systems/06-feature-and-data.md)、[08/07 §9](../08-ml-systems/07-model-quality-and-experimentation.md)（影子能证明什么、不能证明什么） |
+| 动态批处理 · 两个旋钮 · 延迟-吞吐曲线 | [08/04 §4 §5](../08-ml-systems/04-online-inference.md) | 04/01 §3（LLM 的 continuous batching 差在哪，对比见 08/04 §8） |
+| 准入控制 · 队列纪律（FIFO vs LIFO） | [08/04 §9 §10](../08-ml-systems/04-online-inference.md) | 00/01 §6 背压、05/03 §6 负载卸载 —— **三个名字同一件事** |
+| Roofline · GPU 利用率的谎言 | [08/05 §2 §9](../08-ml-systems/05-inference-optimization.md) | 08/04 §13（调优顺序）、06/18 §2.3 |
+| 模型金丝雀 · 双层门禁 | [08/09 §1 §3](../08-ml-systems/09-model-deployment.md) | 03/05 §3（服务的渐进式交付，对比着读） |
+| MDE · 样本量的平方关系 · SRM | [08/07 §4](../08-ml-systems/07-model-quality-and-experimentation.md) | 06/21 §2.3 §4.5（实验周期是容量约束） |
+| 模型注册表 · 血缘 · checkpoint · safetensors | [08/02 §2 §3 §4 §6](../08-ml-systems/02-model-lifecycle.md) | [08/03 §2](../08-ml-systems/03-model-loading-and-warmup.md)（加载在冷启动里占多少）、06/18 §4.1 |
+| feature view · 在线/离线存储 · 物化 · 特征新鲜度 | [08/06 术语表 + §4 §6](../08-ml-systems/06-feature-and-data.md) | 06/19 §4.2 §4.4（延迟由 view 个数决定）、06/20 §4.5 |
+| 曝光偏差 · 探索流量 · 退化反馈回路 | [08/08 术语表 + §9](../08-ml-systems/08-drift-and-monitoring.md) | 06/20 §4.8（探索流量为什么必须常驻）、[08/09 §4](../08-ml-systems/09-model-deployment.md)（回滚窗口的曝光日志不可逆） |
+| 偷看 · CUPED · 护栏指标 · 交错实验 | [08/07 §5 §7 §8](../08-ml-systems/07-model-quality-and-experimentation.md) | 06/21 §4.4（序贯检验与多重校正）、06/20 §4.1 |
+| 分层正交 · 互斥组 · 触发分析 | [06/21 §4.1 §4.3](../06-case-studies/21-ab-experiment-platform.md) | 03/05 §2（feature flag 的求值一致性） |
 
-**英文怎么说** → [07/04 术语表](../07-interview/04-glossary.md)（445 条，全书索引）。
+**英文怎么说** → [07/04 术语表](../07-interview/04-glossary.md)（545 条，全书索引；第 14 组是 ML 系统、特征与实验）。
 这一页管"它依赖谁"，07/04 管"它英文叫什么"，00-concepts §12 管"一句话它是什么"。

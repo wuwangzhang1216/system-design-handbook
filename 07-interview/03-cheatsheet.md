@@ -429,5 +429,5 @@ C(N) = N / (1 + α(N−1) + βN(N−1))
 
 ---
 
-**下一篇** → [04-glossary.md](04-glossary.md)：445 条中英术语对照，把这一页的数字和概念换成英文说得出口。
+**下一篇** → [04-glossary.md](04-glossary.md)：545 条中英术语对照，把这一页的数字和概念换成英文说得出口。
 **重读框架** → [01-interview-framework.md](01-interview-framework.md)｜**自测题库** → [02-question-bank.md](02-question-bank.md)

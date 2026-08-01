@@ -571,4 +571,4 @@ v2 —— 本文：生命周期分层（按 last_access_at）+ 元数据按 buck
 
 ---
 
-**下一篇** → [../07-interview/01-interview-framework.md](../07-interview/01-interview-framework.md)：45 分钟的时间预算与评分信号。
+**下一篇** → [18-model-serving-platform.md](18-model-serving-platform.md)：把 ML 系统那一章合成一道完整的设计题。

@@ -431,4 +431,5 @@ Snowflake   : 时间 + 机器 ID + 序列 → 有序、64 位、需要分配机�
 
 ---
 
-**下一章** → [`02-architecture-patterns/`](../02-architecture-patterns/)
+**下一篇** → [06-replication.md](06-replication.md)：共识管的是"多台机器怎么就一件事达成不可撤销的一致"，
+而绝大多数系统每天真正在用的是它便宜得多的表亲 —— 复制。
