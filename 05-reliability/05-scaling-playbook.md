@@ -451,7 +451,11 @@ Postgres 默认 max_connections = 100，调到 500 就已经很吃力
 传统扩展是 CPU/IO 密集，LLM 服务是**显存（GPU memory） + 有状态缓存**密集。三点根本不同：
 
 **① GPU 显存是新的分片维度，KV cache 是新的"热数据"。**
-KV cache 容量常识约 **1 MB / token**（NDSS 2025 论文口径）；70B FP8 模型下 8k tokens 的 KV 约 **1.3 GB/请求**。这意味着**并发数直接被显存卡死**，不是被 CPU 卡死。扩容的第一问题是"我还能放下几个会话的 KV"。
+KV cache 的每 token 体积**由注意力结构决定，模型之间差 30 倍**：MHA ~2.5 MB、GQA ~320 KB、MQA ~40 KB、MLA ~70 KB（BF16 口径，FP8 减半）。以 Llama-3.1-70B（GQA）+ FP8 为例是 160 KB/token，8k tokens 的 KV 约 **1.3 GB/请求**。
+> ⚠️ 流传的"约 1 MB/token"是 **MHA 时代**（LLaMA-1 65B 那一代）的口径。套到今天的 GQA 模型上会把 KV 体积**高估 3.2×**（FP8 下 6.4×），也就是把一张卡能装下的会话数**低估同样的倍数**。
+> 注意 **Llama-2-70B 已经是 GQA**（论文明确 34B/70B 用 GQA），别拿它当 MHA 的例子。扩容前按 [`04/01 §2`](../04-ai-agent-systems/01-llm-serving-infra.md) 的公式自己算一遍。
+
+这意味着**并发数直接被显存卡死**，不是被 CPU 卡死。扩容的第一问题是"我还能放下几个会话的 KV"。
 
 **② 路由必须是缓存感知的（cache-aware），无状态轮询（round-robin）会毁掉性能。**
 对照实验（8 pod / 16×H100 / Qwen-32B / 150 租户 × 6k ctx，KV 需求占集群 73%）：P90 TTFT 精确路由 **0.542s** vs 近似 31.1s vs 随机 **92.6s** —— 约 **57× / 170×** 的差距；输出吞吐 8,730 / 6,944 / 4,428 tok/s。

@@ -125,12 +125,16 @@ KV 预算                    ≈  78 GB
 
 | 结构 | 代表 | 每 token KV（量级，BF16） | 相对 MHA |
 |---|---|---|---|
-| MHA | Llama-2-70B（64 KV heads） | ~2.5 MB | 1× |
+| MHA | **LLaMA-1 65B**（80 层，64 KV heads） | ~2.5 MB | 1× |
 | **GQA** | Llama-3.1-70B（8 KV heads） | ~320 KB | **1/8** |
 | MQA | 早期 PaLM（1 KV head） | ~40 KB | 1/64 |
 | **MLA**（低秩潜变量） | DeepSeek-V3/R1（671B） | **~70 KB** | 671B 的模型比 70B 的还省 |
 
 那条流传的"KV cache 约 1 MB/token"经验值（[PROMPTPEEK, NDSS 2025](https://www.ndss-symposium.org/wp-content/uploads/2025-1772-paper.pdf) 口径）反映的是 MHA 时代。**2026 年请自己按上面的公式算，模型之间能差 30 倍。**
+
+> ⚠️ **一个高频误记：Llama-2-70B 不是 MHA。** Llama 2 论文明确 34B 和 70B 用 **GQA**（`num_key_value_heads = 8`），
+> 所以它和 Llama-3.1-70B 一样是 ~320 KB/token，不是 2.5 MB。只有 Llama-2 的 7B / 13B 才是 MHA。
+> 面试里把 70B 说成 MHA，等于把自己的显存估算错 8 倍。
 
 ⚠️ **撞墙信号**：`vllm:num_preemptions_total` 持续 > 0，或 `gpu_cache_usage_perc` 长期贴 100%。这意味着调度器在抢占（preemption）并**重算**（recompute）已生成的请求——吞吐会阶跃式塌陷，而 GPU 利用率图上看起来还很"忙"。
 
