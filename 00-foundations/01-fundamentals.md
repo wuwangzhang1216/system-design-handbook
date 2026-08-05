@@ -5,6 +5,16 @@
 > 几个数量级的数字（用来算出可行域），以及几个失败与一致性模型（用来解释算出来的结果为什么长这样）。
 > 后面所有的取舍论证，最终都会回落到这里。
 
+这篇可以用三个问题串起来：
+
+```text
+1. 它最快能多快？  → RTT、数量级、fan-out、尾延迟
+2. 它必须多正确？  → CAP、PACELC、一致性、事务隔离、幂等
+3. 它坏了会怎样？  → 背压、失败模型、deadline、重试预算
+```
+
+后面每个公式都按同一种方式读：**它算出了什么、在什么前提下成立、能指导哪个设计决定**。公式本身不难，容易出错的是忘记它的前提。
+
 ---
 
 ## 读这一章之前
@@ -41,6 +51,7 @@
 | 术语 | English | 一句话定义 |
 |---|---|---|
 | 尾延迟放大 | tail latency amplification | 扇出到 N 个后端并等全部返回时，整体 p99 逼近单后端的更高分位 |
+| CAP | Consistency / Availability / Partition tolerance | 网络分区发生时，强一致与每个请求都成功响应不能同时保证 |
 | PACELC | PACELC | 网络断开、机器分成互相通不了的两拨时（Partition），你只能在"两拨都继续接客但数据可能不一致"和"停掉一拨保住一致"之间选一个；网络正常时（Else），你还要在"少等一个跨机房往返"和"读到的一定是最新值"之间选一个 |
 | 写偏斜 | write skew | 两个事务各自只看见自己开始那一刻的数据副本（快照隔离），于是各自读到的都是合法状态、各自的提交也都合法，合在一起却破坏了某条规则（例如"至少留一个人值班"被两个人同时请假绕过） |
 | 幂等键 | idempotency key | 客户端生成、服务端去重的请求标识，让重试不产生第二次副作用 |
@@ -63,12 +74,12 @@
 
 ```
 单程 = 12,000 km ÷ 200,000 km/s = 60 ms
-往返 RTT = 120 ms          ← 这是物理下限，任何厂商、任何优化都不可能突破
+往返 RTT = 120 ms          ← 按理想直线光纤估算出的传播下限
 ```
 
 真实海缆不走直线（要经日本或关岛登陆），再算上沿途几十跳路由器的转发与排队，实测 RTT 通常是理论值的 1.5–2 倍，**取 200 ms**。
 
-**第二步，握手。** 首次点击时，一个字节的业务数据都还没传，就已经欠下：
+**第二步，握手。** 假设使用 TCP + TLS 1.3，而且没有可复用连接，首次点击时一个字节的业务数据都还没传，就已经欠下：
 
 | 阶段 | 成本 |
 |---|---|
@@ -80,15 +91,25 @@
 **第三步，你的代码。** 假设服务端查一次数据库要 5 ms。放进 600 ms 里，占比 0.8%。**于是：**
 
 - 首次点击 ≈ **600 ms**，其中约 99% 是网络往返，约 1% 是你写的逻辑。
-- 连接复用（keep-alive）之后 ≈ **200 ms**，仍然全部是网络。
+- 连接复用（keep-alive）之后约为 **1 RTT + 服务端处理时间 ≈ 205 ms**，主要成本仍然是网络。
 - 你把服务端从 5 ms 优化到 1 ms，用户感知的变化是 **0.7%**——等于没做。
-- 唯一有效的手段是**把数据挪到用户附近**：CDN、边缘节点、就近读副本、多活写入。这不是"优化选项"，这是这道题里**唯一能动的变量**。
+- 在这个例子里，收益最大的手段是**把数据挪到用户附近**：CDN、边缘节点、就近读副本、多活写入。HTTP/3、连接预热和压缩也可能有帮助，但都消除不了跨洲传播成本。
+
+连接状态不同，欠下的 RTT 也不同：
+
+| 场景 | 典型网络成本 | 说明 |
+|---|---:|---|
+| 新建 TCP + TLS 1.3 + 业务请求 | 约 3 RTT | 本题采用的保守估算 |
+| 已复用连接 | 约 1 RTT | 不再重复 TCP/TLS 握手 |
+| TLS 会话恢复 / QUIC | 取决于协议与连接状态 | 某些场景可减少握手 RTT，但不能消除传播 RTT |
+
+页面最终可见时间还要加上服务端排队与计算、响应体下载以及浏览器渲染；这里先只估算请求链路的下限。
 
 **你算不出这个数，就没法讨论任何架构决策。** "要不要上 CDN"、"能不能做单元化多活"、"合同里承诺 100 ms 现不现实"、"这次慢是不是我们代码的锅"——所有这些问题的答案都藏在上面这几行乘除法里。算不出来，讨论就只能停在互相说服对方的"感觉"上。
 
 ### 问题二：一个页面 20 个请求
 
-一个页面要向后端发 20 个请求（20 个微服务，或一次查询扇出到 20 个分片），**每个的 p99 都是 10 ms**，且必须全部返回才能渲染。用户感受到的延迟大概是多少？
+一个页面要向后端发 20 个请求（20 个微服务，或一次查询扇出到 20 个分片），**每个的 p99 都是 10 ms**，且必须全部返回才能渲染。先假设这些请求的延迟分布相同、彼此独立，而且忽略固定的网络与渲染开销。用户感受到的后端等待时间大概是多少？
 
 直觉答案是"10 ms 左右吧，反正是并行的"。算一下：
 
@@ -97,11 +118,30 @@ P(20 个全都没落进慢尾)  = 0.99²⁰ ≈ 0.818
 P(至少一个落进慢尾)     = 1 − 0.818 ≈ 18%
 ```
 
+为什么是这样？因为等待全部返回时：
+
+```text
+T_page = max(T₁, T₂, ..., T₂₀)
+
+若单个请求的延迟分布为 F(t)，且请求相互独立：
+P(T_page ≤ t) = F(t)²⁰
+```
+
 **约五分之一的页面加载，都会被至少一个慢后端拖住。** 单个后端的 p99 门槛，到了页面这一层变成了 p82 门槛
 ——上面算出只有 81.8% 的页面能完全避开慢尾，也就是说"10 ms 以内"这个承诺在页面这一层只对 82% 的加载成立，等于从 p99 掉到了 p82。
-扇出到 100 个时，这个比例是 63%。
+扇出到 100 个时，两个方向的概率分别是：
 
-这个现象叫**尾延迟放大（tail latency amplification）**，是本篇 §7 的主题。现在只需要记住一句话：**扇出越大，整体的 p50 越像单后端的 p99**——"每个服务都很快"和"用户觉得很快"之间没有等号。
+```text
+P(全部 ≤ 10 ms)    = 0.99¹⁰⁰ ≈ 36.6%
+P(至少一个 > 10 ms) = 1 − 0.99¹⁰⁰ ≈ 63.4%
+```
+
+这个现象叫**尾延迟放大（tail latency amplification）**，是本篇 §7 的主题。现在只需要记住一句话：**并行把“耗时相加”变成了“取最大值”，但扇出越大，最大值越容易撞进某个后端的慢尾。** “每个服务都很快”和“用户觉得很快”之间没有等号。
+
+这里还有两个边界要记住：
+
+- `0.99^N` 依赖“相互独立”的假设。现实里共享网络、数据库或机架故障会让延迟相关；此时要用实测的整条链路分布，不能机械套乘法。
+- 只知道“单后端 p99 = 10 ms”，只能算出页面在 10 ms 内完成的概率，**算不出页面 p99 是多少毫秒**。要得到具体毫秒数，还需要单后端更高分位处的完整延迟分布。
 
 ### 下一节那张表怎么用
 
@@ -121,13 +161,13 @@ P(至少一个落进慢尾)     = 1 − 0.818 ≈ 18%
 - 缓存命中率从 99% 掉到 90%，意味着回源次数涨 10 倍，而每次回源比命中慢 1000 倍——平均延迟的恶化是数量级的，不是百分比的。
 - 同 AZ / 同城的网络往返（0.2–2 ms）落在 SSD 和跨洲之间，靠近 SSD 那一端。
 
-一条现场可用的口诀：**看到一个设计，先数它跨了几次 100 ms 的边界。** 跨洲往返的次数几乎单独决定了用户体验，剩下的都是噪音。
+一条现场可用的口诀：**看到一个设计，先数它跨了几次 100 ms 的边界。** 在跨洲链路里，往返次数通常是用户体验的第一主导项，再看排队、计算、下载和渲染。
 
 ---
 
-## 2. 必须背下来的延迟数字（2026 校准版）
+## 2. 只背三个数量级，其余用作估算查表（2026 校准版）
 
-Jeff Dean 那张经典表格已经过时了（SSD 变快、网络变快、内存没怎么变）。下面是可用于估算的当代量级：
+Jeff Dean 那张经典表格中的具体数字已经随硬件演进而变化。下面是可用于估算的当代量级，不是性能承诺：硬件型号、数据冷热、负载、payload、连接状态和所看分位数都会让结果相差数倍甚至数十倍。设计时先用它判断数量级，落地前再用目标环境的 benchmark 和 p99 验证。
 
 | 操作 | 量级 | 备注 |
 |---|---|---|
@@ -150,21 +190,44 @@ Jeff Dean 那张经典表格已经过时了（SSD 变快、网络变快、内存
 | **一次 Agent 工具调用往返** | 50 ms – 5 s | 工具本身决定 |
 
 **推论（面试里直接用）：**
-- 光速是硬约束。跨洲同步写 = 至少 +80 ms，**没有任何架构能绕过**，只能改成异步或就近写。
+- 传播速度是硬约束。跨洲同步写通常至少增加一个跨洲 RTT；如果这个成本不可接受，只能减少同步往返、改成异步，或把写入协调点移近用户。
 - 内存比 SSD 快 ~1000×，SSD 比跨洲网络快 ~1000×。缓存层级的存在意义就是这两个 1000×。
-- **LLM 的解码是串行的**：输出 1000 token ≈ 10–30 秒。任何"让用户等完整回答"的设计都是错的，必须流式（streaming）。
-- Agent 的延迟预算（latency budget）里，**模型推理通常不是瓶颈，工具调用和串行轮次才是**。5 轮 × (2s 推理 + 1s 工具) = 15 秒。
+- **单条 LLM 输出的 token 通常逐步生成**：按表中速率，输出 1000 token 约需 5–30 秒。交互式产品通常应该流式返回；必须拿到完整结果才能继续的批处理任务则应异步化并展示进度。
+- Agent 的延迟预算要同时计算模型推理、工具调用和串行轮次。即使每一轮都不慢，5 轮 × (2s 推理 + 1s 工具) 也会累积到 15 秒；应优先减少不必要的串行轮次。
 
 ---
 
 ## 3. CAP 与 PACELC：正确的用法
 
+### 先拆字母：这里的 C 和 A 不是日常口语
+
+**CAP**：
+
+| 字母 | 全称 | 在 CAP 里的严格含义 |
+|---|---|---|
+| C | Consistency | 每次读都得到最近一次成功写入的值，无法保证时宁可报错；这里接近线性一致，不是“最终会一样” |
+| A | Availability | 每个到达未故障节点的请求都在有限时间内得到非错误响应；它不是 SLO 里“全年几个 9”的同义词 |
+| P | Partition tolerance | 节点间任意消息丢失或延迟形成网络分区时，系统仍有明确行为 |
+
+**PACELC** 不是一句英文的首字母缩写，而是一条决策规则的助记符：
+
+| P | A | C | E | L | C |
+|---|---|---|---|---|---|
+| Partition | Availability | Consistency | Else | Latency | Consistency |
+
 ### CAP 的常见误读
 
 CAP 说的是：**在网络分区（network partition）发生时**，你只能在一致性和可用性之间选一个。它**不**说"平时也要三选二"。
 
+对必须跨节点协作的分布式系统，网络分区是必须面对的运行条件，不是可以靠设计承诺“永远不发生”的选项。分区发生后：
+
+```text
+保 C：无法确认最新值的一侧拒绝请求或返回错误，因此牺牲 CAP-A
+保 A：两侧继续返回非错误响应，但其中一侧可能读写旧版本，因此放宽 C
+```
+
 **Senior 的表述方式：**
-> "分区期间，我们的支付路径选 CP —— 宁可返回 503 让客户端重试，也不能出现双花（double spend：同一笔余额在网络两侧各被花掉一次，合起来花出了两倍的钱）。而通知路径选 AP —— 分区期间接受重复推送，靠客户端去重收敛。"
+> "分区期间，我们的支付路径保 C —— 无法联系到法定多数时宁可返回 503，也不能让网络两侧分别确认同一笔余额的消费。动态点赞路径保 A —— 两侧可以继续接受点赞，分区恢复后通过去重和合并规则收敛。"
 
 注意这里的关键：**CAP 的选择是按链路做的，不是按系统做的**。同一个系统里不同的数据路径（data path）可以有不同选择。
 
@@ -175,31 +238,35 @@ if (Partition):  choose A or C
 else (Else):     choose L(atency) or C(onsistency)
 ```
 
-99.99% 的时间没有分区。真正每天在付出的成本是 **E 那一半**：为了强一致（strong consistency），你要多付几个 RTT。
+系统绝大多数时间没有发生严重分区。真正每天都在付出的成本是 **E 那一半**：网络正常时，为了更强的一致性，某些操作仍要等待副本确认或共识轮次；具体多几个 RTT 取决于协议、读写路径和副本位置。
 
 **分类怎么读**：斜杠前是"有分区时"的选择，斜杠后是"没分区时（Else）"的选择。
 所以 `PA/EL` = 分区时保可用（A）、平时保低延迟（L）；`PC/EC` = 两种情况下都保一致性（C）。四个字母就是上面那两行 if/else。
 
-| 系统 | 分类 | 含义 |
+下面的标签只用于建立直觉，**不是产品永久不变的属性**。同一个系统会因单/多 Region、读或写、read/write concern、是否读主节点而表现不同：
+
+| 系统/配置 | 近似分类 | 必须同时记住的边界 |
 |---|---|---|
-| DynamoDB（默认） | PA/EL | 分区时可用，平时优先低延迟（最终一致读，eventually consistent read） |
-| DynamoDB（强一致读） | PC/EC | 显式换成一致性，延迟 +1 RTT，成本 ×2 |
-| Spanner | PC/EC | 始终强一致，代价是写要跨 AZ 达成 Paxos（一种**共识算法**：让多台机器就"这次写到底算不算数"投票并达成一致，代价是每次写至少多一轮跨机器往返） |
-| Cassandra（QUORUM） | PA/EC | 可调 |
-| MongoDB（majority） | PC/EC | |
-| Redis（主从异步） | PA/EL | 主挂了会丢已确认的写（acknowledged writes） |
+| DynamoDB 默认 eventually consistent read | PA/EL | 表和 LSI 可逐请求选择强一致读；GSI 和 stream 不支持强一致读；Global Tables 还取决于所选一致性模式 |
+| DynamoDB strongly consistent read | 更偏 PC/EC | 读容量成本通常是最终一致读的 2 倍，但延迟差异不是固定 `+1 RTT` |
+| Spanner 读写事务 | PC/EC | 写入要由复制组通过共识确认；实际 RTT 取决于副本布局和 leader 位置 |
+| Cassandra 普通读写 | PA/EL 到 PA/EC 之间可调 | `ONE`、`QUORUM`、`ALL` 等级改变延迟、可用性和副本重叠；线性一致操作另用基于 Paxos 的 LWT |
+| MongoDB replica set | 取决于 read concern + write concern | `w: majority` 主要描述写确认和持久性，不自动让默认 `local` 读取变成线性一致 |
+| Redis 主从异步复制 | PA/EL | 是否可能丢失已确认写取决于确认与持久化配置，不能只看“用了 Redis” |
 
-> **QUORUM / majority（法定多数）是什么**：3 副本时不等全部 3 份确认（太脆：挂一台就写不了），也不只等 1 份（太险：读可能读到没跟上的那份），
-> 而是**写等 W 份确认、读问 R 份**，只要 `W + R > 副本数`，读到的那批里就**至少有一份是最新的**（两个集合必然重叠）。
-> 3 副本取 W=2、R=2 是最常见的一组。上表里 Cassandra 的 `QUORUM` 和 MongoDB 的 `majority` 说的都是这件事，
-> 它也是"强一致要多付一个 RTT"里那个 RTT 的来源。完整推导见 [`01/05`](../01-building-blocks/05-consensus-and-coordination.md)。
+> **QUORUM / majority（法定多数）是什么**：在最简化的 N 副本模型里，写等 W 份确认、读问 R 份；只要 `W + R > N`，读集合和最近一次成功写入的集合就至少重叠一个副本。
+> 但“集合有交集”不自动等于线性一致。系统还必须正确识别更新版本、处理并发写和冲突，并保证实际读写遵守这套 quorum 模型。Cassandra 的 consistency level、MongoDB 的 write concern 和共识协议里的多数派在细节上也不能完全画等号。完整推导见 [`01/05`](../01-building-blocks/05-consensus-and-coordination.md)。
 
-**面试金句**：
-> "我们不是在选 CP 还是 AP，我们在选每一条链路上愿意为一致性付几毫秒。"
+**可复用的回答模板**：
+> "先说明这条数据路径在网络分区时保一致还是保非错误响应，再说明正常情况下愿意为一致性等待哪些副本、多少 RTT。CAP 描述异常条件，PACELC 补上日常的延迟代价。"
 
 ---
 
-## 4. 一致性模型全谱（从强到弱）
+## 4. 两条正交轴：副本一致性与事务隔离
+
+“一致性”这个词经常同时指两件不同的事。先问自己：我在讨论**多个副本看见值的顺序**，还是**多个事务并发执行产生的异常**？
+
+### 轴一：副本和客户端观察到什么顺序
 
 ```
 Linearizable (线性一致)
@@ -214,44 +281,43 @@ Eventual (最终一致)
       只承诺"停止写入后最终收敛"，没有时间上界
 ```
 
-另有一条**事务维度**的正交谱（隔离级别，isolation level）：
+这是一张帮助理解的强弱地图，不是所有模型的严格全序。特别是 **Read-Your-Writes**（读己之写）与 **Monotonic Reads**（单调读）是两种不同的会话保证：前者保证自己刚写的值不会消失，后者保证同一会话不会从新版本倒退到旧版本；它们可以单独提供，也可以组合成更强的会话体验。
+
+### 轴二：并发事务允许什么异常
 
 ```
 Serializable > Snapshot Isolation > Read Committed > Read Uncommitted
 ```
 
-（**Snapshot Isolation 快照隔离**：事务开始那一刻等于给整个库拍了张照片，此后它读到的一直是照片里的样子，别人后来的提交它一概看不见。
-它就是 [00-concepts §7](00-concepts.md) 那张表里"可重复读"档在 PostgreSQL / MySQL 里的真实实现。）
+**Snapshot Isolation（SI，快照隔离）**可以先理解为：事务第一次建立快照后，普通一致性读取持续看同一张快照，并发事务后来的提交不进入这张快照；具体建立快照的时点、锁定读和冲突规则由数据库实现决定。PostgreSQL 的 `REPEATABLE READ` 使用 SI 思路，但不能据此假设所有数据库里 `REPEATABLE READ` 与 SI 完全等价。详见 [00-concepts §7](00-concepts.md)。
 
 ⚠️ 常见陷阱：**Snapshot Isolation ≠ Serializable**。SI 允许 **写偏斜（write skew）**：
 > 医院要求"至少一名医生值班"。Alice 和 Bob 同时读到"有 2 名医生在班"，各自请假。两个事务在 SI 下都提交成功，结果 0 名医生值班。
 
-**SI 为什么拦不住它**：SI 只在"两个事务改了**同一行**"时才判冲突并中止一个。这里 Alice 改的是 Alice 那行、Bob 改的是 Bob 那行，
+**这个例子里 SI 为什么拦不住它**：SI 能发现双方对同一版本数据的直接写冲突，但这里 Alice 改的是 Alice 那行、Bob 改的是 Bob 那行，
 两人**写的行不重叠**，数据库眼里没有任何冲突 —— 被破坏的是一条它根本不知道的规则（"在班人数 ≥ 1"）。
 这也是它和 §7 那类"同一行超扣"完全不同的地方：**写偏斜里没有任何一行被写坏，坏掉的是几行之间的关系。**
 
-修复方式：`SELECT ... FOR UPDATE` 物化冲突（materializing conflicts：把那条看不见的规则**变成一行真实存在、大家都要抢的数据**，
-比如给"值班表"这个对象建一行并锁它，于是"不重叠的写"重新变成"重叠的写"）、显式约束、
-或用 SSI（serializable snapshot isolation，PostgreSQL 的 `SERIALIZABLE`：在 SI 上额外跟踪读写依赖，发现可能不可串行就中止一个事务）。
+修复方式：把跨行规则**物化成一条所有事务都会更新或锁定的 guard row**，用 `SELECT ... FOR UPDATE` 制造真实冲突；把规则重新建模为数据库能原子检查的约束；或用 SSI（serializable snapshot isolation，PostgreSQL 的 `SERIALIZABLE`：在 SI 上额外跟踪读写依赖，发现可能不可串行就中止一个事务）。仅仅锁住当前查询恰好返回的几行不一定能保护“未来可能出现或消失的行”，实现时要明确锁住的业务对象是什么。
 
 ### 实践中怎么选
 
-| 场景 | 需要的最低一致性 | 理由 |
-|---|---|---|
-| 账户余额扣减 | Linearizable / Serializable | 双花不可接受 |
-| 库存扣减（可超卖少量） | SI + 补偿 | 用性能换，超卖（overselling）后人工/自动补偿 |
-| 用户改完头像立刻看到 | Read-Your-Writes | 只需会话内保证，粘性路由（sticky routing）到主库即可 |
-| 时间线 / Feed | Eventual | 慢几秒无人察觉 |
-| 分布式锁 | Linearizable + fencing token | 光有锁不够，见 [`01-building-blocks/05`](../01-building-blocks/05-consensus-and-coordination.md) |
-| Agent 的对话历史 | Causal | 用户消息必须在模型回复之前 |
+| 场景 | 副本/读取语义 | 事务或写入机制 | 要防的异常 |
+|---|---|---|---|
+| 账户余额扣减 | 权威写路径需要线性一致 | Serializable，或单行原子条件更新 | 双花、丢失更新、超扣 |
+| 库存扣减（可超卖少量） | 可接受短暂陈旧读 | SI/原子扣减 + 补偿 | 用性能换取可控超卖 |
+| 用户改完头像立刻看到 | Read-Your-Writes | 单行原子更新通常足够 | 用户刷新后看见旧头像 |
+| 时间线 / Feed | Eventual 或 Causal | 按事件幂等合并 | 可接受短暂缺项，但回复不能早于原帖 |
+| 分布式锁 | 锁服务必须线性一致 | fencing token 保护下游写 | 旧持有者恢复后继续写 |
+| Agent 的对话历史 | Causal | 每条消息带会话序号/父事件 | 模型回复出现在用户问题之前 |
 
-**成本直觉**：每往上爬一级，通常多付 1 个跨节点 RTT 或一次共识轮次（consensus round，同 AZ ~1 ms，跨 AZ ~2–5 ms）。
+**成本直觉**：更强保证通常需要等待更多节点、冲突检测或共识轮次，但不存在“每升一级固定多 1 RTT”的通用公式。先明确要防的异常，再测具体实现为它付出的延迟与可用性成本。
 
 ---
 
 ## 5. 幂等（idempotency）：分布式系统的第一公民
 
-**断言**：只要网络会超时，你就永远无法区分"请求丢了"和"响应丢了"。所以**每一个有副作用的接口都必须幂等**。
+**断言**：只要网络会超时，客户端就无法仅凭“没收到响应”区分请求丢了、服务端仍在执行，还是业务已成功但响应丢了。因此，**需要安全重试的有副作用接口必须提供幂等语义**。
 
 ### 幂等键（idempotency key）的正确实现
 
@@ -260,82 +326,81 @@ POST /v1/payments
 Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
 ```
 
-服务端逻辑：
+先限定最容易做对的场景：**幂等记录与业务数据在同一个支持事务的数据库里，业务操作能在一个短事务内完成。**
 
 ```sql
--- 1. 原子插入（唯一索引在 idempotency_key 上）
-INSERT INTO idempotency_records (key, tenant_id, request_hash, state, created_at)
-VALUES ($1, $2, $3, 'IN_PROGRESS', now())
-ON CONFLICT (key) DO NOTHING
+BEGIN;
+
+-- 唯一约束应覆盖幂等作用域，例如 (tenant_id, operation, key)
+INSERT INTO idempotency_records
+       (tenant_id, operation, key, request_hash, status, created_at)
+VALUES ($1, 'create_payment', $2, $3, 'STARTED', now())
+ON CONFLICT (tenant_id, operation, key) DO NOTHING
 RETURNING id;
 
--- 2a. 插入成功 → 首次请求，执行业务逻辑，在同一事务里写入 response
--- 2b. 插入冲突 → 读取已有记录：
---     - state=COMPLETED 且 request_hash 相同 → 直接返回缓存的响应（200）
---     - state=COMPLETED 且 request_hash 不同 → 422 幂等键复用冲突
---     - state=IN_PROGRESS → 409，让客户端退避重试
+-- 插入成功：在同一事务内完成业务写，再保存原始响应的 status/body。
+-- 未插入：等待并发事务结束后读取已有记录，校验 request_hash，重放已保存响应。
+
+COMMIT;
 ```
 
-**把上面这段 SQL 展开成时间轴：同一个 key 的第二次请求，走的是一条和第一次完全不同的路径。**
+关键不是某一条 SQL，而是**幂等判定、业务写和最终响应记录具有同一个原子提交点**：
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant C as Client
     participant API as Payment API
-    participant IDEM as DB idempotency_records
-    participant BIZ as DB business tables
+    participant DB as One transactional database
 
-    Note over C,BIZ: all three branches below carry the SAME Idempotency Key K
+    Note over C,DB: both attempts carry the same Idempotency Key K
     C->>API: POST /v1/payments with Idempotency Key K
-    API->>IDEM: INSERT key=K state=IN_PROGRESS ON CONFLICT DO NOTHING
-    alt insert succeeded so this is the first request
-        IDEM-->>API: row created and lease held
-        API->>BIZ: debit account inside the same transaction
-        BIZ-->>API: business rows committed
-        API->>IDEM: set state=COMPLETED and store response body
+    API->>DB: BEGIN and claim unique key K
+    alt first attempt owns K
+        API->>DB: debit plus store original status and body
+        API->>DB: COMMIT all changes atomically
         API-->>C: 201 Created
-    else conflict with state COMPLETED and identical request_hash
-        IDEM-->>API: stored response body
-        API-->>C: 200 replayed response and no second debit
-        Note over API,BIZ: business tables are never touched on this path
-    else conflict with state IN_PROGRESS and lease still valid
-        IDEM-->>API: another worker is still mid flight
-        API-->>C: 409 so the client backs off and retries later
+    else duplicate attempt
+        DB-->>API: existing hash plus stored status and body
+        API-->>C: replay original 201 and body without another debit
     end
 ```
 
-> 📖 **读图要点**：第 4–6 步必须是不可分割的一段——业务写和 `state=COMPLETED` 落在同一个事务里，否则时间轴上会出现"钱扣了但记录没写"的窗口，而第 7 步的 201 只是这段事务提交之后的回执。另外注意第三条分支返回的是 409 而不是"等它做完"：服务端此刻无法判断持有 lease 的那个进程是慢还是已经死了，让客户端退避比让连接挂着更安全。
-（**lease 租约** = 一个带到期时间的占用权：谁插入成功谁就"租下"了这个 key，别人得等；租约一到期没续，就视同持有者已死，别人可以接手 —— 见下面第 2 点和状态图。）
+> 📖 **读图要点**：第一个事务未结束时，重复插入可能在唯一索引上等待，而不是立刻看见一个未提交的 `STARTED` 并返回 409。第一个进程如果在提交前崩溃，整个事务回滚；如果提交后响应丢失，第二次请求读到已保存结果并重放。不要同时声称“`IN_PROGRESS` 对其他事务立即可见”和“它与业务写尚处于同一未提交事务”。
 
-**四个容易漏掉的点：**
-1. **必须校验 request_hash**。否则同一个 key 带不同 body 会返回错误的缓存结果。
-2. **IN_PROGRESS 需要超时回收**。进程崩溃会留下永久卡住的键，加 `lease_expires_at`。
-3. **幂等记录和业务写必须同事务**，否则业务成功但记录失败 → 重试会重复执行。
-4. **TTL 要 ≥ 客户端最大重试窗口（retry window）**，通常 24h–7d。
+**六个容易漏掉的点：**
 
-**第 2 点值得单独看它的状态可达性：把 Reclaimable 那条边删掉，InProgress 就变成了吸收态。**
+1. **定义作用域**：唯一约束通常是 `(tenant_id, operation, key)`，不能让不同租户或不同接口意外共享 key。
+2. **校验 request_hash**：同一个 key 携带不同业务参数应返回冲突；hash 前要先定义稳定的 canonicalization，避免 JSON 字段顺序制造假差异。
+3. **重放原始结果**：保存并重放第一次请求的 status code、body 和必要 headers，而不是第一次返回 201、第二次随意改成 200。
+4. **一个原子提交点**：同库短事务里，幂等记录和业务写一起提交；否则必须引入下面的状态机、outbox 或外部系统自己的幂等能力。
+5. **TTL 覆盖可能的重试窗口**：具体是数小时还是数天取决于客户端、队列重投和业务审计要求；TTL 到期后，同一个 key 会再次被当成新请求。
+6. **幂等不等于并发控制**：`SET x = 5` 重复执行结果相同，但仍可能覆盖另一个客户端刚写入的 `x = 6`；必要时还要配版本号/CAS。
+
+### 长任务或跨系统副作用：状态机不能伪装成单事务
+
+如果扣款发生在外部支付机构，或任务持续几分钟，就无法把“认领 key”和所有副作用塞进一个本地数据库事务。此时可以先持久化任务，再由 worker 执行，但需要更完整的状态机：
 
 ```mermaid
 stateDiagram-v2
-    [*] --> InProgress: INSERT succeeds and lease_expires_at is set
-    InProgress --> InProgress: duplicate request gets 409 and backs off
-    InProgress --> Completed: business txn commits and response body stored
-    InProgress --> Reclaimable: lease_expires_at passed while the worker was dead
-    Reclaimable --> InProgress: another worker takes over and renews the lease
-    Completed --> Completed: duplicate request replays the cached response
-    Completed --> [*]: TTL sweeper drops the record after the retry window
-    note right of Reclaimable: without this edge a crashed worker pins the key in IN_PROGRESS forever
+    [*] --> Pending: create key and persist intent
+    Pending --> Running: worker claims lease plus fencing token
+    Running --> Succeeded: external effect confirmed and result stored
+    Running --> Uncertain: timeout so outcome is unknown
+    Uncertain --> Succeeded: reconcile by external idempotency key
+    Uncertain --> Pending: confirmed not executed then retry
+    Succeeded --> [*]: retention window expires
 ```
 
-> 📖 **读图要点**：Completed 是通向 `[*]` 的唯一出口，而 lease 过期是 InProgress 唯一的"非正常"出口。没有 `InProgress → Reclaimable → InProgress` 这条回收边，进程崩溃后该 key 就永远卡在 IN_PROGRESS 自环上——客户端拿到的是无限的 409，且因为 TTL 只清 COMPLETED 记录，这个键连过期都过期不掉。
+这里最危险的误解是“租约过期 = 旧 worker 已死”。旧 worker 可能只是暂停，恢复后仍会继续写；新 worker 接管时必须使用单调递增的 **fencing token**，或让外部系统接受同一个业务幂等键并返回第一次结果。对于“请求可能已经成功但暂时查不到结果”的 `Uncertain` 状态，应该先对账，不能直接重复副作用。
 
 ### 幂等的三种实现层次
 
 | 层次 | 做法 | 适用 |
 |---|---|---|
 | 天然幂等 | `SET x = 5`（而非 `x += 1`） | 状态覆盖类 |
-| 去重表 | 幂等键 + 唯一索引 | 通用，推荐 |
+| 同库去重 | 幂等键 + 唯一索引 + 同一业务事务 | 单数据库短事务，优先选择 |
+| 工作流状态机 | intent + lease/fencing + 对账/outbox | 长任务、消息消费或跨系统副作用 |
 | 版本/CAS | `UPDATE ... WHERE version = N` | 乐观并发（optimistic concurrency），同时解决 **ABA**（值从 A 改成 B 又被改回 A：只比较"值还是不是 A"会误判成"没人动过"，而版本号只增不减，动过就是动过） |
 
 ---
@@ -343,6 +408,18 @@ stateDiagram-v2
 ## 6. 背压（Backpressure）：没有它系统就会雪崩（cascading failure）
 
 **核心原理**：任何一个环节，当输入速率 > 处理速率时，队列会无限增长。队列增长 → 延迟增长 → 上游超时 → 上游重试 → 输入速率进一步增长 → **正反馈崩溃**。
+
+把延迟和并发连接起来的是 **Little's Law**：
+
+```text
+L = λW
+
+L：系统内平均在途请求数
+λ：平均完成吞吐（requests/s）
+W：平均请求停留时间（s）
+```
+
+例如服务稳定完成 500 rps，平均停留 100 ms，则约有 `500 × 0.1 = 50` 个在途请求；下游抖动让停留时间涨到 2 秒，即使吞吐不变，也会占住约 1000 个并发槽。慢请求不仅让用户等，它还会直接耗尽线程、连接池和内存。
 
 ```
 无背压：
@@ -352,8 +429,10 @@ stateDiagram-v2
 有背压：
   Client ──1000 rps──> [ Queue: 100 ] ──500 rps──> Worker
                         满则立即 429/503
-  Client 收到 429 → 退避 → 输入速率下降 → 系统稳定在 500 rps
+  Client 收到拒绝 → 按 Retry-After/退避策略降低重试压力
 ```
+
+快速失败不会自动让输入稳定在 500 rps；还需要客户端遵守退避、服务端限流，或由调用方减少源流量。`429` 通常表示调用方超过速率/配额，`503` 通常表示服务当前无法承载，选择哪个要与 API 语义和客户端重试策略配套。
 
 ### 实现手段
 
@@ -361,8 +440,8 @@ stateDiagram-v2
 |---|---|
 | **有界队列（bounded queue）** | 最重要的一条。无界队列（unbounded queue）= 把 OOM 和超时推迟到最坏时刻 |
 | **信号量 / 并发限制（concurrency limiting）** | 限制在途请求数（in-flight requests），比限 QPS 更贴近真实资源 |
-| **准入控制（admission control）** | 队列延迟 > 阈值 时直接拒绝（CoDel 思想） |
-| **TCP 流控（flow control）/ gRPC 窗口** | 传输层天然背压，用 streaming 而非批量 |
+| **准入控制（admission control）** | 根据并发、队列等待或资源水位拒绝新工作；不能只看机器 CPU |
+| **TCP 流控 / HTTP/2 或 gRPC 窗口** | 限制字节进入接收缓冲区；它解决传输速率问题，不替代业务级并发与准入控制 |
 | **主动降级（load shedding）** | 拒绝低优先级流量，保住高优先级 |
 
 **Agent 系统里的背压特别重要**：一个 Agent 可以并发 fan-out 出 50 个子任务，每个子任务再调工具。没有并发上限的 Agent 会在几秒内打爆下游。
@@ -371,7 +450,7 @@ stateDiagram-v2
 
 ## 7. 尾延迟放大（Tail Latency Amplification）
 
-**如果一个请求要扇出（fan-out）到 N 个后端，且必须等全部返回，那么想让整体达到 p99，每个后端要做到的是 `p(100 × 0.99^(1/N))`。**
+**如果一个请求扇出（fan-out）到 N 个独立且同分布的后端，并且必须等全部返回，那么想让整体达到 p99，单后端要看的是 `p[100 × 0.99^(1/N)]` 分位。**
 
 这个式子只是把"全部都不慢"翻译过来：整体不慢的概率 = 单后端不慢的概率 `q` 自乘 N 次，要 `q^N = 0.99`，就得 `q = 0.99^(1/N)`。
 N = 100 时 `q = 0.99^0.01 = 0.9999` —— **要拿到页面级 p99，每个后端得做到 p99.99**，这是高出两个数量级的要求。
@@ -381,31 +460,33 @@ N = 100 时 `q = 0.99^0.01 = 0.9999` —— **要拿到页面级 p99，每个后
 
 也就是说，**63% 的请求会遇到至少一个 10ms+ 的后端**。这就是为什么大扇出系统的 p50 都很难看。
 
+注意这里算出的是**分位映射**，不是毫秒数：如果不知道单后端在 p99.99 处是多少毫秒，就仍然不知道页面 p99 的具体延迟。请求之间若相关，也应改用实测联合分布；共享依赖造成的相关慢请求不会被独立乘法准确描述。
+
 ### 对策
 
 | 手段 | 说明 | 代价 |
 |---|---|---|
-| **对冲请求（hedged request）** | 等到 p95 还没返回，就向另一副本发第二份，取先到的 | 多 ~5% 流量（按定义只有最慢的 5% 会触发补发，所以额外流量就是 5%；卡在 p99 补发则只多 1%） |
+| **对冲请求（hedged request）** | 等到某个分位仍没返回，再向独立副本发第二份，取先到的 | p95 触发时理论上约 5% 请求会补发；取消延迟、相关故障会让实际资源开销更高 |
 | **绑定请求（tied request）** | 同时发两份，谁开始处理谁通知对方取消 | 需要后端配合 |
 | **减少扇出** | 用更粗的分片、预聚合（pre-aggregation） | 灵活性下降 |
 | **部分结果** | 超时后返回已有的 90%，标记不完整 | 需要业务能容忍 |
 | **微分片 + 负载感知路由（load-aware routing）** | 让慢节点少接活 | 复杂度 |
 
-⚠️ 对冲请求**必须**配幂等，否则就是放大写。
+⚠️ 对冲只应发送到尽量独立的故障域，并受额外流量预算约束。共同过载时，大量请求会同时触发对冲，反而把下游推得更深。读请求通常最适合对冲；有副作用的请求必须先保证端到端幂等。
 
-**LLM 场景的特殊性**：LLM 请求耗时几秒，对冲的绝对成本非常高（一次对冲 = 一次完整推理的钱）。通常改用**超时后降级（fallback）到更小的模型**。
+**LLM 场景的特殊性**：LLM 请求耗时几秒，对冲的绝对成本很高，且原请求即使取消也可能已经消耗大量算力。可选方案包括限制排队时间、流式返回、在开始推理前改路由，或在业务允许时降级到更小模型；降级模型的质量差异必须由产品显式接受。
 
 ---
 
 ## 8. 失败模型：你要防的到底是什么
 
-按难度排序：
+按普通互联网业务中的常见程度和诊断难度来看：
 
 1. **Fail-stop**：进程干净地死掉。最容易处理，健康检查 + 重启。
 2. **Crash-recovery**：死了又活，带着旧状态回来。需要 fencing / epoch。
 3. **网络分区**：双方都活着但看不见对方。→ 脑裂（split-brain）风险。
-4. **灰色故障（Gray failure）**：**最难**。节点还在响应健康检查，但实际上处理能力下降 90%，或者只对某些客户端不可用。
-5. **拜占庭（Byzantine）**：节点撒谎。一般只在跨信任域（区块链、多方计算）才考虑。
+4. **灰色故障（Gray failure）**：日常生产环境里通常最难诊断。节点还在响应健康检查，但实际上处理能力下降 90%，或者只对某些客户端不可用。
+5. **拜占庭（Byzantine）**：节点可能返回任意或恶意结果。这是更强的故障模型，但普通单一信任域业务通常不把它纳入设计目标；区块链、跨组织协作等场景才常见。
 
 ### 灰色故障为什么最要命
 
@@ -415,29 +496,36 @@ LB 的健康检查：GET /health → 200 OK （只检查进程活着）
 结果：        LB 持续把流量送给这个"健康"的节点
 ```
 
-**对策**：
-- 健康检查必须**走真实依赖**（浅检查 shallow check + 深检查 deep check 分开，深检查决定是否摘流量 drain）
-- 用**客户端侧的错误率**做异常检测（outlier detection / passive health check），而非只信服务端自报
-- **优雅降级（graceful degradation）要有明确定义**：不是"尽力而为"，而是"关掉推荐模块，只返回时间线"
+**对策是把“健康”拆成不同问题，而不是让一个 `/health` 决定一切**：
+
+| 信号 | 回答的问题 | 失败后的动作 |
+|---|---|---|
+| Liveness | 进程自身是否已经无法前进 | 满足谨慎阈值后重启；不要因共享数据库故障重启全部实例 |
+| Readiness | 当前实例是否适合继续接新流量 | 暂时摘流量，但要防止共享依赖故障时整组实例同时被摘空 |
+| Passive / outlier detection | 客户端实际看到的错误率和延迟是否异常 | 降低该实例权重或隔离异常路径 |
+| Synthetic check | 从外部走关键业务链路是否成功 | 告警、故障定位和触发预案，不一定直接重启实例 |
+
+**优雅降级（graceful degradation）要有明确定义**：不是“尽力而为”，而是“推荐依赖失败时关掉推荐模块，只返回时间线”，并且这个降级路径本身需要定期演练。
 
 ---
 
 ## 9. 幂等 × 重试 × 超时：三件套必须一起设计
 
 ```
-超时预算（deadline budget）：
+超时预算（deadline budget，以下调用按顺序发生）：
   Client 总预算 3000ms
-    ├─ API GW 保留 100ms，向下传 2900ms
-    │   ├─ Service A 保留 200ms，向下传 2700ms
-    │   │   ├─ DB 查询 deadline = min(2700, 自身上限 500) = 500ms
-    │   │   └─ Service B deadline = 2200ms
+    ├─ API GW 已耗时 80ms，向下传剩余约 2920ms
+    │   ├─ Service A 为收尾保留 200ms，可分配约 2720ms
+    │   │   ├─ DB 单次调用上限 = min(剩余预算, DB 自身上限 500ms)
+    │   │   └─ DB 返回后，用“绝对截止时间 − 当前时间”重新计算 Service B 的预算
 ```
 
 **规则：**
-- Deadline 必须**随请求传播（deadline propagation）**（gRPC 原生支持；HTTP 用 `X-Deadline-Ms` 头）
-- 每层**只减不加**。绝不能出现下游超时 > 上游超时（那样上游放弃后下游还在白干）
-- **重试只在最外层或最内层做，不要每层都重试** —— 3 层每层重试 3 次 = 27 倍放大
-- 重试必须带 **指数退避（exponential backoff）+ 抖动（jitter）**，且受**重试预算（retry budget）**约束（如"重试量不超过总请求量的 10%"）
+- Deadline 必须**随请求传播（deadline propagation）**。gRPC 原生支持 timeout/deadline；HTTP 可定义明确单位和语义的内部 header。跨机器传绝对时间要考虑时钟误差，传剩余时长要扣除每一跳已消耗时间。
+- 每层从同一个总截止时间重新计算剩余预算，预算**只减不加**；上游取消后也要尽量把取消信号传给仍在工作的下游。
+- 一条调用链通常只选择**一个拥有完整业务语义和剩余预算的层**负责重试，不要每层各自重试。若 3 层都各执行 3 次 attempt，最坏是 `3³ = 27` 次最底层调用；若“重试 3 次”指首次加 3 次重试，则是 `4³ = 64` 次。
+- 只重试可能瞬时恢复的错误。超时、连接重置、部分 `429/503` 可能可重试；参数、权限和明确的业务拒绝通常不可重试。有副作用的操作要先提供幂等语义。
+- 重试必须带 **指数退避（exponential backoff）+ 抖动（jitter）**，遵守服务端 `Retry-After`，且受**重试预算（retry budget）**约束。`10%` 可以作为某些系统的起点，不是通用常数，应按错误率、容量余量和 SLO 压测确定。
 
 ```python
 # 全抖动退避（AWS 推荐，比"等距退避"更能打散惊群）
@@ -448,20 +536,46 @@ sleep = random.uniform(0, min(cap, base * 2 ** attempt))
 
 ## 这一章的三句话
 
-1. **一个设计的延迟下限，在你写第一行代码之前就已经由它跨了几次 100 ms 边界决定了。** 服务端从 5 ms 优化到 1 ms 对用户是 0.7% 的变化，把数据挪到用户附近是数量级的变化 —— 所以"这里能不能再快点"几乎总是错的问题，"这一跳能不能不跨洲"才是。
-2. **幂等不是重试的配套设施，它是"允许存在网络"的准入条件。** 超时之后你在物理上分不清请求丢了还是响应丢了，所以重试一定会发生；没有一个由业务语义派生、在第一次尝试之前就定下来的幂等键，你的系统只是还没扣错第二笔钱而已。
-3. **过载的表现是雪崩而不是"整体慢一点"，因为坏掉的部分会自己制造更多流量。** 无界队列、每层各自重试、按超时判定对方死活 —— 这三件事各自都"看起来合理"，叠加起来就是一个原因消失后仍然起不来的系统；背压、重试预算、deadline 只减不加是它唯一的解药，而且必须在设计时就装上，事后加不进去。
+1. **先算不可消除的边界，再优化边界以内的代码。** 跨洲传播、必须等待的共识轮次和串行调用决定延迟下限；代码、缓存和协议优化仍有价值，但不能消除物理传播。看到设计先数 RTT，再看排队、计算、下载和渲染。
+2. **正确性要分两条轴讨论。** CAP/PACELC 描述副本在分区与正常时期如何取舍，一致性模型描述客户端观察顺序，事务隔离描述并发事务异常；“用了 majority/quorum”不能替代对具体读写路径的证明。
+3. **失败恢复必须限制它自己制造的新工作。** 有界队列和准入控制限制当前工作，deadline 和取消停止无用工作，幂等让必要重试安全，单层重试与重试预算限制新增工作；少一环都可能把局部抖动放大为雪崩。
+
+最后把本章压成四个公式和两个坐标轴：
+
+```text
+传播下限：      RTT ≈ 2d / v
+等待全部扇出：  Fmax(t) = F(t)^N       （独立同分布时）
+并发与延迟：    L = λW
+多层重试：      attempts = a^depth
+
+副本取舍：      Partition 时 A vs C；Else 时 L vs C
+正确性坐标：    副本一致性 × 事务隔离
+```
 
 ---
 
 ## 面试官会追问
 
 1. 你说这条链路最终一致，那用户改完设置刷新页面看到旧值怎么办？（→ 会话粘性 / 读己之写 / 客户端乐观更新 optimistic update）
-2. 扇出 100 个分片，p99 会变成多少？怎么救？
+2. 单分片 p99 = 10 ms，扇出 100 个后，页面在 10 ms 内完成的概率是多少？页面 p99 对应单分片哪个分位？为什么还不能算出具体毫秒数？
 3. 你的重试会不会把下游打死？重试预算怎么设？
 4. 幂等键存哪？多久过期？key 冲突但 body 不同怎么办？
 5. 健康检查返回 200 但服务实际不可用，你怎么发现？
-6. 跨 region 强一致写，延迟下限是多少？为什么不能优化？
+6. 跨 region 强一致写至少要等待哪些网络往返？哪些是传播下限，哪些能通过 leader 位置、副本布局或减少同步轮次改善？
+
+---
+
+## 延伸阅读与校准来源
+
+- 尾延迟与对冲请求：[The Tail at Scale](https://research.google/pubs/the-tail-at-scale/)
+- CAP 的原始证明：[Brewer's Conjecture and the Feasibility of Consistent, Available, Partition-Tolerant Web Services](https://doi.org/10.1145/564585.564601)
+- PACELC：[Consistency Tradeoffs in Modern Distributed Database System Design](https://www.cs.umd.edu/~abadi/papers/abadi-pacelc.pdf)
+- PostgreSQL 隔离级别与 serialization anomaly：[Transaction Isolation](https://www.postgresql.org/docs/current/transaction-iso.html)
+- DynamoDB 不同读取方式的保证：[DynamoDB Read Consistency](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.ReadConsistency.html)
+- Cassandra 普通一致性与 LWT 的边界：[Cassandra Guarantees](https://cassandra.apache.org/doc/stable/cassandra/architecture/guarantees.html)
+- 幂等 API 与安全重试：[Making Retries Safe with Idempotent APIs](https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/)
+- 超时、退避与抖动：[Timeouts, Retries, and Backoff with Jitter](https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/)
+- Liveness、Readiness 与错误探针的级联风险：[Kubernetes Probes](https://kubernetes.io/docs/concepts/workloads/pods/probes/)
 
 ---
 
