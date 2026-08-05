@@ -8,26 +8,31 @@
 
 ## 读这道题之前
 
-**如果你是直接翻到这道题的**：这题的三个评分点全建在下面这三个概念上。第 2 题答不出，你会把"短码唯一"设计成一次写前查重 —— 而正文从头到尾在论证为什么那条路的尾延迟没有上界。
+**如果这是你在 `START-HERE` Week 1 的诊断性检查点**：先只用“W1 最低前置”完成 45 分钟计时。你此时应能覆盖需求、估算、API / 数据模型、缓存和基本失败路径；发号器、共识与负载卸载还没排期，第一次答不出是预期结果。计时结束后再用“后续深挖前置”标记知识缺口，**不要把未学内容计为失败**。
 
-**先确认你能回答这三个问题**
+### W1 最低前置：计时前要会
+
+先确认你能回答这三个问题：
 
 1. 缓存穿透和缓存雪崩的区别是什么？空值缓存（negative caching）解决的是哪一个？
-   答不出 → 先读 [`01-building-blocks/02-caching.md` §3](../01-building-blocks/02-caching.md)
+   答不出 → 先读 [`01-building-blocks/02-caching.md` §3](../01-building-blocks/02-caching.md#3-三大经典故障穿透击穿雪崩)
 2. "先 `SELECT` 看看有没有，没有就 `INSERT`"，两个并发请求会发生什么？数据库的默认隔离级别挡不挡得住？
-   答不出 → 先读 [`00-foundations/00-concepts.md` §7](../00-foundations/00-concepts.md)
+   答不出 → 先读 [`00-foundations/00-concepts.md` §7](../00-foundations/00-concepts.md#7-事务与隔离级别)
 3. "最终一致"承诺多久收敛？边缘 KV 说"写入最多 60 秒后全球可见"，这算不算 bug？
-   答不出 → 先读 [`00-foundations/00-concepts.md` §6](../00-foundations/00-concepts.md)
+   答不出 → 先读 [`00-foundations/00-concepts.md` §6](../00-foundations/00-concepts.md#6-什么是一致性--一个词两种完全不同的意思)
 
-**这道题会用到的构件**
+**完整阅读会用到的构件**
 
-| 构件 | 用在哪 | 详见 |
-|---|---|---|
-| 容量估算与单位经济 | §2 算出 62⁷ 与 0.104% 填充率，并判定"带宽不是瓶颈、可用性才是" | [`00-foundations/02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §2 §6 |
-| 单向门（one-way door）与可逆性 | §4.3 301 是全书最典型的单向门 | [`00-foundations/03-tradeoff-framework.md`](../00-foundations/03-tradeoff-framework.md) §3 |
-| 缓存分层 / 穿透 / 热 Key / 边缘缓存 | §4.4 四层缓存、空值缓存、爆款短链为什么最好处理 | [`01-building-blocks/02-caching.md`](../01-building-blocks/02-caching.md) §3 §4 §6 |
-| 协调成本；共识 ≠ 复制 | §4.1 号段为什么零协调；§4.2 自定义码为什么需要共识 | [`01-building-blocks/05-consensus-and-coordination.md`](../01-building-blocks/05-consensus-and-coordination.md) §1 §9 |
-| 有界队列与负载卸载 | §4.5 点击管道"满即丢并计数"，绝不反压到跳转 | [`05-reliability/03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) §6 |
+| 阶段 | 构件 | 用在哪 | 详见 |
+|---|---|---|---|
+| **W1 最低前置** | 容量估算 | §2 算出 62⁷ 与 0.104% 填充率，并判定“带宽不是瓶颈、可用性才是” | [`00/02 §1–§3`](../00-foundations/02-capacity-estimation.md#1-估算的黄金流程) |
+| **W1 最低前置** | 缓存模式 / 穿透 / 热 Key | §4.4 先解释 cache-aside、空值缓存和爆款短链 | [`01/02 §2–§4`](../01-building-blocks/02-caching.md#2-缓存模式) |
+| **后续深挖前置** | 单位经济与边缘缓存 | §2 的价格算例与 §4.4 的 CDN / 边缘 KV 选择；W1 对照时可先跳过 | [`00/02 §6`](../00-foundations/02-capacity-estimation.md#6-成本建模单位经济unit-economics)、[`01/02 §6`](../01-building-blocks/02-caching.md#6-cdn-与边缘缓存) |
+| **后续深挖前置** | 单向门（one-way door）与可逆性 | §4.3 为什么 301 难以撤回，以及何时仍应选 302 | [`00/03 §2`](../00-foundations/03-tradeoff-framework.md#2-决策的四象限法) |
+| **后续深挖前置** | 协调成本；共识 ≠ 复制 | §4.1 号段为什么可减少协调；§4.2 自定义码为什么需要线性化的命名空间占用 | [`01/05 §1、§9`](../01-building-blocks/05-consensus-and-coordination.md#1-共识解决的到底是什么问题) |
+| **后续深挖前置** | 有界队列与负载卸载 | §4.5 点击管道“满即丢并计数”，绝不反压到跳转 | [`05/03 §6`](../05-reliability/03-resilience-patterns.md#6-负载卸载load-shedding与准入控制) |
+
+> **对照规则**：W1 检查点只给前两行计分；后续各行用于告诉你 Week 2 之后为什么要回来重做，而不是要求你提前补课。
 
 **这道题的一句话本质**
 
@@ -78,7 +83,7 @@
 ```
 ① 读（跳转）
    1 亿/天 ÷ 86,400 = 1,157 QPS 均值
-   日内峰谷比 3×（社交流量白天集中）→ 约 3,500 QPS 峰值
+   日内峰均比 3×（社交流量白天集中）→ 约 3,500 QPS 峰值
 
 ② 写（创建）
    100 万/天 ÷ 86,400 = 11.6 QPS 均值 × 5（营销活动集中投放）≈ 58 QPS 峰值
@@ -106,7 +111,9 @@
    ⇒ 用短域名 + cookieless 域，请求头能再砍一半
 
 ⑥ 连接数（Little's Law）
-   在途请求 = 3,500 QPS × 5 ms = 17.5   —— 十几个。即使 p99 到 50 ms 也只有 175
+   若稳定峰值窗口的平均停留时间为 5 ms：平均在途 = 3,500 QPS × 0.005 s = 17.5
+   若该窗口的平均停留时间恶化到 50 ms：平均在途 = 175
+   p99 = 50 ms 只能描述尾部，不能直接代入 Little's Law；尾部容量另看分布、突发与压测
 
 ⑦ 成本量级（2026 年中，随时变动）
    托管 Postgres 5 TB ≈ $500–1,250/月 ；Redis 2 GB ≈ $50–150/月
@@ -132,7 +139,7 @@
  Client ──▶ API ──▶ ① 校验目标 URL（scheme 白名单 + 恶意域名检查）
                     ② 取一个 ID（本地号段 segment：一次领 10 万个 ID 进内存，之后零网络往返）
                     ③ id → Feistel 置换（用密钥把整数打乱成另一个整数的双射变换，
-                       │                  输入输出一一对应，所以永远不会撞）
+                       │                  输入输出一一对应，所以自动生成码彼此不撞）
                        └─→ base62（用 0-9A-Za-z 这 62 个字符写出这个整数）→ code
                     ④ INSERT (code PK, long_url, owner, expire_at, status)
                        └── 唯一索引就是唯一裁决者；ON CONFLICT 则换下一个 id
@@ -336,7 +343,7 @@ sequenceDiagram
 打到 Postgres = 3,500 QPS × 0.16% ≈ 5.6 QPS   ← 数据库基本在睡觉
 ```
 
-**热点短链（一条被转爆，单 key 50 万 QPS）在这题里是最容易的一类热点**：值不可变、体积 200 字节、所有人拿到的响应完全一样 —— **边缘层原地全额吸收，一次回源都不会发生**。这和 [`02-caching` §4](../01-building-blocks/02-caching.md) 里那种"热 key 带写入"的场景完全不是一个难度，面试时要主动指出这个差别，否则你会花五分钟解决一个不存在的问题。
+**热点短链（一条被转爆，单 key 50 万 QPS）在这题里是最容易的一类热点**：值不可变、体积 200 字节、所有人拿到的响应完全一样 —— **边缘层原地全额吸收，一次回源都不会发生**。这和 [`02-caching` §4](../01-building-blocks/02-caching.md#4-热点-keyhot-key) 里那种"热 key 带写入"的场景完全不是一个难度，面试时要主动指出这个差别，否则你会花五分钟解决一个不存在的问题。
 
 **缓存穿透（lookups for keys that don't exist）**：有人拿随机 7 位码扫。
 
@@ -362,23 +369,24 @@ sequenceDiagram
 |---|---|---|---|---|
 | 同步 `UPDATE links SET clicks = clicks + 1` | +2–10 ms，且**热链接是单行热点，行锁封顶约 1,000 TPS** | 精确 | **统计 DB 挂 = 跳转挂** | ❌ 立即出局 |
 | 同步写 Kafka | +1–3 ms | 高 | Kafka 抖动直接进跳转的 p99 | ❌ 仍然把统计的可用性绑进跳转 |
-| **边缘内存环形缓冲 + 批量 flush（100 ms 或 1,000 条）** | **0 ms**（fire-and-forget） | 崩溃丢最后一批 ≈ 350 条（3,500 事件/s × 100 ms 的攒批窗口） | **零依赖** | ✅ |
+| **边缘平台原生异步队列 / `waitUntil` 投递** | 不阻塞 302；具体开销由平台决定 | 至少一次或有界丢失，按产品配置 | 跳转不等待统计后端 | ✅ 默认 |
+| 常驻进程内环形缓冲 + 批量 flush | 近似不增加跳转关键路径 | 进程崩溃丢最后一批 | 仅适用于生命周期受控的常驻进程 | ✅ 条件适用 |
 
 ```
-Edge Worker
+Edge Worker / 常驻边缘代理
   ├─ 302 已经返回给浏览器 ────────────────► 用户感知到此结束
-  └─ 环形缓冲（有界，1 万条）
-        ├─ 满了 → 丢弃 + dropped_clicks 计数器 +1   ← 有界队列的唯一正确行为
-        └─ 每 100 ms / 每 1,000 条 → 批量投递
+  └─ provider queue / waitUntil；若是常驻进程可再用有界环形缓冲
+        ├─ 达到容量 → 按产品策略丢弃或采样，并记录 dropped_clicks
+        └─ 异步批量投递
               ▼
         Kafka（按 code 分区）
               ├─▶ 流聚合：(code, hour) 计数 upsert ─▶ ClickHouse   ← 看板读这层
-              └─▶ 原始事件 Parquet on S3（永久，$14/月）           ← 重算与争议靠这层
+              └─▶ 原始事件 Parquet on S3（按隐私与争议窗口分层保留）← 重算与争议靠这层
 ```
 
 **三个必须说出口的判断：**
 
-1. **有界队列 + 满即丢 + 计数。** 无界队列只是把 OOM 推迟到最糟的时刻（见 [`03-resilience-patterns` §6](../05-reliability/03-resilience-patterns.md)）。丢弃必须被计数并告警 —— `dropped_clicks / total_clicks` 就是这条管道的健康度指标。
+1. **有界队列 + 明确溢出策略 + 计数。** 无界队列只是把 OOM 推迟到最糟的时刻。统计允许丢失时可丢弃或采样；若合同要求完整，则要用持久队列并让“队列不可用”进入产品决策。无论哪种都记录 `dropped_clicks / attempted_clicks`。Serverless/isolate 运行时不能假设响应结束后内存和后台任务仍存活，必须使用平台提供的异步生命周期 API。
 2. **独立访客用 HyperLogLog（HLL：用固定大小的内存估算"有多少个不同的值"，不保存原始值，因此不可能精确），但只对头部开。** 一个 dense HLL 是 12 KB、标准误差 0.81%。500 万个活跃码全开 = 60 GB，不可接受；只给点击量 Top 1%（5 万条）开 = 600 MB，其余用稀疏表示或干脆不提供。**"精确到个位的独立访客"是一个没人愿意为之付 100 倍成本的需求。**
 3. **点击时间戳用边缘节点的时间，不用浏览器时间。** 且必须区分 `event_time` 与 `ingest_time`，否则统计口径在跨时区和迟到数据（late-arriving data）上会自相矛盾。
 
@@ -391,7 +399,7 @@ Edge Worker
 | 钓鱼分发 | 用可信短域名包装恶意站点 | 创建时 + 跳转时**各查一次**恶意域名库；跳转时查是为了覆盖创建后才被标黑的域名 |
 | Bait-and-switch | 建良性链接过审，之后改目标 | 允许改目标 = 必须**每次改都重新扫描**，且保留目标变更历史；高风险账号禁止改目标 |
 | 危险 scheme | `javascript:` / `data:` / `vbscript:` / `file:` | **白名单只允许 http/https**，黑名单一定会漏 |
-| 内网 SSRF | 你为了抓标题/favicon 去请求目标 URL | 抓取走独立出网代理：拒绝 RFC1918、link-local、`169.254.169.254`；**重定向链的每一跳都要重新解析并重新校验**（防 DNS rebinding） |
+| 内网 SSRF | 你为了抓标题/favicon 去请求目标 URL | 抓取走独立出网代理：拒绝私网、link-local 和元数据地址；每一跳重新解析与校验，**连接时固定到已验证 IP**，不在校验后重新做一次不受约束的 DNS 解析；限制重定向次数与协议 |
 | 重定向链自嵌套 | 短链指向自己的另一个短链，绕过检测 | 拒绝目标域 = 自身短域名；限制跳转链深度 |
 | 域名信誉连坐 | 一个客户的钓鱼链接让整个 `s.co` 进浏览器黑名单 | **付费客户强制自带域名（BYOD）**；免费用户共用一个可牺牲的域名 |
 
@@ -404,7 +412,7 @@ expire_at 上建部分索引（partial index）：WHERE expire_at IS NOT NULL AN
 ```
 
 > **面试金句**
-> "短码永远不回收。一条链接过期或被删除后，我把行保留成墓碑（tombstone），只是拒绝跳转。原因是安全的：如果回收码，攻击者可以盯着一条高流量链接过期，然后立刻把这个码注册到自己的钓鱼站上 —— 而那个码此刻还印在别人的包装盒和二维码上。**存量码在 62⁷ 空间里只占 0.1%，永不回收的成本是零；回收一次的代价是一起安全事故。**"
+> "在本题容量与产品语义下，短码不回收。一条链接过期或被删除后，我保留墓碑并拒绝跳转。若回收，攻击者可以在高流量链接过期后抢注同一码，而旧二维码仍在传播。存量码只占 62⁷ 空间的一小部分，因此墓碑成本远低于复用风险；若未来空间或保留成本成为约束，再重新评估码长，而不是静默复用。"
 > "Short codes are never recycled. When a link expires or is deleted I keep the row as a tombstone and just refuse to redirect. The reason is security: if I recycled codes, an attacker could watch a high-traffic link expire and immediately claim that code for a phishing site — while the code is still printed on someone's packaging and QR codes. Live codes occupy 0.1% of the 62-to-the-7 space, so never recycling costs me nothing, and recycling once costs me an incident."
 
 墓碑的存储成本：36.5 亿行 × 约 50 B（code + status + 时间戳）= 180 GB，年增 18 GB。对照"回收一次短码"可能带来的品牌与法律代价，**这是这套设计里性价比最高的一笔存储支出**。
@@ -515,4 +523,6 @@ v2 · 多区域 + 边缘（本文）
 
 ---
 
-**下一篇** → [09-rate-limiter.md](09-rate-limiter.md)
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**案例顺读下一篇** → [09-rate-limiter.md](09-rate-limiter.md)

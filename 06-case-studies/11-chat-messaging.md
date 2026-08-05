@@ -12,11 +12,11 @@
 **先确认你能回答这三个问题**
 
 1. 判断一个服务是不是无状态的，唯一那句判据是什么？维持 5,000 万条 WebSocket 的接入层属于哪一种？
-   答不出 → 先读 [`00-foundations/00-concepts.md` §9](../00-foundations/00-concepts.md)
+   答不出 → 先读 [`00-foundations/00-concepts.md` §9](../00-foundations/00-concepts.md#9-有状态-vs-无状态)
 2. WebSocket 和 SSE 的区别是什么？一条长连接的成本主要花在内存、稳态 CPU，还是建连那一下？
-   答不出 → 先读 [`01-building-blocks/04-networking-and-edge.md` §2 §4](../01-building-blocks/04-networking-and-edge.md)
+   答不出 → 先读 [`01-building-blocks/04-networking-and-edge.md` §2 §4](../01-building-blocks/04-networking-and-edge.md#2-连接管理)
 3. 为什么"消息会被重复投递"是分布式系统的默认前提而不是 bug？幂等键由谁生成、在哪一层去重？
-   答不出 → 先读 [`00-foundations/01-fundamentals.md` §5](../00-foundations/01-fundamentals.md)
+   答不出 → 先读 [`00-foundations/01-fundamentals.md` §5](../00-foundations/01-fundamentals.md#5-幂等idempotency分布式系统的第一公民)
 
 **这道题会用到的构件**
 
@@ -94,7 +94,7 @@ ECDSA P-256 服务端握手约 2,000–3,000 次/s/核（量级），8 核约 2 
 ### 2.2 消息与投递扇出
 
 ```
-20 亿 条/天 ÷ 86,400 = 23,148 msg/s 均值 × 3（峰谷比）= 69,444 ≈ 7 万 msg/s 峰值
+20 亿 条/天 ÷ 86,400 = 23,148 msg/s 均值 × 3（峰均比）= 69,444 ≈ 7 万 msg/s 峰值
 
 会话构成假设：单聊 60% ｜ 小群（均 20 人）35% ｜ 大群（均 5,000 人）5%
 在线投递次数 = (成员数 − 1) × 1.6 端 × 60% 在线率
@@ -106,7 +106,7 @@ ECDSA P-256 服务端握手约 2,000–3,000 次/s/核（量级），8 核约 2 
 大群改读扩散：0.6 + 6.38 = 6.98 ≈ 7 次投递/消息 ⇒ 降 35 倍；峰值投递 7 万×7 = 49 万/s
 ```
 
-**推论 2：5% 的会话贡献 97% 的投递量。** 这是"大群必须从主链路物理分离"的量化根据 —— 和信息流里大 V 的结构完全同构（见 [`07-classic-canon.md` §1.3](07-classic-canon.md)）。**面试里把这个百分比说出来，比说十句"大群要特殊处理"有效。**
+**推论 2：5% 的会话贡献 97% 的投递量。** 这是"大群必须从主链路物理分离"的量化根据 —— 和信息流里大 V 的结构完全同构（见 [`07-classic-canon.md` §3](07-classic-canon.md#3-设计信息流--时间线design-a-news-feed--timeline)）。**面试里把这个百分比说出来，比说十句"大群要特殊处理"有效。**
 
 ### 2.3 心跳：比消息量大 24 倍的那笔账
 
@@ -155,7 +155,7 @@ ECDSA P-256 服务端握手约 2,000–3,000 次/s/核（量级），8 核约 2 
      注册/续期租约                                 上行消息
           ▼                                          ▼
  ┌ Session Registry (Redis) ┐          ┌ Logic Svc（按 conv_id 分片）──────┐
- │ gw:7    → alive  EX 30   │          │ ① 幂等：client_msg_id 去重 5 min  │
+ │ gw:boot-uuid → alive EX30│          │ ① 幂等：client_msg_id 持久去重    │
  │ uid:bob → {gw:7, dev, ep}│◄─────────┤ ② 发号：conv_seq = 会话内 +1      │
  └──────────────────────────┘          │ ③ 落库：PK = (conv_id, seq)       │
                                        │ ④ 路由：查 Registry → 直投目标 gw │
@@ -198,14 +198,14 @@ ECDSA P-256 服务端握手约 2,000–3,000 次/s/核（量级），8 核约 2 
                     ⇒ 166.7 万 写/s，17 个 Redis 分片纯做续期
 
  ✅ 两级租约（lease）—— 续期量 166.7 万/s → 50/s，降 33,000 倍
-    第一级  gw:7    → alive  EX 30    每台网关每 10 s 续 1 次；500 台 = 50 次/s
-    第二级  uid:bob → {gw:7, dev_id, conn_epoch}  无 TTL，连接建立时写、正常断开时删
-    读取：先看 gw:7 是否存活（结果本地缓存 1 s）→ 存活则直投；已死则视 uid 条目失效
+    第一级  gw:{boot_uuid} → alive EX 30   每次进程启动生成新 incarnation ID；每 10 s 续期
+    第二级  uid:bob → {gw_boot_uuid, dev_id, conn_epoch}  连接建立时写、正常断开时删
+    读取：先看该 incarnation 的 lease 是否存活（本地缓存 1 s）→ 存活则直投；已死则视 uid 条目失效
     代价：网关被 SIGKILL 时它名下的 uid 条目最长残留 30 s，期间直投失败
           —— 失败即降级为推送 + 拉取，不影响正确性，因为正确性从来就不在推送上
 ```
 
-`conn_epoch` 是单调递增的连接代号（fencing token 的同构物 —— fencing token：一个只增不减的编号，随每次操作一起带下去，下游只认最大的那个，从而让"被取代的旧持有者"的写自动失效）：同一用户新连接建立时 epoch+1，逻辑层投递时携带，网关比对不一致即丢弃 —— 防止"旧连接的残留投递打到新连接上"。
+`boot_uuid` 防止网关重启后复用 `gw:7` 让旧映射重新“存活”；`conn_epoch` 则是用户连接的 fencing token。同一用户新连接建立时 epoch+1，逻辑层投递时携带，网关比对不一致即丢弃。
 
 **单机 10 万连接的其他约束**（面试官会挨个问）：`ulimit -n` 与 `fs.file-max` 都要调（10 万连接 ≈ 10 万 fd）；**端口不是问题** —— 服务端是 `(本机IP:443, 对端IP:对端端口)` 四元组，不受 65535 限制；40 KB/连接里大头是 TCP 收发缓冲，聊天消息小，调到 8–16 KB 后单机可上 30 万；Go/Java 在 10 万连接对象上的 GC STW（stop-the-world：垃圾回收暂停整个进程的那段时间，期间所有连接都收不到数据）是真实约束，每连接的堆对象要压到几十个以内；移动端优先 **HTTP/3 / QUIC**，connection migration 让 WiFi→蜂窝切换不断连，在切换频繁的市场能砍掉 20–40% 的重连（量级，实测差异大）。
 
@@ -217,7 +217,7 @@ ECDSA P-256 服务端握手约 2,000–3,000 次/s/核（量级），8 核约 2 
 |---|---|---|---|---|---|
 | 客户端时间戳 | ❌ | ❌ | ❌ | — | 客户端时钟可伪造，一票否决 |
 | 服务端墙钟（wall-clock）毫秒 | 弱 | ❌ | ❌ NTP 会回拨 | 同毫秒并发无法定序 | 错 |
-| Snowflake / UUIDv7 | ✅ | ❌ | 部分 | 高 | 能排序，**不能判缺** |
+| Snowflake / UUIDv7 | 近似按时间排序；跨节点不保证严格全序 | ❌ | 取决于实现 | 高 | 适合唯一引用，**不能判缺** |
 | **`conv_seq` 会话内单调连续** | ✅ | ✅ | ✅ 与时钟无关 | ~1k–5k msg/s | **正解** |
 
 **"有序"和"连续"是两件事，这是本节唯一的核心。** UUIDv7 可以排序，但客户端拿到 `...a3, ...a9` 两条时无法判断中间是否漏了 —— 因为 ID 空间本来就不连续。而 `seq=1041, 1043` 一眼就能看出缺 1042。**客户端的自证完整性只能建立在连续序号上。**
@@ -225,7 +225,8 @@ ECDSA P-256 服务端握手约 2,000–3,000 次/s/核（量级），8 核约 2 
 **三个 ID 各司其职，不能互相顶替**：
 
 ```
- client_msg_id  UUIDv4，客户端生成，重发时不变  → 幂等去重（服务端 5 min 窗口）
+ client_msg_id  UUIDv4，客户端生成，逻辑消息的所有重发保持不变
+                → 持久去重窗口至少覆盖产品允许的最长离线重试期（本题取 7 天）
  conv_seq       会话内单调 +1，服务端发放       → 排序、定位、拉取水位线、判缺
  msg_id         Snowflake / UUIDv7，全局唯一    → 跨会话引用、日志、媒体 key、审计
 
@@ -330,7 +331,7 @@ sequenceDiagram
 | payload 装什么 | **信封式**：`{conv_id, seq, badge}`，正文客户端拉 | 点开通知多一次网络往返；但 APNs/FCM payload 上限 **4 KB**、内容可能已被撤回、E2EE 下服务端根本没有明文 |
 | 怎么合并 / 去重 | 同会话 5 s 内多条合成一条"3 条新消息"；客户端以 `(conv_id, seq)` 为准，socket 与 push 谁先到用谁 | 人均 push 从 20 条/天降到 8 条/天（降 60%，这是推送量估算的依据）；客户端要维护已收 seq 集合 |
 
-**2026 的通道现实**：FCM 的 batch send 端点已随 legacy API 于 **2024-06-20 关停**，Admin SDK 的 `sendEach` 虽然一次接受 500 条，底层仍是逐条 HTTP 请求（[Firebase 迁移说明](https://firebase.google.com/docs/cloud-messaging/migrate-v1)）。1.4 万 push/s 意味着 1.4 万条并发出网 HTTP/2 流，必须维持长连接池 + 多凭据分流 + 独立失败重试队列；无效 token 不按 APNs/FCM 反馈立即清理，失败率指标会直接失真（见 [`06-notification-platform.md` §4.7](06-notification-platform.md)）。
+**当前的通道现实**：Firebase Admin SDK 的 `sendEach` 一次最多接收 500 条消息，但会为列表里的**每条消息各发起一次 RPC**（[Firebase Admin SDK API 参考](https://firebase.google.com/docs/reference/admin/node/firebase-admin.messaging.messaging#messagingsendeach)）。因此“传入 500 条”不等于“一次网络批量发送”；1.4 万 push/s 仍要按大量并发出网请求来设计连接复用、限流和独立失败重试队列。无效 token 不按 APNs/FCM 反馈及时清理，失败率指标会直接失真（见 [`06-notification-platform.md` §4.7](06-notification-platform.md#47-退避backoff供应商配额bounce-与信誉)）。
 
 ### 4.5 多端同步：水位线（watermark）设计决定了存储规模
 
@@ -494,13 +495,13 @@ v3  多区域 + 会话归属地路由，或 E2EE（MLS）
 
 | 这题用到的构件 | 章节 |
 |---|---|
-| WebSocket vs SSE、空闲超时与优雅关闭、QUIC connection migration | [`01-building-blocks/04-networking-and-edge` §2、§4](../01-building-blocks/04-networking-and-edge.md) |
-| 租约（lease）、fencing token、时钟为什么不可信 | [`01-building-blocks/05-consensus-and-coordination` §4、§5](../01-building-blocks/05-consensus-and-coordination.md) |
+| WebSocket vs SSE、空闲超时与优雅关闭、QUIC connection migration | [`01-building-blocks/04-networking-and-edge` §2、§4](../01-building-blocks/04-networking-and-edge.md#2-连接管理) |
+| 租约（lease）、fencing token、时钟为什么不可信 | [`01-building-blocks/05-consensus-and-coordination` §4、§5](../01-building-blocks/05-consensus-and-coordination.md#4-租约lease比锁更好的抽象) |
 | 复合主键 `(conv_id, seq)`、LSM 范围读、墓碑（tombstone）｜ Registry 的本地 L1 缓存、TTL 抖动 ｜ 去重窗口、消费者 lag、优先级队列 | [`01-storage-engines`](../01-building-blocks/01-storage-engines.md) ｜ [`02-caching`](../01-building-blocks/02-caching.md) ｜ [`03-messaging-and-streams`](../01-building-blocks/03-messaging-and-streams.md) |
-| 峰谷比、Little's Law、并发连接估算 | [`00-foundations/02-capacity-estimation`](../00-foundations/02-capacity-estimation.md) |
+| 峰均比、Little's Law、并发连接估算 | [`00-foundations/02-capacity-estimation`](../00-foundations/02-capacity-estimation.md) |
 | 退避与抖动、重试放大、优雅降级 ｜ 撞墙信号怎么定 | [`03-resilience-patterns`](../05-reliability/03-resilience-patterns.md) ｜ [`05-scaling-playbook`](../05-reliability/05-scaling-playbook.md) |
-| APNs/FCM 通道、token 生命周期、免打扰与合并 | [`06-notification-platform` §4.4、§4.7](06-notification-platform.md) |
-| 长连接 + presence 的同构问题、离线合并 ｜ 本题的压缩版（母题 D） | [`05-realtime-collaboration` §4.4、§4.5](05-realtime-collaboration.md) ｜ [`07-classic-canon` §1.4](07-classic-canon.md) |
+| APNs/FCM 通道、token 生命周期、免打扰与合并 | [`06-notification-platform` §4.4、§4.7](06-notification-platform.md#44-用户偏好与免打扰) |
+| 长连接 + presence 的同构问题、离线合并 ｜ 本题的压缩版（母题 D） | [`05-realtime-collaboration` §4.4、§4.5](05-realtime-collaboration.md#44-presence-与光标高频低价值数据的正确姿势) ｜ [`07-classic-canon` §4](07-classic-canon.md#4-设计聊天系统design-a-chat--messaging-system) |
 
 ---
 
@@ -530,4 +531,6 @@ v3  多区域 + 会话归属地路由，或 E2EE（MLS）
 
 ---
 
-**下一篇** → [12-distributed-cache.md](12-distributed-cache.md)：一致性哈希是入场券，缓存挂了数据库怎么活才是评分点。
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**案例顺读下一篇** → [12-distributed-cache.md](12-distributed-cache.md)：一致性哈希是入场券，缓存挂了数据库怎么活才是评分点。

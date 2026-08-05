@@ -1,7 +1,9 @@
 # 05 · 发布工程（release engineering）
 
-> 发布工程的全部内容可以压缩成一句话：**任何时刻，生产上必须能同时跑新旧两个版本的代码，且数据库对两者都是合法的。**
-> 这一条推导出后面所有规则。做不到这一条的团队，回滚（rollback）按钮是假的。
+> 发布工程的默认约束可以压缩成一句话：**滚动发布和回滚窗口内，新旧两个版本会同时存在，数据库与消息契约必须对两者都合法。**
+> 如果业务明确选择停机切换，也要把停机、恢复和前滚方案写成另一份契约；不能一边滚动发布，一边假设只有新版本在线。
+>
+> **阅读分层与时间边界**：§1–§6 是所有全栈工程师都应掌握的 Core；§7 是 AI 系统扩展。阈值、时长、DORA 档位及供应商模型/缓存/价格是示例或 **2026-08 快照**，用于展示决策方法，不是可直接照抄的承诺。
 
 ---
 
@@ -18,12 +20,12 @@
 
 | 概念 | 一句话 | 详见 |
 |---|---|---|
-| 无状态服务与滚动重启 | 杀掉任意一台不会永久丢东西的服务，才敢一台一台重启；这决定了发布期间新旧版本必然并存 | [00-concepts §9](../00-foundations/00-concepts.md) |
-| p50 / p99 与分位数 | 排序后处在某个百分比位置的耗时；平均值会掩盖发布带来的尾部恶化 | [00-concepts §3](../00-foundations/00-concepts.md) |
+| 无状态服务与滚动重启 | 杀掉任意一台不会永久丢东西的服务，才敢一台一台重启；这决定了发布期间新旧版本必然并存 | [00-concepts §9](../00-foundations/00-concepts.md#9-有状态-vs-无状态) |
+| p50 / p99 与分位数 | 排序后处在某个百分比位置的耗时；平均值会掩盖发布带来的尾部恶化 | [00-concepts §3](../00-foundations/00-concepts.md#3-为什么平均值是骗人的p50--p90--p99) |
 | SLI / SLO / 燃尽率 | 衡量用户体验的那个比值 / 对它的承诺 / 错误预算被消耗掉的速度 | [05/01](../05-reliability/01-slo-and-error-budget.md) |
-| 幂等 | 同一操作做多次和做一次效果相同 —— 回填脚本必须满足它才能随时中断重跑 | [00-concepts §12](../00-foundations/00-concepts.md) |
-| 副本与复制延迟 | 同一份数据的多个拷贝；主库的写落到只读副本上需要时间，回填限速限的就是它 | [00-concepts §5、§6](../00-foundations/00-concepts.md) |
-| 爆炸半径 / cell | 一次故障最多能波及多少租户；cell 是把这个数从 100% 压到 1/N 的部署单位 | [03/01 §4](01-control-plane.md) |
+| 幂等 | 同一操作做多次和做一次效果相同 —— 回填脚本必须满足它才能随时中断重跑 | [00-concepts §12](../00-foundations/00-concepts.md#12-本章术语速查) |
+| 副本与复制延迟 | 同一份数据的多个拷贝；主库的写落到只读副本上需要时间，回填限速限的就是它 | [00-concepts §5、§6](../00-foundations/00-concepts.md#5-副本分片分区--三个被混用的词) |
+| 爆炸半径 / cell | 一次故障最多能波及多少租户；cell 把故障限制在一个部署单元，但真实影响要按该 cell 的流量/收入/关键租户权重计算 | [03/01 §4](01-control-plane.md#4-cell-架构cell-based-architecture) |
 
 **这一章要回答的问题**
 
@@ -65,7 +67,7 @@
 - 高风险变更可以先在生产环境静默运行数天再打开
 - 发布窗口不再需要"全公司周四晚上"
 
-**度量**（DORA 四指标 —— DevOps Research and Assessment 多年行业调研收敛出的四个交付效能指标，用来判断你处在哪一档）：
+**度量**（DORA 四指标 —— DevOps Research and Assessment 的行业研究指标；下表档位是历史/示意口径，采用时应注明报告年份）：
 
 | 指标 | 精英档 | 低效档 | 说明 |
 |---|---|---|---|
@@ -74,7 +76,7 @@
 | **变更失败率（change failure rate）** | 5–15% | 40–60% | **最重要的一个**，它决定你敢不敢加速 |
 | 恢复时间（time to restore / MTTR） | < 1 小时 | > 1 周 | 自动回滚能把它压到分钟级 |
 
-> 如果变更失败率 > 30%，先别谈提高部署频率 —— 你只会更快地制造事故。先把金丝雀门禁（canary gate）和 schema 纪律做好。
+> 例如，当变更失败率持续高于团队阈值（可先用 30% 作为诊断线）时，优先降低单次变更规模、补金丝雀门禁和 schema 纪律，再讨论提高频率；不要把示例阈值当行业定律。
 
 ---
 
@@ -126,8 +128,8 @@ def is_enabled(flag_key, entity_id, rollout_bps):        # bps = 万分比
 ### 2.4 Kill switch 的三个硬要求
 
 1. **通路独立**：不能依赖正在故障的那个系统（典型翻车：kill switch 的配置存在你正要关掉的服务背后的数据库里）。
-2. **生效时间 < 30 秒**：推送（SSE/长轮询 long polling）而非 5 分钟轮询。事故中的 5 分钟是很长的时间。
-3. **定期演练（game day）**：每季度真的拉一次。没演练过的 kill switch 在事故当天有很高概率是坏的。
+2. **生效时间有可测目标**：例如高风险功能要求 p99 < 30 秒，使用推送（SSE/长轮询 long polling）而非长周期轮询；具体目标来自事故容忍度。
+3. **定期演练（game day）**：例如每季度执行一次，并记录端到端生效分布；周期按风险调整。
 
 ---
 
@@ -139,33 +141,34 @@ def is_enabled(flag_key, entity_id, rollout_bps):        # bps = 万分比
 | **蓝绿（blue-green）** | 秒（切流） | **2×** | 全量切换的兼容性 | 渐进信号（要么全好要么全坏） |
 | **影子流量（shadow traffic）** | N/A（不影响用户） | +1× 计算 | 性能、响应差异 | **写路径**（有副作用，除非做完整的副作用隔离） |
 | **Ring / 按租户放量** | 分钟~天 | 低 | 租户维度的爆炸半径（blast radius）、企业客户的定制路径 | 需要租户路由能力 |
-| **按 cell 部署** | 分钟 | 低 | 单元级隔离，最坏影响 ≤ 1/N 流量 | 需要 cell 架构（见 [01-control-plane.md](01-control-plane.md)） |
+| **按 cell 部署** | 分钟 | 低 | 单元级隔离；名义租户占比约为 1/K，真实影响取决于 cell 权重 | 需要 cell 架构与均衡策略（见 [01-control-plane.md](01-control-plane.md)） |
 
 **默认组合**：金丝雀（自动门禁）→ ring 放量（内部 → 小租户 → 大租户）→ 全量。蓝绿只在"必须原子切换"（比如换了存储引擎）时用，因为它的 2× 资源成本和"没有中间信号"是真实缺点。
 
 ### 3.1 金丝雀的自动回滚判据清单
 
-**四个前置条件**（不满足就不要开自动回滚，会误伤）：
+**四个前置条件**（不满足时进入 Hold/人工判断，不凭少量样本自动放量）：
 
 - [ ] 变更是**无状态可回滚**的：schema 处于 expand 之后、contract 之前
 - [ ] 有**并发运行的基线组（concurrent baseline group）**（同时段的老版本流量），**不是**"和昨天同一时刻比"
-- [ ] 样本量门槛：canary 累计 ≥ **1,000 个请求**且 ≥ **5 分钟**，两者取后到者；不满足就不判定
+- [ ] 在发布前按基线率、最小关注效应（MDE）、期望检验功效和误报预算计算样本量；“1,000 请求 + 5 分钟”只能作为某个高流量服务的示例，不能保证看得见低错误率或 p99 退化
 - [ ] 回滚动作本身经过演练，且回滚后**自动冻结流水线（freeze the pipeline）**（否则下一个人会把同样的变更再推一遍）
 
 **门禁信号**（任一触发即回滚）：
 
 | # | 信号 | 阈值示例 | 判定窗口 | 说明 |
 |---|---|---|---|---|
-| 1 | HTTP 5xx / gRPC 非 OK 率 | canary > baseline × **1.5** 且绝对值 > 0.1% | 5 min | 双条件避免低基数误报 |
-| 2 | 关键路径 p99 延迟 | canary > baseline × **1.2** | 5 min | 用 p99 不用均值 |
-| 3 | **新错误指纹（error fingerprint）** | 出现 baseline 中不存在的 exception 堆栈指纹 | **立即** | 最灵敏的信号 |
-| 4 | 下游依赖错误率 | > baseline × **2** | 5 min | 抓"新版本把下游打挂了" |
-| 5 | 饱和度（saturation） | CPU / 内存 / 连接池 / 队列深度（queue depth）> **85%** | 5 min | 抓资源泄漏 |
-| 6 | **业务 KPI** | 关键转化率 < baseline × **0.95** | 15 min | 抓"技术指标全绿但功能坏了" |
-| 7 | SLO 燃尽率（burn rate） | 1 小时窗口 burn rate > **14.4** | 立即 | 见 [05-reliability/01](../05-reliability/01-slo-and-error-budget.md) |
+| 1 | HTTP 5xx / gRPC 非 OK 率 | 例：差值超过业务阈值，且 canary 相对 baseline 的区间估计排除“无退化” | 短窗 + 长窗 | 同时看事件数与置信/可信区间，避免 1 次错误造成无限倍数 |
+| 2 | 关键路径延迟 | 例：p99 或直方图尾部超过 SLO；canary 与 baseline 的 bootstrap/分桶区间显著分离 | 短窗 + 长窗 | p99 至少需要足够的独立样本；低流量时同时看超阈值请求比例 |
+| 3 | **新错误指纹（error fingerprint）** | 新的高严重度错误达到最小事件数，或单次即属安全/数据破坏类 | 近实时 | 不是所有新堆栈都应“一次即回滚” |
+| 4 | 下游依赖错误率 | 例：相对基线上升且超过绝对影响阈值 | 短窗 + 长窗 | 抓“新版本把下游打挂了” |
+| 5 | 饱和度（saturation） | 接近已验证容量拐点，或增长斜率持续异常 | 多个窗口 | CPU/内存是诊断/保护信号，不替代用户 SLI |
+| 6 | **业务 KPI** | 超出预先定义的护栏及统计区间 | 覆盖业务反馈周期 | 抓“技术指标全绿但功能坏了” |
+| 7 | SLO 燃尽率（burn rate） | 使用成对多窗口规则（如短窗确认 + 长窗消噪），阈值按 SLO 窗口计算 | 多窗口 | 不能只凭一个 1 小时点“立即”判断；见 [05-reliability/01](../05-reliability/01-slo-and-error-budget.md) |
 
-**分阶段与 bake time**：`1% (10min) → 5% (30min) → 25% (1h) → 50% (2h) → 100%`。
-低频路径（月结、导出、Webhook 重试）在 1% 阶段可能一次都没被执行 —— 对这类变更，bake time 必须按**业务周期**而不是时钟设定。
+**分阶段与 bake time 示例**：`1% → 5% → 25% → 50% → 100%`。每档停留到“样本门槛 + 最短观察时间 + 业务周期覆盖”同时满足，而不是固定写死 10/30/60/120 分钟。低频路径（月结、导出、Webhook 重试）在 1% 阶段可能一次都没执行；应配合合成探针、定向 ring 和完整业务周期，不能靠延长几分钟解决。
+
+反复在每个时间点做普通显著性检验会累积误报。流水线应采用预先定义的顺序检验/alpha spending、贝叶斯停止规则或保守的多重比较校正，并把规则版本写入发布记录。统计“显著”也不等于业务“重要”，所以 MDE/护栏必须先写。
 
 **三个反模式**：
 - **用 CPU/内存做主门禁**：滞后且与用户体验不相关。门禁必须是 SLI。
@@ -201,10 +204,10 @@ stateDiagram-v2
     Hold --> Hold: waiting with bake clock paused
     Hold --> B1: telemetry fixed and stage restarted
     Hold --> RB: human aborts or hold TTL expires
-    Hold --> Full: human overrides the gate
+    Hold --> B1: issue fixed, independent approval, restart stage
 ```
 
-> 📖 **读图要点**：两条最该被追问的边其实是**画不出来的那条**和**最危险的那条**。`RB` 没有任何回到 `B1/B10/B50` 的边——回滚即冻结流水线，重新发布必须由人重新起一次流程；而 `Hold --> Full`（人工覆盖门禁）是唯一绕过所有自动判据直达全量的路径，绝大多数"金丝雀明明开着却还是全站挂了"的事故都走的这条边。另外 `Hold` 不通向 `[*]`：它自己永远不会结束，必须靠 TTL 或人来推一把，所以 Hold 必须配告警和超时默认动作（默认应是回滚，不是放行）。
+> 📖 **读图要点**：`RB` 没有直接回到 `B1/B10/B50` 的边——回滚后冻结流水线，修复后重新发起一次可审计流程。`Hold` 也不能绕过门禁直达全量；补齐 telemetry 或修复问题后，只能在独立审批下从当前最低安全档重新开始。Hold 必须配告警和 TTL，超时默认动作通常是回滚；若某业务选择其他动作，要在风险评审里显式记录。
 
 ---
 
@@ -218,39 +221,44 @@ stateDiagram-v2
 |---|---|---|---|---|---|---|
 | **1** | **Expand** | 加**可空**列 / 新表 / 新索引；**不加约束、不加默认值（除非是常量）** | 老代码完全不知道新结构 | ✅ 完全可回滚 | DDL 卡在锁队列 | 分钟 |
 | **2** | **Dual write** | 新代码同时写新旧两处 | **写双，读老** | ✅ 关 flag 即回滚 | 双写不一致率 > 0 | 1 次发布 |
-| **3** | **Backfill** | 分批回填历史数据（**幂等 + 可重跑 + 限速 throttling**） | 写双，读老 | ✅ 新列是纯冗余 | 复制延迟（replication lag：主库上的写传播到只读副本所需的时间，见 [00-concepts §6](../00-foundations/00-concepts.md)）上升、锁等待、批次超时 | 小时~天 |
+| **3** | **Backfill** | 分批回填历史数据（**幂等 + 可重跑 + 限速 throttling**） | 写双，读老 | ✅ 新列是纯冗余 | 复制延迟（replication lag：主库上的写传播到只读副本所需的时间，见 [00-concepts §6](../00-foundations/00-concepts.md#6-什么是一致性--一个词两种完全不同的意思)）上升、锁等待、批次超时 | 小时~天 |
 | **4** | **Verify** | 影子读（shadow read：读的时候同时读新旧两处，只把老的返回给用户，新的仅用于比对）+ 逐行 diff（抽样或全量） | 写双，读老，**旁路比对新** | ✅ 完全可回滚 | diff 率不收敛到 0 | 1~7 天 |
 | **5** | **Switch read** | flag 控制读新 | 写双，**读新** | ✅ **秒级回滚**（翻 flag） | 切读后错误率/空值率 | 1~7 天 bake |
 | **6** | **Contract** | 停写老、加约束、删列/删表 | 只用新 | ❌ **不可逆** | —— | 在第 5 步之后再等 ≥1 个完整回滚窗口 |
 
 **四条纪律**：
-1. **每一步是一次独立发布**，不能合并。合并第 1、2 步是最常见的翻车方式（老实例还在跑时新列已被写入且被加了约束）。
-2. **第 6 步与第 5 步之间至少隔 1–2 周**，覆盖"所有老版本实例都已下线"+"一个完整的回滚窗口"。
+1. **每一步是一个独立、可观察的状态转换**；即使流水线把多个动作自动串起来，也必须能在任一步暂停并验证，不能把破坏性 contract 与首次使用新字段绑在同一回滚单元。
+2. **第 6 步只在兼容窗口证据满足后进行**：所有老实例/离线作业/消费者已下线，回滚窗口已结束，历史消息与备份恢复路径已验证。1–2 周只是示例，不是充分条件。
 3. **Backfill 必须幂等**：用 `WHERE new_col IS NULL LIMIT 1000` 分批，记录进度，随时可中断可重跑。**限速**到复制延迟 < 1 秒。
-4. **删列前先撤权限或改名观察**：`ALTER TABLE ... RENAME COLUMN x TO x_deprecated_20260801`，跑一周没人报错再删。
+4. **删列前先停止所有读写并观察依赖 telemetry**。改名本身也是需要 `ACCESS EXCLUSIVE` 锁的破坏性 DDL，只能在确认无旧调用方后、带 `lock_timeout` 执行；“跑一周没人报错”不是唯一证据。
 
 ### 4.2 在线 DDL（online DDL）实操（Postgres）
 
 ```sql
--- ⚠️ 这两行是强制项，不是建议
-SET lock_timeout = '2s';        -- DDL 拿不到锁就快速失败，外层重试
-SET statement_timeout = '0';    -- 但 DDL 本身不要被 statement_timeout 砍断
+-- 教学示例：在专用迁移会话中执行；秒数/分钟数按表规模和风险校准。
+-- 不要放进一个包住所有语句的事务；CREATE INDEX CONCURRENTLY 不能在事务块内运行。
+SET lock_timeout = '2s';
+SET statement_timeout = '30s';  -- catalog DDL 也要有有限上界；超时后调查，不要无限等
 
 -- ① 加列
 ALTER TABLE orders ADD COLUMN region text;                        -- 瞬时（只改 catalog）
 ALTER TABLE orders ADD COLUMN tier text DEFAULT 'free';           -- PG11+ 瞬时
 ALTER TABLE orders ADD COLUMN uid uuid DEFAULT gen_random_uuid(); -- ❌ volatile 默认值 → 全表重写
 
--- ② 加索引：必须 CONCURRENTLY（不阻塞写，代价是耗时 2–3×，且失败会残留 INVALID 索引）
+-- ② 加索引：大表通常用 CONCURRENTLY；它仍消耗 I/O/CPU、会等旧快照，并非“零影响”
+SET statement_timeout = '2h';   -- 示例：按实测规模给有限上界并监控；不要设为 0
 CREATE INDEX CONCURRENTLY idx_orders_region ON orders (region);
--- 失败后清理：SELECT indexrelid::regclass FROM pg_index WHERE NOT indisvalid;
---             DROP INDEX CONCURRENTLY <name>;
+-- 失败可能残留 INVALID 索引。先确认精确对象，再在独立会话中：
+-- SELECT i.indexrelid::regclass
+-- FROM pg_index i WHERE NOT i.indisvalid AND i.indexrelid = 'idx_orders_region'::regclass;
+-- DROP INDEX CONCURRENTLY idx_orders_region;  -- 仅在上一步确认后执行，再重试创建
 
 -- ③ 加 NOT NULL：直接 SET NOT NULL 会全表扫描并持 ACCESS EXCLUSIVE
 ALTER TABLE orders ADD CONSTRAINT orders_region_nn
       CHECK (region IS NOT NULL) NOT VALID;                       -- 瞬时，只对新写入生效
 ALTER TABLE orders VALIDATE CONSTRAINT orders_region_nn;          -- 只取 SHARE UPDATE EXCLUSIVE
-ALTER TABLE orders ALTER COLUMN region SET NOT NULL;              -- PG12+ 复用已验证的 CHECK，跳过全表扫
+SET statement_timeout = '30s';
+ALTER TABLE orders ALTER COLUMN region SET NOT NULL;              -- 可复用已验证 CHECK 避免验证扫描；仍需短暂 ACCESS EXCLUSIVE
 
 -- ④ 加外键：同样 NOT VALID → VALIDATE
 ALTER TABLE orders ADD CONSTRAINT fk_tenant
@@ -263,18 +271,18 @@ ALTER TABLE orders VALIDATE CONSTRAINT fk_tenant;
 
 > **Staff 级的那个细节：锁队列（lock queue）。**
 > `ALTER TABLE` 需要 ACCESS EXCLUSIVE 锁。它在**等锁**的时候，所有后到的查询（包括 `SELECT`）都会排在它后面 —— Postgres 的锁队列是 FIFO。所以一个"瞬时"的 DDL 撞上一个跑了 30 秒的分析查询，会造成 **30 秒的全表不可用**，且监控上看起来像"数据库突然挂了"。
-> `lock_timeout = '2s'` + 外层指数退避（exponential backoff）重试是唯一正确的做法。这一条比本节其他所有内容加起来更常救命。
+> 有限 `lock_timeout`、有限 `statement_timeout`、监控锁等待/复制延迟、在低风险窗口中有限次重试，是一组常见保护。不要无上限自动重试：连续失败意味着应调查长事务、旧快照或容量，而不是不断敲锁队列。
 
-**MySQL 侧**：`ALGORITHM=INSTANT` 覆盖加列等一部分操作；其余用 [gh-ost](https://github.com/github/gh-ost)（基于 binlog，无触发器，**可暂停、可限流、可随时中止**）或 `pt-online-schema-change`（基于触发器，写放大（write amplification：一次逻辑写引发多次实际写，见 [00-concepts §12](../00-foundations/00-concepts.md)）更大）。选 gh-ost。
+**MySQL 侧**：先在目标版本、表结构和复制拓扑上确认 `ALGORITHM=INSTANT/INPLACE` 的实际支持与锁行为；否则评估原生 online DDL、[gh-ost](https://github.com/github/gh-ost) 或 `pt-online-schema-change`。工具选择取决于 binlog、触发器、外键、复制和运维能力，不能一律“选 gh-ost”；都要先在等比例副本演练并设置暂停/中止阈值。
 
 ### 4.3 回滚策略的分层现实
 
 | 回滚对象 | 可行性 | 手段 | 时间 |
 |---|---|---|---|
-| **代码** | 总是可行 | 镜像回退 / flag | 秒~分钟 |
-| **Schema（expand 阶段）** | 可行 | 删掉新增的可空列/索引 | 分钟 |
+| **代码** | 仅在旧代码仍能解释当前 schema/数据/消息时可行 | 镜像回退 / flag | 秒~分钟 |
+| **Schema（expand 阶段）** | 逻辑上通常可忽略 | 先让旧代码忽略新结构；清理列/索引可延后，不要为“回滚干净”冒险做 DDL | 分钟~后续窗口 |
 | **Schema（contract 之后）** | ❌ 不可行 | 只能**前滚（roll forward）** | —— |
-| **数据（已被新代码写坏）** | ❌ 几乎不可行 | 从备份做 PITR（point-in-time recovery，时间点恢复：拿全量备份 + 之后的日志把整个库回放到某个时刻，会连带回滚其他数据） | 小时 |
+| **数据（已被新代码写坏）** | 通常不能靠代码回退自动恢复 | 优先用幂等修复/补偿和受影响集合；PITR 会连带回滚其他租户/写入，通常只用于独立恢复环境后提取数据或灾难恢复 | 小时~天 |
 
 ⇒ **所有的发布纪律本质上都是在保护"代码回滚"这一条永远可用。** 一旦某次发布让数据进入了老代码无法解释的状态，你就失去了回滚能力。
 
@@ -305,13 +313,13 @@ API 版本化的完整讨论见 [02-architecture-patterns/04-api-design-and-vers
 
 ## 6. 发布的可观测性
 
-**没有部署标记的监控系统，事故排查会浪费掉 80% 的时间。**
+**没有部署标记，事故排查常会把大量时间浪费在“最近发生了什么变化”上。** 具体节省比例要用团队自己的事件数据验证。
 
 必须做的三件事：
 
 1. **部署标记（deployment marker）**：每次部署往指标系统打一条带 `service / version / commit_sha / actor` 的注解事件。所有 dashboard 自动画竖线。
 2. **`version` 作为一等指标维度（first-class metric dimension）**：所有 RED 指标（Rate/Error/Duration）带 `version` 标签，这样金丝雀对比是一次查询而不是一个项目。
-3. **告警自动关联最近变更**：告警触发时，自动附上"过去 60 分钟内该服务及其直接依赖的所有部署与 flag 变更"。这一条能把 MTTR 砍掉一半。
+3. **告警自动关联最近变更**：告警触发时，自动附上一个可配置窗口（例如过去 60 分钟）内该服务及直接依赖的部署与 flag 变更。它通常能缩短排查，但效果要以事件数据衡量。
 
 **自动化的变更前后报告**：每次部署完成后 30 分钟自动生成 diff 报告（错误率、p50/p99、成本、关键 KPI），推到部署 PR 的评论里。它的价值不在于告警（金丝雀已经做了），而在于**让缓慢劣化（gradual degradation）被看见**。
 
@@ -344,11 +352,11 @@ Anthropic 的 prompt cache **失效级联（invalidation cascade）顺序是 `to
 | system prompt | system + messages | 大部分失效 |
 | `tool_choice` / 增删图片 | 仅 messages | 影响小 |
 
-缓存读价格约为标准输入价的 **10%**（三家一致，2026 年中量级，随时变动）⇒ **一次工具定义变更会让输入成本在缓存重建期间瞬间涨到 10 倍**，同时 TTFT（time to first token：从发出请求到模型吐出第一个 token 的等待时间）显著恶化。
+供应商的缓存价格、最小前缀和失效规则不同且会变。若某供应商在采购快照中把缓存读定为标准输入价的约 10%，全量 miss 会让**原本可缓存的那部分输入**接近 10×；总账单涨幅还取决于可缓存占比、输出 token 和缓存写费用，不能直接宣称整单必然 10×。TTFT 也应以你的请求分布实测。
 
 **工程结论**：
 - 工具定义变更要**错峰发布（off-peak rollout）**（低谷期），并盯住 cache hit rate 指标直到恢复。
-- 把工具定义拆成"稳定核心 + 可变扩展"没用 —— 缓存前缀是**逐 token 精确匹配**的，任何一个字节的变化都全废。
+- 在“工具定义位于整个缓存前缀之前、且逐 token 精确匹配”的供应商实现里，改动前部会使其后的缓存失效；稳定核心/可变扩展是否有用取决于 API 是否允许独立缓存段，需按实际 provider 验证。
 - 所以：**把工具定义的发布节奏和提示词的发布节奏分开**，前者按周甚至按月，后者可以按天。
 
 ### 7.2 "提示词是代码还是配置"——工程结论
@@ -368,7 +376,7 @@ Anthropic 的 prompt cache **失效级联（invalidation cascade）顺序是 `to
 
 ### 7.3 回归评测门禁（regression eval gate）
 
-**门禁的形态不是"必须 ≥ X 分"，而是"不得比当前生产基线退化超过 2pp（percentage point，百分点：从 84% 掉到 82% 就是 2pp），且不得在任何一个已知失败类别上出现新增失败"。** 绝对分数会诱导你去优化基准，相对退化才反映真实风险。
+门禁通常同时包含绝对质量底线、相对生产基线的非劣界限，以及安全/合规类别的零容忍项。例如“总体通过率不得比基线退化超过 2pp”只是示例；样本量不足时，观察到 2pp 差异并不代表能可靠判断，应报告区间并按场景加权。
 
 | 要求 | 数值 | 来源/理由 |
 |---|---|---|
@@ -376,7 +384,7 @@ Anthropic 的 prompt cache **失效级联（invalidation cascade）顺序是 `to
 | 初次错误分析 | **20–50 条** trace；后续每轮 **≥100 条** | 饱和判据：连续约 20 条无新失败类别 |
 | 错误分析节奏 | 活跃期每 **2–4 周**一轮；间隔期每周看 10–20 条 | |
 | 失败模式分类法（failure taxonomy）规模 | **5–10 类**；手工 open-code 30–50 条后再让 LLM 辅助聚类 | |
-| LLM-as-judge 上线门槛 | 与人工的 **Cohen's kappa（衡量两个评判者一致程度的系数，已经扣掉"瞎猜也会碰巧一致"的那部分；1 是完全一致，0 等同于随机）≥ 0.6 可上线，≥ 0.8 强**（人-人基线 0.5–0.8） | |
+| LLM-as-judge 上线门槛 | **没有跨任务通用的 κ 数字。** 先以双人标注得到人—人基线，再按类别比例、误放/误杀成本和上线风险选择候选阈值；同时报告混淆矩阵、样本量与置信区间 | κ 会受 rubric 和 prevalence 影响；`0.6` 只能是某次实验的候选起点，不能写成统一上线线 |
 
 ⚠️ **公开 benchmark 不能作为验收门禁**。Berkeley RDI 在 2026-04 的工作里把 **8 个主流 Agent 基准中的 7 个刷到 ~100%**：10 行 `conftest.py` 解决 SWE-bench Verified 全部实例；一个假的 `curl` wrapper 拿下 Terminal-Bench 全部 89 个任务。**基准分数是营销素材，回归集才是门禁。**
 
@@ -386,10 +394,10 @@ Anthropic 的 prompt cache **失效级联（invalidation cascade）顺序是 `to
 
 **换模型不是换一个字符串。** 一次模型迁移至少要重算四件事：
 
-1. **Tokenizer 变了** —— Claude 4.7 及以后（Opus 4.7/4.8/5、Sonnet 5、Fable 5）同样文本约多产生 **+30% token**。你的上下文预算（context budget）、截断阈值（truncation threshold）、成本模型、限流阈值全部要重算。
-2. **最小可缓存前缀长度按模型不同且非单调** —— **512**（Opus 5 / Fable 5 / Mythos 5）、**1024**（Opus 4.8 / Sonnet 5 / 4.6 / 4.5）、**2048**（Opus 4.7 / Haiku 3.5）、**4096**（Opus 4.6 / 4.5 / Haiku 4.5）（2026 年中量级，随时变动）。换模型可能让原本命中的缓存全部失效。
+1. **Tokenizer 可能变** —— 同一文本的 token 数、特殊 token 和截断位置都可能变化。不要套用一个“约 +30%”到所有模型；对真实语料重新测量上下文预算、截断阈值、成本与限流。
+2. **缓存条件可能变** —— 最小可缓存前缀、TTL、写/读价格和失效规则按模型与端点不同且非单调。迁移当天从官方文档生成配置快照，并用真实前缀验证命中。
 3. **提示词不可移植** —— 为 A 模型调优的提示词在 B 模型上通常退化。迁移必须重跑完整回归集，且往往要重写系统提示。
-4. **定价切换也是发布事件** —— 例如 Claude Sonnet 5 的促销价有明确切换日 **2026-09-01**（$2/$10 → $3/$15，2026 年中量级，随时变动）。把它当作一次有日期的容量/成本变更来排期。
+4. **定价切换也是发布事件** —— 供应商价格、促销截止日和区域附加费应进入带 `price_version/effective_at` 的成本配置；切换前用真实流量回放预算，不在常青文档里硬编码未来价格。
 
 **纪律**：`model` 字段一律写完整 snapshot ID。用 `latest` 别名等于把"发布"这个动作外包给了供应商 —— 你会在某个周三凌晨经历一次你没做的发布。把每个模型的 EOL 日期当作**有到期日的技术债（technical debt）**跟踪，和证书过期一样对待。
 
@@ -397,7 +405,7 @@ Anthropic 的 prompt cache **失效级联（invalidation cascade）顺序是 `to
 
 - **分流单位（unit of assignment）是会话/任务，不是请求。** 同一会话必须 sticky（粘性：同一个会话的所有请求固定落到同一个分组、同一个后端），否则：(a) 前缀缓存全废（成本与 TTFT 双恶化），(b) 用户看到人格分裂的行为，(c) 指标被污染。
 - **LLM 的方差（variance）比传统服务大**：同一输入多次采样结果不同 ⇒ 需要的样本量显著更大，1% 流量的小实验通常得不出结论。先算功效（statistical power：在差异真实存在的前提下，这次实验能把它检出来的概率），再开实验。
-- **影子流量对 LLM 是成本翻倍**：必须抽样（sampling，1–5%），且只影子**读路径**（有工具副作用的路径不能影子）。
+- **影子流量会增加模型与下游成本**：全量复制时模型计算部分可能接近翻倍，实际取决于缓存和抽样率。先从经预算批准的小比例示例（如 1–5%）开始；只影子无副作用路径，或把工具/写入替换成严格隔离的模拟器。
 - **在线指标优先于离线分数**：任务完成率、人工干预率（human intervention rate）、重试率、会话轮数中位数、**每任务成本**。离线分数用来挡住明显退化，在线指标用来决定是否全量。
 
 > **面试金句**：
@@ -428,8 +436,8 @@ Anthropic 的 prompt cache **失效级联（invalidation cascade）顺序是 `to
 
 ## 这一章的三句话
 
-1. **所有发布纪律的唯一目的，是保住"代码回滚"这一条永远可用。** 一旦某次发布让数据进入了老代码解释不了的状态，你就已经没有回滚按钮了，只剩前滚 —— 而前滚是在事故现场写新代码，那是你最不该做的事。
-2. **部署和发布必须解耦。** 部署按 CI 的节奏由工程做，发布按业务的节奏由产品翻 flag —— 这就是"回滚要 20 分钟重新构建部署"和"回滚是 3 秒翻一个开关"之间的全部差别，也是 MTTR 从小时级掉到分钟级的唯一便宜手段。
+1. **发布纪律的核心，是在回滚窗口内保留一个已验证的恢复选项。** 一旦新写入、schema 或事件让旧代码无法解释，代码回退就不再等于业务恢复；此时需要预先准备的修复/补偿或前滚方案。
+2. **部署和用户可见的发布应尽量解耦。** 代码先到生产、行为再按 flag/ring 放量，能把多数无状态变更的恢复从“重建部署”缩短为切换已发布版本；涉及数据和外部副作用时仍要走专门恢复流程。
 3. **AI 系统的发布单元不是代码，是（模型 snapshot, 提示词版本, 工具定义哈希, 检索索引版本, 采样参数）这个五元组。** 五个里只要有任何一个能在生产上被单独改掉 —— 后台文本框、`latest` 别名、随手换的 embedding 模型 —— 你的回滚就是假的，而版本错配的账单会比事故本身更吓人。
 
 ---
@@ -449,4 +457,6 @@ Anthropic 的 prompt cache **失效级联（invalidation cascade）顺序是 `to
 
 ---
 
-**下一章** → [`04-ai-agent-systems/`](../04-ai-agent-systems/)：LLM 与 Agent 基础设施。
+**目录下一章（AI / Agent 专项）** → [`04-ai-agent-systems/`](../04-ai-agent-systems/)：负责 AI 应用时再进入 LLM 与 Agent 基础设施。
+
+**通用 Full Stack 主学习链下一篇** → [SLO、SLI 与错误预算](../05-reliability/01-slo-and-error-budget.md)：不负责 AI / Agent 的读者从这里进入可靠性主线。

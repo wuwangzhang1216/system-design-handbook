@@ -20,13 +20,13 @@ resize 与归一化 21 ms、CPU 内存到显存的拷贝 14 ms，GPU 上真正�
 
 | 概念 | 一句话 | 详见 |
 |---|---|---|
-| 延迟 / 吞吐 / 并发 | 三个不能互相替代的量，优化一个通常在牺牲另一个 | [00-concepts §2](../00-foundations/00-concepts.md) |
-| p99 与长尾 | 平均值骗人，长尾由排队和最慢的那一段决定 | [00-concepts §3](../00-foundations/00-concepts.md) |
-| 利用率与排队论 | 利用率超过约 80% 后，排队延迟开始非线性上涨 | [00/02 §3](../00-foundations/02-capacity-estimation.md) |
-| 单位经济模型 | 比成本要折算到"每千次请求多少钱"再比 | [00/02 §6](../00-foundations/02-capacity-estimation.md) |
-| 动态批处理与延迟预算 | 服务端把单条请求偷偷攒成一批；各段 p99 不能相加 | [08/04 §4、§11](04-online-inference.md) |
-| 冷启动的九项拆解 | 权重加载、编译、CUDA graph capture 各占多少秒 | [08/03 §2](03-model-loading-and-warmup.md) |
-| KV cache 与连续批处理 | LLM 推理特有的显存主项与逐 step 重组批的调度粒度 | [04/01 §2–3](../04-ai-agent-systems/01-llm-serving-infra.md) |
+| 延迟 / 吞吐 / 并发 | 三个不能互相替代的量，优化一个通常在牺牲另一个 | [00-concepts §2](../00-foundations/00-concepts.md#2-延迟吞吐并发--三个最常被混淆的词) |
+| p99 与长尾 | 平均值骗人，长尾由排队和最慢的那一段决定 | [00-concepts §3](../00-foundations/00-concepts.md#3-为什么平均值是骗人的p50--p90--p99) |
+| 利用率与排队论 | 利用率超过约 80% 后，排队延迟开始非线性上涨 | [00/02 §3](../00-foundations/02-capacity-estimation.md#3-排队论queueing-theory为什么-80-利用率utilization是危险的) |
+| 单位经济模型 | 比成本要折算到"每千次请求多少钱"再比 | [00/02 §6](../00-foundations/02-capacity-estimation.md#6-成本建模单位经济unit-economics) |
+| 动态批处理与延迟预算 | 服务端把单条请求偷偷攒成一批；各段 p99 不能相加 | [08/04 §4、§11](04-online-inference.md#4-动态批处理原理与两个旋钮) |
+| 冷启动的九项拆解 | 权重加载、编译、CUDA graph capture 各占多少秒 | [08/03 §2](03-model-loading-and-warmup.md#2-冷启动的九项拆解每一项到底多少秒) |
+| KV cache 与连续批处理 | LLM 推理特有的显存主项与逐 step 重组批的调度粒度 | [04/01 §2–3](../04-ai-agent-systems/01-llm-serving-infra.md#2-kv-cache显存预算的主项公式--算例) |
 
 **这一章要回答的问题**
 
@@ -50,7 +50,7 @@ resize 与归一化 21 ms、CPU 内存到显存的拷贝 14 ms，GPU 上真正�
 | 量化感知训练 | QAT, quantization-aware training | 训练过程中就模拟低精度的舍入误差，让模型自己适应 |
 | 量化校准 | calibration (quantization) | 用一小批代表性样本跑一遍前向，记录每个张量的取值范围，据此定缩放系数。⚠️ **这个 `calibration` 和 [08/01 术语表](01-ml-system-overview.md)、[08/08](08-drift-and-monitoring.md) 里的"概率校准"是同名的两件事**：那个指"模型说 70% 会点击的那批样本实际点击率是不是 70%"，是质量指标；这个指低精度转换的定标步骤，是编译期动作。本章 §4 两个意思都出现（量化定标 vs 量化后要重做的概率校准），看上下文区分 |
 | 蒸馏 | distillation | 用大模型输出的概率分布当作"软标签"，训练一个结构更小的模型去模仿它 |
-| MFU | model FLOPs utilization | 模型实际有效的浮点运算量 ÷ 硬件峰值算力；唯一能跨硬件横向比的效率指标 |
+| MFU | model FLOPs utilization | 模型有效 FLOPs ÷ 所选硬件/精度峰值；有助于解释算力利用，但跨硬件比较还要统一 FLOP 口径、精度、稀疏性与 SLO |
 
 ---
 
@@ -156,7 +156,7 @@ ResNet-50 在 eager 模式下大约要启动 200 个 kernel，每个 3–10 µs 
 **推论（这是推荐/排序系统的日常）**：一个"embedding 查表 + 三层 MLP"的排序模型，
 单请求 batch 通常是几十到几百个候选，FLOP 很小、访存很碎、kernel 极多 ——
 它几乎必然同时撞启动墙和访存墙，**量化对它的收益远小于 CUDA Graph**
-（Pinterest 用 CUDA Graph 消除启动开销后的公开数字见 [08/04 §4](04-online-inference.md)）。
+（Pinterest 用 CUDA Graph 消除启动开销后的公开数字见 [08/04 §4](04-online-inference.md#4-动态批处理原理与两个旋钮)）。
 
 ---
 
@@ -170,9 +170,9 @@ ResNet-50 在 eager 模式下大约要启动 200 个 kernel，每个 3–10 µs 
 | 2 | **pinned memory + 异步拷贝流水线** | 1.1–1.4× | 2–5 人日 | 无 | pinned 内存不可换页，开太多会挤爆宿主机内存 |
 | 3 | **动态批处理**（非 LLM） | 吞吐 **2–10×** | 配置项 | 无 | 吞吐的收益**全部由 p99 支付**；见下方指针 |
 | 4 | **CUDA Graph / 算子融合** | 小模型 **1.5–3×**，大模型 1.05–1.2× | 5–15 人日 | 无 | 要求 shape 固定、无 host 侧控制流；捕获本身要 warmup |
-| 5 | **FP16 / BF16** | 1.5–3× | 1–3 人日 | 几乎无损 | FP16 动态范围窄，可能溢出成 NaN；BF16 需 Ampere+ |
+| 5 | **FP16 / BF16** | 1.5–3× | 1–3 人日 | 通常小，但需任务回归 | FP16 动态范围窄；BF16 精度位更少且依赖硬件/kernel 支持 |
 | 6 | **INT8 PTQ** | 访存受限 **≤2×**；算力受限 **≤2×**（相对 FP16/BF16） | 5–20 人日（含精度验证） | 掉点 0–2%，个别模型崩 | 见 §4；per-tensor 对 Transformer 与深度可分离卷积是雷 |
-| 7 | **torch.compile** | 1.1–2× | 2–5 人日 | 无 | **不支持图序列化**，每次进程启动重编译，直接计入冷启动 |
+| 7 | **torch.compile** | 1.1–2× | 2–5 人日 | 数值/图断点/缓存兼容风险 | 编译与缓存计入冷启动；版本、GPU、shape 变化需失效与回退 |
 | 8 | **TensorRT / OpenVINO** | 1.3–3×（vs eager） | 10–30 人日 + 长期维护 | 需重新验证 | engine 绑定 GPU 架构 + 库版本，换卡就要重编；构建 15–40 min |
 | 9 | **蒸馏成更小的模型** | **3–10×** | 4–12 人周（等于训一个新模型） | 掉点 1–3%，需 A/B 验证 | 学生模型上限受教师限制；数据分布变了要重蒸 |
 | 10 | **结构化剪枝** | 1.2–2× | 3–8 人周 | 需 fine-tune | 成本接近蒸馏而收益不如，见 §6 |
@@ -180,9 +180,9 @@ ResNet-50 在 eager 模式下大约要启动 200 个 kernel，每个 3–10 µs 
 | 12 | **换更快的卡** | 1.5–3× | 1 人日 | 无 | 成本同步上涨；对访存受限模型收益远低于算力比（§2） |
 
 **批处理不在本章展开，只给指针和一条警告：** 非 LLM 用 request-level dynamic batching
-（组批后锁定到整批算完），完整旋钮与延迟-吞吐曲线见 [08/04 §4–5](04-online-inference.md)；
+（组批后锁定到整批算完），完整旋钮与延迟-吞吐曲线见 [08/04 §4–5](04-online-inference.md#4-动态批处理原理与两个旋钮)；
 LLM 用 iteration-level continuous batching（每个 decode step 之后重新组批），见
-[04/01 §3](../04-ai-agent-systems/01-llm-serving-infra.md)。**两者调优旋钮完全不同**，
+[04/01 §3](../04-ai-agent-systems/01-llm-serving-infra.md#3-分页连续批处理chunked-prefill)。**两者调优旋钮完全不同**，
 在 LLM 前面再加一层"凑批等待"是纯延迟浪费。警告：Triton 官方的调法是沿延迟预算逐步加
 `max_queue_delay_microseconds` 而不是设大值；`preferred_batch_size` 官方原话是
 *"For most models, preferred_batch_size should not be specified."*（Triton `batcher.md`）。
@@ -204,7 +204,7 @@ LLM 用 iteration-level continuous batching（每个 decode step 之后重新组
 | INT4 | 4 | 定点 | 极窄 | 需专门 kernel | 权重可以，激活基本不行 |
 
 **BF16 与 FP16 的差别只有一句话：BF16 的指数位和 FP32 一样宽，所以数值范围一样，
-代价是有效数字更少。** 这让 BF16 几乎不需要处理溢出，是绝大多数推理场景的正确默认值。
+代价是有效数字更少。** BF16 较少遇到溢出，但它是支持良好的现代 GPU 上的常见起点，不是通用默认答案；最终需用目标硬件、kernel 和任务指标比较 FP16/BF16/FP32。
 
 **PTQ 的完整流程（能在白板上写出来的版本）：**
 
@@ -238,9 +238,7 @@ A100 是 624 TOPS : 312 TFLOPS，H100 是 1,979 TOPS : 989 TFLOPS
 **先判断你在 roofline 的哪一侧，再决定要不要花三周做量化。**
 
 **验证方法不是 accuracy。** 分类任务 top-1 掉 0.3% 你会觉得没事，但线上排序结果可能已经变了。
-正确做法是比对量化前后的**分数分布（score distribution）、校准曲线（calibration，即"模型说 0.7
-的那批样本里真的有 70% 是正例"这条曲线）与预测熵**—— 这三项是"错误率不变但质量下降"的抓手，
-完整的监控方法见 [08/08 §4](08-drift-and-monitoring.md)。**分布对不上就别上线，哪怕 accuracy 一模一样。**
+正确做法是同时比较任务指标（AUC/NDCG/召回/业务约束）、逐样本排序变化、分数分布，以及有标签时的校准曲线。分布变化是排查信号，不等于质量必然下降；分布相同也不能证明逐样本决策正确。按风险设门禁并用金丝雀验证。
 
 ---
 
@@ -273,7 +271,7 @@ shape + 愿意维护编译流水线时 TensorRT 最快；要跨硬件移植时�
 2. **捕获前必须先跑几次 warmup 前向**，把 cuBLAS 初始化、autotune 这些一次性开销先做完，
    否则它们会被录进图里或在第一个真实请求上爆发。⚠️ **warmup 必须覆盖你将要捕获的全部 batch size 集合**，
    否则线上遇到未捕获的形状会静默回落到 eager 慢路径 —— 表现为"p99 偶尔翻三倍"且监控上看不出原因。
-   完整的预热方法与就绪探针设计见 [08/03 §3](03-model-loading-and-warmup.md)。
+   完整的预热方法与就绪探针设计见 [08/03 §3](03-model-loading-and-warmup.md#3-预热跑什么跑多少次怎么算跑完了)。
 3. 捕获本身要花时间，LLM 上是 30–60 s 量级（vLLM 文档），小模型是秒级。**它计入冷启动预算。**
 
 ---
@@ -291,15 +289,14 @@ shape + 愿意维护编译流水线时 TensorRT 最快；要跨硬件移植时�
 | | 结构化剪枝 | 蒸馏 | 直接换更小的现成模型 |
 |---|---|---|---|
 | 典型加速 | 1.2–2× | 3–10× | 3–20× |
-| 工程链路 | 需要剪枝框架 + 敏感度分析 + fine-tune | **就是一次常规训练**，团队已有全部工具 | 只需一次评测 |
+| 工程链路 | 需要剪枝框架 + 敏感度分析 + fine-tune | 教师推理/软标签、学生训练、调参和完整上线验证 | 仍需兼容性、质量与性能评测 |
 | 精度可控性 | 差（剪多少不好预判） | 好（教师提供软标签，收敛稳定） | 差（现成模型未必贴你的数据） |
-| 什么时候选它 | 已有模型必须保留、且只需 1.5× | **默认选项** | 有成熟小模型且你的任务不特殊 |
+| 什么时候选它 | 已有模型必须保留、且只需约 1.5× | 任务窄、量大、教师明显更强且有长期 owner | 有成熟小模型且你的任务不特殊 |
 
-**蒸馏赢在它复用了团队已有的训练流水线。** 额外成本只是"教师模型在全量训练数据上跑一遍前向"——
-一次性、可离线、可以用便宜的抢占式实例做；剪枝则要引入一整套新工具和新的失败模式。
+**蒸馏的优势是可以复用已有训练流水线，但成本不只是教师前向。** 还包括软标签存储/治理、学生架构与损失调参、多种子训练、任务评测和持续重蒸；教师前向可离线并用便宜算力完成，但不是全部工程量。
 **它的代价**：学生模型上限受教师限制（教师错的它照学）、数据分布变了要重蒸，
 **而且蒸出来的是一个全新模型，必须走完整的 shadow（复制一份线上流量喂给它但不用它的结果）→ canary
-流程，不能当作"优化"直接替换**，判据见 [08/09 §2](09-model-deployment.md)。
+流程，不能当作"优化"直接替换**，判据见 [08/09 §2](09-model-deployment.md#2-模型金丝雀该看什么指标每个多久能出结论)。
 
 ---
 
@@ -312,12 +309,12 @@ shape + 愿意维护编译流水线时 TensorRT 最快；要跨硬件移植时�
 | JPEG 解码 1080p | 5–15 ms/张 | 0.3–1 ms/张 | nvJPEG / DALI，把解码放到 GPU |
 | resize + normalize | 2–5 ms/张 | 融进模型第一层 → 0 | 归一化变成一个 conv 前的 scale/shift |
 | 分词（Python 实现） | 单条 0.5–3 ms | 快 3–10× | 换 Rust 实现的 tokenizer |
-| 在线特征取数 | p50 0.6–0.7 ms、p99 2.5–3 ms（Redis，Tecton 文档） | — | **延迟由 feature view 个数决定，不是特征个数** |
+| 在线特征取数 | p50 0.6–0.7 ms、p99 2.5–3 ms（特定 Redis/Tecton 快照） | — | 延迟取决于物理读取、串并行/批量、载荷与后端；view 数只在映射成独立读取时直接增加 RTT |
 | H2D 拷贝（pageable） | ~6 GB/s | ~24 GB/s（PCIe Gen4 ×16 量级；Gen3 ×16 上限约 12 GB/s） | pinned memory + `non_blocking=True` + 独立 stream |
 
 **"用 pandas 做请求时的特征变换"是一个高频错误**：向量化框架的固定开销被压到单行请求上，
 Feast 实测换成原生 Python 快 3–10×（Feast 博客，2025-01-14）。**单请求场景下，框架开销 > 计算本身。**
-表里那一行"feature view 个数决定延迟"的完整延迟预算见 [08/06 §5](06-feature-and-data.md)。
+表里在线特征取数的完整延迟预算与 view/key 映射权衡见 [08/06 §5](06-feature-and-data.md#5-在线特征的延迟预算几百个特征怎么在-10-ms-内取完)。
 
 ```
 优化前（串行，GPU 大段空闲）：
@@ -341,7 +338,7 @@ Feast 实测换成原生 Python 快 3–10×（Feast 博客，2025-01-14）。**
 
 ## 8. CPU vs GPU 的盈亏平衡：公式与算例
 
-**唯一有意义的选型指标是"目标 p95 约束下，每 1,000 次查询多少钱"**（AWS EKS 最佳实践，2025）：
+**一个实用的选型指标是“目标 p95 约束下，每 1,000 次查询多少钱”**；还要同时检查容量阶梯、可用性、冷启动和工程成本：
 
 ```
 C_1k = 1000 × 实例小时价 / (3600 × 该实例在 p95 约束下的可达 QPS)
@@ -357,21 +354,16 @@ C_1k = 1000 × 实例小时价 / (3600 × 该实例在 p95 约束下的可达 QP
 | C_1k @ 全站 100 QPS | **$0.00197**（1 台） | $0.00281（1 台，只用了 14%） |
 | C_1k @ 全站 1,000 QPS | $0.00178（9 台） | **$0.00056**（2 台） |
 
-**盈亏平衡点的闭式解。** 当总流量 Q 低于单卡容量 q_gpu 时，GPU 路线的成本恒为一张卡的价钱
-（卡不能只买半张），而 CPU 路线可以按需要的实例数付费：
+**容量按整台阶梯购买。** 当总流量 Q 低于单卡容量 q_gpu 时，GPU 路线至少一张卡；CPU 也不是连续可分割，而是 `ceil(Q/q_cpu)` 台：
 
 ```
-CPU 成本 ≈ (Q / q_cpu) × P_cpu        GPU 成本 = P_gpu   （Q < q_gpu 时）
-令两者相等：
-                Q* = P_gpu / P_cpu × q_cpu
-本例：Q* = (1.01 / 0.71) × 120 ≈ 171 QPS
+CPU 成本 = ceil(Q / q_cpu) × P_cpu
+GPU 成本 = ceil(Q / q_gpu) × P_gpu
+本例 Q≤120 时 CPU 一台 $0.71/h 更便宜；Q 刚超过 120 时 CPU 跳到两台 $1.42/h，
+而一张 GPU $1.01/h 可撑到约 700 QPS，所以第一个成本交点约在 120 QPS 之后，不是 171 QPS。
 ```
 
-**这个式子里没有 q_gpu。** 低流量时，**GPU 有多快完全不影响盈亏平衡点，只有"卡价 ÷ CPU 实例价"和
-"CPU 单机能扛多少"说了算** —— GPU 再快也救不了"卡没打满"。这正是 MIG / 多模型共卡（§10）的全部经济
-意义：把 `P_gpu` 变成分摊后的价格，从而把 Q* 往下压。171 QPS 与 AWS 的经验口径（**单 endpoint 持续
->100 req/s 就该上 GPU**，AWS EKS BP 2025）同一量级。⚠️ 网上流传的"BERT 类小模型盈亏平衡点约
-5,000 req/s"差了近 50 倍、口径不明，**本书不采信**；一律自测 `cost-per-1,000-queries @ 目标 p95`。
+分数台近似 `Q* = P_gpu/P_cpu × q_cpu` 只适合容量可连续购买或规模足够大时；低流量必须画 `ceil()` 阶梯，且 q_gpu 决定 GPU 下一次扩容的位置。MIG / 多模型共卡通过分摊 `P_gpu` 改变阶梯。不同 endpoint 的模型、SLO 和价格差异很大，一律自测 `cost-per-1,000-queries @ 目标 p95`。
 
 | 选 CPU | 选 GPU |
 |---|---|
@@ -404,7 +396,7 @@ Q4_K_M 约 4–5×、Q5_K_M 约 3.5×、Q8_0 约 2×；AWS EKS BP 2025）。在 
 | SM occupancy | 驻留线程组数 / 硬件上限 | `DCGM_FI_PROF_SM_OCCUPANCY` / `ncu` | 并行度够不够 | 高 occupancy ≠ 高吞吐 |
 | Tensor core 活跃比 | tensor 流水线活跃周期占比 | `DCGM_FI_PROF_PIPE_TENSOR_ACTIVE` | **你到底有没有走 tensor core** | — |
 | DRAM 活跃比 | 显存带宽占用 | `DCGM_FI_PROF_DRAM_ACTIVE` | 是不是访存受限 | — |
-| **MFU** | 有效 FLOPs ÷ 峰值 FLOPs | 自算 | 跨硬件可比的真效率 | 定位到具体哪一层 |
+| **MFU** | 有效 FLOPs ÷ 所选精度峰值 FLOPs | 自算 | 在口径一致时衡量算力效率 | 访存、启动墙、SLO 余量；跨架构并非天然可比 |
 | 显存占用 | 已分配显存 | `nvidia-smi` | 还能不能塞下一个模型 | **和算力利用率无关** |
 
 **MFU 算例（自算，口径必须写清楚）**，A100 FP16 峰值 312 TFLOP/s、ResNet-50 8.2 GFLOP/图：
@@ -417,20 +409,18 @@ Q4_K_M 约 4–5×、Q5_K_M 约 3.5×、Q8_0 约 2×；AWS EKS BP 2025）。在 
 **同一张卡，两个 `nvidia-smi` 读数几乎一样，真实效率差 17 倍。**
 
 > **面试金句**：
-> "`nvidia-smi` 上的 utilization 不是利用率，它只告诉你卡没闲着。上面那台显示 85%、
-> 而 MFU 不到 2% 的机器，还能再塞十倍流量。所以我先从 DCGM 拉 SM active 和 tensor core active 看清算力去哪了；
+> "`nvidia-smi` 上的 utilization 只告诉你卡没闲着。上面那台显示 85%、MFU 不到 2%，也不能直接推出还能塞十倍流量；它可能被显存带宽、kernel 启动或 p99 卡住。我会看 DCGM 指标并压测联合 SLO 下的 goodput；
 > 扩缩容一律挂**队列深度**，绝不挂 utilization —— utilization 是饱和指标，
 > 等它开始动的时候 p99 早就坏了。"
 >
 > *"GPU utilization in `nvidia-smi` isn't a utilization number — it just tells you the GPU
-> wasn't idle. That box sitting at 85% util is running under 2% MFU; you can throw ten times the
-> traffic at it. So the first thing I do is pull SM active and tensor-core active from DCGM.
+> wasn't idle. A box at 85% util and under 2% MFU may still be bottlenecked on memory or latency, so I load-test goodput before adding traffic. Then I inspect SM active and tensor-core active.
 > And I autoscale on queue depth, never on util — util is a saturation signal, it only starts
 > moving after your p99 has already gone bad."*
 
 **运维上的直接推论**：满载的 GPU 推理实例，**CPU 利用率接近 idle**，
 HPA 挂 CPU/内存指标永远不会扩容，直到请求开始超时。必须用 KEDA 或自定义指标挂队列深度
-（AWS EKS BP 2025）。队列纪律与准入控制见 [08/04 §9–10](04-online-inference.md)。
+（AWS EKS BP 2025）。队列纪律与准入控制见 [08/04 §9–10](04-online-inference.md#9-准入控制过载时该拒绝谁)。
 
 ---
 
@@ -449,7 +439,7 @@ HPA 挂 CPU/内存指标永远不会扩容，直到请求开始超时。必须�
 
 **显存"超售"在 GPU 上基本不成立**（没有 CPU 那种 swap / overcommit 语义），
 真正可用的是**时间维度**：按需 load / unload 模型，或用 sleep mode 不停服务就释放大部分显存 ——
-多模型共存的显存管理见 [08/03 §7](03-model-loading-and-warmup.md)。
+多模型共存的显存管理见 [08/03 §7](03-model-loading-and-warmup.md#7-多模型共存显存管理与超售的风险)。
 
 **共卡的代价**：多个模型会在同一批 SM 和同一条带宽上打架。两个各自 40% MFU 的模型共卡后，
 总利用率不会是 80%，现实里 60–70% 是好结果，而两者的 p99 都会变差。
@@ -466,7 +456,7 @@ HPA 挂 CPU/内存指标永远不会扩容，直到请求开始超时。必须�
 | p99 / p50 > 5，GPU 不忙 | 排队与准入控制 | 限制在途请求数、按队列深度扩容 |
 | 单实例 QPS 远低于压测峰值 | 并发度、线程池、序列化格式 | 先修服务框架 |
 | 成本高但 QPS 低 | **卡没打满** | 共卡 / MIG / 换 CPU（§8、§10） |
-| 每天扩缩几十次，冷启动很长 | 镜像与编译缓存 | 顺序是**镜像 > 权重 I/O 并行 > 编译缓存**，不是换更快的 GPU（[08/03 §4](03-model-loading-and-warmup.md)） |
+| 每天扩缩几十次，冷启动很长 | 镜像与编译缓存 | 顺序是**镜像 > 权重 I/O 并行 > 编译缓存**，不是换更快的 GPU（[08/03 §4](03-model-loading-and-warmup.md#4-缩短冷启动的手段收益代价撞墙条件)） |
 | 同一份输入反复被打分 | 没有做结果缓存 | 见下 |
 
 **最有说服力的一个数字**：Meta 的 Mosaic 服务优化里，AOTI 编译 + 模型切分带来 −56% GPU 用量，
@@ -483,7 +473,7 @@ HPA 挂 CPU/内存指标永远不会扩容，直到请求开始超时。必须�
 5. **把 `torch.compile` 当免费加速。** 无图序列化，编译时间全额计入冷启动，pod 越多越贵。
 6. **只在 FP32 baseline 上报加速比。** 分母虚高。生产的 baseline 是 BF16。
 7. **追求 100% GPU 利用率。** 排队论说利用率越过约 80% 后排队延迟非线性上涨
-   （[00/02 §3](../00-foundations/02-capacity-estimation.md)）；把卡"用满"和把 SLO 守住是两件冲突的事。
+   （[00/02 §3](../00-foundations/02-capacity-estimation.md#3-排队论queueing-theory为什么-80-利用率utilization是危险的)）；把卡"用满"和把 SLO 守住是两件冲突的事。
 8. **量化后只看 accuracy 不看分数分布。** 排序类模型的退化不改变 accuracy，也不改变 HTTP 状态码。
 9. **给一个每两周就要换的模型上 TensorRT。** engine 绑死架构与版本，
    维护成本会在第三次换卡时吃掉全部收益。
@@ -498,8 +488,8 @@ HPA 挂 CPU/内存指标永远不会扩容，直到请求开始超时。必须�
 2. **量化和换卡只对撞了访存墙或算力墙的模型有用；小 batch 的推荐与 CV 模型撞的是第三堵墙 ——
    kernel 启动墙，它只吃 CUDA Graph 和算子融合。** 先用 roofline 判断自己在哪一侧，
    再去挑手段；顺序反了，加速比会稳定地停在 1.05×。
-3. **`nvidia-smi` 的 utilization 只说明卡没闲着，MFU 才说明算力去哪了；两者差 10 倍以上是常态。**
-   容量规划用 MFU，扩缩容用队列深度，成本决策用"目标 p95 下的每千次查询成本"——
+3. **`nvidia-smi` utilization 只说明卡没闲着，MFU 补充说明有效算术占峰值多少；两者都不是容量。**
+   容量规划用满足联合 SLO 的实测 goodput，扩缩容结合队列等待/拒绝率，成本决策用“目标 p95 下的每千次查询成本”——
    这三件事没有任何一件该看 utilization。
 
 ---
@@ -517,4 +507,6 @@ HPA 挂 CPU/内存指标永远不会扩容，直到请求开始超时。必须�
 
 ---
 
-**下一篇** → [06-feature-and-data.md](06-feature-and-data.md)：特征平台、训练服务偏斜与时间点正确性。
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**ML Systems 专章顺读下一篇** → [06-feature-and-data.md](06-feature-and-data.md)：特征平台、训练服务偏斜与时间点正确性。

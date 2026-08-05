@@ -12,17 +12,17 @@
 **先确认你能回答这三个问题**
 
 1. 写扩散（fan-out on write）和读扩散（fan-out on read）分别把成本压在哪一端？为什么"写可以异步、削峰、排队，读不行"？
-   答不出 → 先读 [`00-foundations/00-concepts.md` §1 §8](../00-foundations/00-concepts.md)（关键路径、同步 vs 异步）
+   答不出 → 先读 [`00-foundations/00-concepts.md` §1 §8](../00-foundations/00-concepts.md#1-一个请求到底经历了什么)（关键路径、同步 vs 异步）
 2. 并发扇出到 15 个后端并等全部返回，单后端 p99 = 5 ms，"至少撞上一个慢的"概率是多少？
-   答不出 → 先读 [`00-foundations/01-fundamentals.md` §7](../00-foundations/01-fundamentals.md)（尾延迟放大）
+   答不出 → 先读 [`00-foundations/01-fundamentals.md` §7](../00-foundations/01-fundamentals.md#7-尾延迟放大tail-latency-amplification)（尾延迟放大）
 3. 什么叫"读模型（read model）"？"这份数据丢了可以从真相源完整重建"这句话，会松掉它的哪些设计约束？
-   答不出 → 先读 [`02-architecture-patterns/02-event-driven-and-cqrs.md` §5](../02-architecture-patterns/02-event-driven-and-cqrs.md)
+   答不出 → 先读 [`02-architecture-patterns/02-event-driven-and-cqrs.md` §5](../02-architecture-patterns/02-event-driven-and-cqrs.md#5-cqrs读模型与它的滞后)
 
 **这道题会用到的构件**
 
 | 构件 | 用在哪 | 详见 |
 |---|---|---|
-| 峰谷比、写放大 / 读放大、成本建模 | §2 同时算出 34 万写/s 与 1,400 万读/s —— 混合方案的全部依据 | [`00-foundations/02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §1 §2 §6 |
+| 峰均比、写放大 / 读放大、成本建模 | §2 同时算出 34 万写/s 与 1,400 万读/s —— 混合方案的全部依据 | [`00-foundations/02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §1 §2 §6 |
 | 读模型 / 物化视图 / CQRS 的滞后 | §3 "收件箱是读模型，不是真相源" | [`02-architecture-patterns/02-event-driven-and-cqrs.md`](../02-architecture-patterns/02-event-driven-and-cqrs.md) §5 |
 | 队列的优先级、consumer lag、背压 | §3 fast / normal / bulk 三条扇出车道；§5 队列被大 V 堵死 | [`01-building-blocks/03-messaging-and-streams.md`](../01-building-blocks/03-messaging-and-streams.md) §1 §5 §8 |
 | 缓存分层、热 Key、cache stampede | §4.3 内容对象缓存 95% 命中；爆款帖击穿 | [`01-building-blocks/02-caching.md`](../01-building-blocks/02-caching.md) §3 §4 |
@@ -61,7 +61,7 @@
 | 1 | 时间线是**严格时序（strictly chronological）**，还是**算法排序（ranked feed）**？v1 要哪个？ | "v1 时序，v2 要排序" | ⚠️ **不问就会做错方向**。见 §4.4：排序会把收件箱从"答案"变成"候选池"，游标（cursor）机制整个失效 |
 | 2 | 粉丝数（follower count）的**分布**长什么样？p50 / p99 / 最大值各是多少？ | "p50 约 25，p99 约 5,000，最大 1.5 亿" | ⚠️ **不问就会做错方向**。所有阈值都从这张直方图算，问不到就只能拍数字 |
 | 3 | DAU、日发帖量、人均日读 feed 次数？ | "2 亿 DAU，5,000 万帖/天，人均读 10 次" | 决定容量的三个输入 |
-| 4 | 新鲜度 SLO：发帖后多久粉丝应该看得到？ | "普通账号 p95 < 5 s；大 V 可以放宽" | **这一条直接决定大 V 阈值**（见 §4.1） |
+| 4 | 新鲜度目标：发帖后多久粉丝应该看得到？ | "普通账号候选阈值 5 s，大 V 可以放宽；正式 SLO 分别统计阈值内可见事件比例，p95 只作诊断" | **这一条直接决定大 V 阈值**（见 §4.1） |
 | 5 | 用户一次会话能往回滑多深？ | "p99 约 200 条，超过就该给推荐了" | 决定收件箱裁剪长度，而它决定内存账单是 $14k 还是 $180k/月 |
 | 6 | feed 里只有关注内容，还是掺推荐 / 广告 / 群组？ | "v1 只有关注 + 转发（repost）" | 掺入外部源 = 收件箱不再是唯一召回源，提前踩到 §4.4 |
 | 7 | 删帖 / 改隐私 / 封禁的**生效时限**是多少？ | "秒级，这是合规要求" | ⚠️ 这条决定了收件箱**绝对不能存内容副本**（见 §4.6） |
@@ -77,7 +77,7 @@
 
 ```
 读：2 亿 DAU × 10 次/天 = 20 亿 次/天 = 23,148 QPS 均值
-    峰谷比（peak-to-average ratio）3× → 约 7 万 QPS 峰值
+    峰均比（peak-to-average ratio）3× → 约 7 万 QPS 峰值
     每次返回 20 条 → 内容对象读 = 140 万 次/s（这才是真正的读压力）
 写：5,000 万 帖/天 = 578 QPS 均值 × 3 = 约 1,700 QPS 峰值
     ⇒ 发帖本身不是容量问题。容量问题全部来自它引发的扇出
@@ -149,7 +149,7 @@
                                                       │
                                               Fanout Worker（并行读 1024 个粉丝桶）
                                                       │
-                                              ZADD inbox:{follower_id} score post_id
+                                              ZADD inbox:{follower_id} score pack(author_id,post_id)
  读 ─▶ Feed Svc ─▶ ZREVRANGE inbox:{uid} 0 19 ─▶ MGET 内容 ─▶ 返回
 
  （ZADD / ZREVRANGE：Redis 有序集合 ZSET 的写入与倒序范围读 —— 每个成员带一个
@@ -334,8 +334,9 @@ sequenceDiagram
 
 **✅ 正确做法（三选一，按推荐度）：**
 
-1. **确定性裁剪，和 ZADD 放进同一个 Lua / pipeline**：`ZADD` 后无条件 `ZREMRANGEBYRANK key 0 -201`。
-   没有可删元素时它就是一次 O(log N) 空操作，N=200 时可以忽略；而且**它本来就和 ZADD 在同一个 RTT 里**，
+1. **确定性裁剪，把 ZADD 与裁剪放进同一个 Lua 或事务**：`ZADD` 后无条件 `ZREMRANGEBYRANK key 0 -201`。
+   Pipeline 只能省 RTT，不能保证两条命令原子执行；并发 writer 下仍可能越过硬阈值。Lua/事务才同时提供一个 RTT 与原子边界。
+   没有可删元素时裁剪是一次很小的空操作，N=200 时可以忽略；
    省下的那一次命令根本不值得用一个概率上界去换。**默认选它。**
 2. ~~保留概率裁剪，把阈值抬到 512~~ —— **这条只是把时间买长，不是解法，别选它。**
    单周期越界概率确实降到 `(49/50)^312 ≈ 0.18%`，但同样会沿时间累积：每天进 100 条的收件箱一年 36,500 次插入 = 730 个周期，
@@ -354,12 +355,14 @@ sequenceDiagram
 **游标（cursor）绝不能是 offset。** `LIMIT 1000, 20` 在混合 feed 下既慢又错 —— 期间有新帖插入，翻页会重复。
 
 ```
-cursor = base64( score_ms : post_id )   单调、无状态、可跨源共用
-  收件箱 ZREVRANGEBYSCORE inbox:{uid} (score_ms -inf LIMIT 0 30
-  pull 源 ZREVRANGEBYSCORE celeb_recent:{cid} (score_ms -inf LIMIT 0 20
+cursor = base64( score_ms : post_id )   复合排序键、无状态、可跨源共用
+  每个源先取 score_ms <= cursor.score 的候选；若 score 相等，只保留 post_id < cursor.post_id
+  合并后按 (score_ms DESC, post_id DESC) 排序，再截取一页
 ⚠️ 前提是所有源共用同一个 score 空间（毫秒时间戳）。§4.4 引入算法排序后
    score 不再是时间戳，这个游标立刻失效 —— 那时必须换成会话快照游标。
 ```
+
+只写 `ZREVRANGEBYSCORE (score_ms -inf` 会漏掉与页尾处在同一毫秒、但尚未返回的帖子；cursor 里的 `post_id` 必须真正参与过滤。若单个毫秒可能有大量帖子，可直接把毫秒时间与有序 ID 编成一个可比较 score/member 键，或使用支持复合 keyset 条件的存储。
 
 **归并与过滤流水线**（这就是那条 over-fetch 1.5× 的由来）：
 ```
@@ -385,10 +388,10 @@ cursor = base64( score_ms : post_id )   单调、无状态、可跨源共用
 
 **已读位置（read position）**：
 ```
-存 last_seen_score（时间戳），不存 last_seen_post_id —— 帖子会被删，ID 会变悬空引用
+存 last_seen_cursor = (score_ms, post_id)，不能只存时间戳；同一毫秒内的多帖需要二级位置
 每设备一份 read_pos:{uid}:{device_id}，TTL 90 天
 写量：每次翻页上报 = 23k/s；改为"退出 feed / 切后台时合并上报一次" → 2.3k/s，降一个数量级
-未读数：ZCOUNT inbox:{uid} (last_seen_score +inf 是 O(log N) 可以做，但 pull 部分算不出
+未读数：时序 inbox 可按复合 cursor 计数/扫描边界，但 pull 部分仍算不出
   ⇒ 产品上只显示小红点或 "99+"。**承诺一个精确未读数，就是承诺你算不出来的东西。**
 ```
 
@@ -554,7 +557,7 @@ v3 ── 多路召回 + 算法排序 ──────────────
 | 扇出队列、优先级、consumer lag、背压 | [`01-building-blocks/03-messaging-and-streams.md`](../01-building-blocks/03-messaging-and-streams.md) | §3 三条优先级 lane；§5 队列堵塞 |
 | 宽行、hot partition、编码与内存布局 | [`01-building-blocks/01-storage-engines.md`](../01-building-blocks/01-storage-engines.md) | §2.3 粉丝列表分桶；§4.2 listpack ↔ skiplist |
 | CDN、egress 成本、字节不经过应用层 | [`01-building-blocks/04-networking-and-edge.md`](../01-building-blocks/04-networking-and-edge.md) | §2.3 媒体走 CDN；$24k/月 出网账单 |
-| 估算方法与峰谷比；可逆性 / 双向门 | [`00-foundations/02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md)、[`03-tradeoff-framework.md`](../00-foundations/03-tradeoff-framework.md) | §2 全部；§4.2 收件箱可重建 ⇒ 双向门 |
+| 估算方法与峰均比；可逆性 / 双向门 | [`00-foundations/02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md)、[`03-tradeoff-framework.md`](../00-foundations/03-tradeoff-framework.md) | §2 全部；§4.2 收件箱可重建 ⇒ 双向门 |
 | 读模型 / 物化视图 / CQRS | [`02-architecture-patterns/02-event-driven-and-cqrs.md`](../02-architecture-patterns/02-event-driven-and-cqrs.md) | §3 "收件箱是读模型，不是真相源" |
 | 超时、部分结果、优雅降级、熔断 | [`05-reliability/03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) | §4.3 归并超时；§5 降级到纯 pull |
 | 撞墙信号与演进节奏；SLO 与新鲜度预算 | [`05-reliability/05-scaling-playbook.md`](../05-reliability/05-scaling-playbook.md)、[`01-slo-and-error-budget.md`](../05-reliability/01-slo-and-error-budget.md) | §6 触发条件；§4.1 用 5 s SLO 反推阈值 |
@@ -587,4 +590,6 @@ v3 ── 多路召回 + 算法排序 ──────────────
 
 ---
 
-**下一篇** → [11-chat-messaging.md](11-chat-messaging.md)：有状态服务的路由，以及"推送管延迟、拉取管正确性"。
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**案例顺读下一篇** → [11-chat-messaging.md](11-chat-messaging.md)：有状态服务的路由，以及"推送管延迟、拉取管正确性"。

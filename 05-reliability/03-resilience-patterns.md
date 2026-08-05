@@ -2,6 +2,8 @@
 
 > 韧性（resilience）不是"加重试"。韧性是**提前决定哪些请求会被牺牲**，然后确保这个决定在压力下仍然生效。
 > 一个没有明确写下"降级到什么"的系统，在故障时的行为是随机的。
+>
+> **阅读分层**：§1–§10 是 Core，§11 是 AI/Agent 扩展。所有毫秒、比例、重试次数和容量因子都是示例起点，必须通过延迟分布、故障演练和 SLO 重新标定。
 
 ---
 
@@ -18,12 +20,12 @@
 
 | 概念 | 一句话 | 详见 |
 |---|---|---|
-| Little's Law | 并发 = 吞吐 × 延迟；下游延迟涨 25 倍，占用的线程也涨 25 倍 | [00-concepts §2](../00-foundations/00-concepts.md) |
-| 幂等 | 同一操作执行多次和执行一次效果相同 —— 这是"能不能重试"的前提 | [01-fundamentals §5](../00-foundations/01-fundamentals.md) |
-| 背压 | 处理不过来时向上游反压（拒绝/阻塞），而不是无限排队 | [01-fundamentals §6](../00-foundations/01-fundamentals.md) |
-| 超时预算传播 / 重试预算 | 剩余时间随请求逐层传下去、每层只减不加；重试量设全局上限 | [01-fundamentals §9](../00-foundations/01-fundamentals.md) |
-| 灰色故障 | 健康检查通过、实际处理能力已经掉了 90% 的"半死不活"状态 | [01-fundamentals §8](../00-foundations/01-fundamentals.md) |
-| 优雅降级 / 相关失败 | 降级必须写清降到什么；冗余的乘法会被"一起坏"吃掉 | [00-concepts §10](../00-foundations/00-concepts.md) |
+| Little's Law | 并发 = 吞吐 × 延迟；下游延迟涨 25 倍，占用的线程也涨 25 倍 | [00-concepts §2](../00-foundations/00-concepts.md#2-延迟吞吐并发--三个最常被混淆的词) |
+| 幂等 | 同一操作执行多次和执行一次效果相同 —— 这是"能不能重试"的前提 | [01-fundamentals §5](../00-foundations/01-fundamentals.md#5-幂等idempotency分布式系统的第一公民) |
+| 背压 | 处理不过来时向上游反压（拒绝/阻塞），而不是无限排队 | [01-fundamentals §6](../00-foundations/01-fundamentals.md#6-背压backpressure没有它系统就会雪崩cascading-failure) |
+| 超时预算传播 / 重试预算 | 剩余时间随请求逐层传下去、每层只减不加；重试量设全局上限 | [01-fundamentals §9](../00-foundations/01-fundamentals.md#9-幂等--重试--超时三件套必须一起设计) |
+| 灰色故障 | 健康检查通过、实际处理能力已经掉了 90% 的"半死不活"状态 | [01-fundamentals §8](../00-foundations/01-fundamentals.md#8-失败模型你要防的到底是什么) |
+| 优雅降级 / 相关失败 | 降级必须写清降到什么；冗余的乘法会被"一起坏"吃掉 | [00-concepts §10](../00-foundations/00-concepts.md#10-可用性几个-9-是什么意思) |
 
 **这一章要回答的问题**
 
@@ -74,22 +76,26 @@
 
 ## 2. 超时预算（timeout budget）与 deadline 传播
 
-### 超时值从 SLO 反推，不是拍脑袋
+### 超时值从用户旅程的延迟目标反推，不是拍脑袋
 
 绝大多数系统的超时是 `30s`（HTTP 客户端默认值）。这是灾难的开端：30 秒的超时意味着一个坏依赖能占住你的线程 30 秒。
 
 **正确的推导链**：
 
 ```
-1. 端到端 SLO：p99 ≤ 800 ms
-2. 扣掉网络 + LB + 排队余量（经验值 15–25%）→ 内部预算 640 ms
+1. 端到端延迟工程目标：p99 ≤ 800 ms
+   若要接入错误预算，另写成可计数的 SLI/SLO：
+   “有效请求中，成功且延迟 ≤ 800 ms 的比例 ≥ 99%，滚动 28 天”
+   （p99 留作分布诊断与压测验收，不直接拿来计算燃尽率）
+2. 扣掉网络 + LB + 排队与响应编码余量（例：20%）→ 内部预算 640 ms
 3. 画关键路径（只算串行部分）：
       网关 → BFF → 订单服务 → 库存服务 → DB
                     ↘ 用户服务（并行，不占预算）
 4. 串行 4 跳 → 每跳基础预算 160 ms
-5. 每跳超时 = max( 该跳 p99.9 × 1.3 , 分到的预算 )
-   两者矛盾时（p99.9=400ms > 预算 160ms）→ 这条链路根本达不到 SLO，
-   必须改设计（异步化/并行化/砍一跳），而不是把超时调大
+5. 先用该跳延迟分布选择“可接受误杀率”对应的候选超时（例：p99.9 + 网络抖动余量），
+   再检查它是否 < 当前剩余 deadline − 下游/返回 guard。
+   若候选值 400ms 而只分到 160ms，**不存在一个同时满足两者的超时值**：
+   要改旅程目标/预算或改设计（异步化、并行化、砍一跳、预计算），不能用 max() 把预算扩掉。
 ```
 
 **规则：超时值必须小于调用方的剩余预算。** 否则调用方会先超时，你的工作全部浪费。
@@ -109,7 +115,7 @@
                                                         不浪费一个 CPU 周期
 ```
 
-**实现**：gRPC 原生支持（`grpc-timeout` header 自动随链传播，Go 里就是 `context.Context.Deadline()`，这是 gRPC 相对 REST 最被低估的优势）；HTTP 没有标准，自建 header（`X-Deadline-Ms-Epoch`）或用 [OpenTelemetry baggage](https://opentelemetry.io/docs/concepts/signals/baggage/) 承载，**必须在框架层强制**。每个 handler 第一行做 `if ctx.Err() != nil { return }` —— 排队时间长时这一行能省掉大量无用功。
+**实现**：gRPC 用 `grpc-timeout` / 语言 context 传播剩余预算。HTTP 没有通用 deadline 标准，可在**可信服务边界**定义受框架管理的 header；入口先把客户端值夹在服务端最大值内，每跳扣除已耗时间与 guard，不能让未受信客户端任意延长 deadline。不要把 deadline 放 OpenTelemetry baggage：baggage 是可传播的观测上下文，不是可靠的流控协议，且可能被转发到第三方。handler 入队后和昂贵步骤前都检查取消/deadline，而不只是“第一行”。
 
 ### 四种超时都要设，且含义不同
 
@@ -117,10 +123,10 @@
 |---|---|---|
 | **连接超时**（connection timeout，TCP/TLS 建立） | 100–500 ms（同 region）| 目标机器网络黑洞时挂住整个连接池 |
 | **请求超时**（request timeout，首字节 / 整体） | 由预算推导 | 慢依赖占满线程 |
-| **空闲超时**（idle timeout，连接池 keepalive）| 60–90 s，**必须小于对端** | 对端先关，你拿到已关闭连接 → 随机 EOF |
+| **空闲超时**（idle timeout，连接池 keepalive）| 例：60–90 s；客户端池通常略短于已知对端值并配连接校验/重试 | 对端先关，你可能复用到已关闭连接 |
 | **流式"无进展超时"**（no-progress timeout） | 无新 chunk 超过 X 秒 | LLM 流式响应卡住时永不返回 |
 
-⚠️ **空闲超时不匹配是最难查的间歇性错误来源**：上游 ALB 空闲 60s、你的应用 65s → 周期性 502。规则是**客户端空闲超时 < 服务端空闲超时**，差至少 5 秒。
+⚠️ 空闲超时不匹配会造成难查的间歇性错误。客户端池的 idle/lifetime 通常应比已知代理/服务端关闭点短，并留抖动余量；“差 5 秒”只是例子，还要处理连接最大寿命、HTTP/2 keepalive、优雅关闭与一次安全重试。
 
 ---
 
@@ -128,7 +134,7 @@
 
 ### 三个前提，缺一不可
 
-① **操作幂等（idempotent）**（或有幂等键 idempotency key，见 [`00/01 §5`](../00-foundations/01-fundamentals.md)）—— 非幂等操作重试 = 重复下单。② **故障是短暂且独立的**（网络抖动、单实例 GC、瞬时 leader 切换）。③ **系统当前不处于过载（overload）** —— 过载时重试是燃料，不是灭火器。
+① **操作幂等（idempotent）**（或有幂等键 idempotency key，见 [`00/01 §5`](../00-foundations/01-fundamentals.md#5-幂等idempotency分布式系统的第一公民)）—— 非幂等操作重试 = 重复下单。② **故障是短暂且独立的**（网络抖动、单实例 GC、瞬时 leader 切换）。③ **系统当前不处于过载（overload）** —— 过载时重试是燃料，不是灭火器。
 
 > **面试金句**：
 > "重试只对**独立的瞬时故障**有效。如果故障源于过载，重试会把一次可恢复的拥塞变成一次不可恢复的雪崩（congestion collapse）。所以我在写重试之前会先问：这个错误码代表'再试一次可能成功'，还是代表'对方已经撑不住了'？前者重试，后者必须退让 —— 这就是为什么 429 和 503 应该走完全不同的处理路径。"
@@ -169,7 +175,7 @@ sleep = rand(0, min(cap, base * 2**attempt))             # ✅ Full Jitter：总
 sleep = min(cap, rand(base, sleep_prev * 3))             # ✅ Decorrelated，适合长轮询
 ```
 
-**另外两条硬规则**：**尊重 `Retry-After`**（服务端比你的指数退避知道得多）；**重试要换实例**（同一个坏实例上重试三次等于没重试，客户端 LB 必须排除上次失败的 host）。
+**另外两条规则**：服务端给出合法 `Retry-After` 时应尊重并加抖动/总 deadline；是否换实例取决于故障信号。连接失败、实例级 5xx 可避开原实例，配额/全局过载换实例没有帮助，缓存亲和场景盲目换实例还可能更慢。
 
 ### 重试预算（Retry Budget）：比"最大重试次数"重要一个量级
 
@@ -187,7 +193,7 @@ retry_ratio = 重试请求数 / (原始请求数 + 重试请求数)
 | [gRPC retry throttling](https://grpc.io/docs/guides/retry/) | `maxTokens: 10`, `tokenRatio: 0.1` | 令牌桶：失败 −1，成功 +0.1；token < maxTokens/2 时停止重试 |
 | Google SRE 自适应限流（adaptive throttling） | 客户端侧 `max(0, (requests − K×accepts) / (requests + 1))` | K=2 时，服务端拒绝率一上升，客户端自己就开始丢弃请求 |
 
-**为什么令牌桶（token bucket）比固定次数好**：稳态下失败极少，令牌满，重试畅通无阻；故障期失败暴增，令牌迅速耗尽，重试自动关闭。**它不需要你预测阈值。**
+**为什么令牌桶（token bucket）比“每请求固定重试 N 次”好**：稳态下失败少，令牌有余量；故障期失败暴增，预算迅速耗尽，重试自动收缩。它仍需要根据额外负载预算设置桶容量与补充速率，只是不必把某个瞬时错误率猜成开关阈值。
 
 ### 什么错误可以重试
 
@@ -213,12 +219,12 @@ CLOSED ────────────────────────�
    └────── 探测成功率达标 ───────────────┴──── 探测失败 ──────────────┘
 ```
 
-| 参数 | 推荐值 | 理由 |
+| 参数 | 示例起点 / 选择方法 | 理由 |
 |---|---|---|
 | `slidingWindowType` | 低 QPS 用 `TIME_BASED`(30s)，高 QPS 用 `COUNT_BASED`(100) | |
 | `minimumNumberOfCalls` | **20–50** | **最重要的防误判参数**。冷启动（cold start）时 1 个失败 = 100% 失败率 → 立刻误熔断 |
 | `failureRateThreshold` | 50%（核心依赖 30–40%） | 不要设 90%：到那时你已经死了 |
-| `slowCallDurationThreshold` | **p99 × 1.5** | 慢调用（slow call）比错误更危险，必须单独计入 |
+| `slowCallDurationThreshold` | 从端到端 deadline 分配、健康基线分布与业务“过慢等同失败”的边界推导 | 慢调用（slow call）比错误更危险，必须单独计入；不要机械用 `p99 × 1.5` |
 | `waitDurationInOpenState` | **30–60 s** | 太短会震荡（open→half-open→open 循环），太长恢复慢 |
 | `permittedNumberOfCallsInHalfOpenState` | 5–10 | 半开期只放极少量探测 |
 
@@ -235,7 +241,7 @@ CLOSED ────────────────────────�
 
 > **2026 的实践建议**：优先用 [Envoy outlier detection](https://www.envoyproxy.io/docs/envoy/latest/intro/arch_overview/upstream/outlier) 这种"按实例主动剔除（ejection）"取代应用层熔断器。真实生产中"整个下游服务全挂"远少于"下游 20 个实例里有 2 个坏了"；按实例剔除能自动解决后者，而按服务熔断对后者完全无效（错误率被稀释到 10%，达不到阈值，但那 10% 的用户一直在报错）。应用层熔断器保留给**外部依赖**（第三方 API、模型供应商），因为那里你没有实例视图。
 
-**关键参数**：`consecutive_5xx: 5`、`base_ejection_time: 30s`、`max_ejection_percent: 10%`（**这一条是保命的**：绝不允许剔除超过 10% 的实例，否则一次全局性问题会把整个集群剔空）。
+**参数示例**：`consecutive_5xx: 5`、`base_ejection_time: 30s`、`max_ejection_percent: 10%` 可作为起点。最大剔除比例用于避免全局故障时把集群剔空，但 10% 不是通用真理；要结合最小健康容量、panic threshold、错误预算与已知坏实例比例演练。
 
 ---
 
@@ -254,13 +260,13 @@ CLOSED ────────────────────────�
 | | 线程池隔离（thread pool isolation） | 信号量隔离（semaphore isolation） |
 |---|---|---|
 | 开销 | 每依赖一个池，上下文切换 + 内存 | 近乎为零（一个计数器） |
-| 能否强制超时 | ✅ 能（调用方线程可放弃） | ❌ 不能（阻塞在同一线程上） |
-| 适用 | 少量高风险的**同步阻塞** IO 依赖 | 高频低延迟依赖；**协程/异步模型下的唯一选择** |
-| 容量参数 | `coreSize = 峰值QPS × p99延迟(s) × 1.2` | 同上 |
+| 超时与取消 | 调用方可以在 deadline 后放弃等待，但底层阻塞调用若不支持取消，worker 仍可能继续占用 | 同样需要 deadline 与可取消的下游调用；信号量本身只限制准入，不会自动停止工作 |
+| 适用 | 需要把少量高风险的**同步阻塞** I/O 限制在独立 worker 池里 | 协程/异步路径常用；限制在途任务数、连接数或昂贵操作数 |
+| 容量起点 | 同一稳定窗口的**平均到达率 × 平均资源占用时间**，再结合突发、长尾、headroom 与压测调整 | 同左；不要把 p99 直接代进 Little's Law |
 
-Go / Node / Rust 这类异步运行时里线程池隔离没有意义，用带容量的信号量（`golang.org/x/sync/semaphore`）或有界 channel。
+Go / Node / Rust 等异步运行时里，非阻塞调用通常先用带容量的信号量或有界 channel；若调用的是阻塞客户端、CPU 密集代码或无法异步化的库，仍可能需要受限 executor / worker pool。选型看**工作会占住什么资源**，不看语言标签。
 
-**两种切法**：**按依赖切**（纵向）防止坏下游拖垮整个进程，所有系统都必须做；**按租户切**（横向）防止噪音邻居（noisy neighbor：共享同一份资源时，一个租户的异常用量把其他租户挤死），多租户系统必须做，见 [`02-architecture-patterns/03-multi-tenancy.md`](../02-architecture-patterns/03-multi-tenancy.md)。租户隔板的实用配方是**动态上限**而非硬预留：单租户在途请求数 ≤ `max(10, 总容量 × 20%)` —— 空闲时任一租户可用满，繁忙时谁也压不死别人。
+**两种切法**：**按依赖切**（纵向）防止高风险下游拖垮无关功能；**按租户切**（横向）防止噪音邻居（noisy neighbor：共享同一份资源时，一个租户的异常用量把其他租户挤死），见 [`02-architecture-patterns/03-multi-tenancy.md`](../02-architecture-patterns/03-multi-tenancy.md)。不是每个依赖、每个租户都要独占一池：先找出会传播故障或争抢稀缺资源的边界。租户上限应由威胁模型、套餐、SLO 和负载测试推导；例如可以把“单租户最多占共享在途容量的 20%”作为待验证起点，而不是通用公式。
 
 ⚠️ **队列长度是隐藏的延迟**。给隔板配一个 1000 长度的队列 = 给它配了几十秒的延迟。**队列长度应该按"排到队尾的请求还来得及在 deadline 内完成"来算**，通常是个位数到几十，不是几千。
 
@@ -279,22 +285,36 @@ Go / Node / Rust 这类异步运行时里线程池隔离没有意义，用带容
 
 **两者都要有。** 限流保证公平，卸载保证不死。只有限流的系统会在"所有租户都在配额内、但总和超过了容量"时崩溃。
 
-### 基于队列延迟的 CoDel 式卸载（最优的通用方案）
+### 基于队列驻留时间的卸载（CoDel-inspired）
 
-CPU 利用率是滞后指标（lagging indicator），队列等待时间是先行指标（leading indicator）。[CoDel](https://queue.acm.org/detail.cfm?id=2209336)（controlled delay，一种原本用于网络排队的算法）的核心洞察：**判断过载要看"队列是否持续非空"，而不是"队列有多长"**。
+CPU 利用率常是滞后信号，队列驻留时间（sojourn time）更接近用户已经付出的等待。[CoDel](https://queue.acm.org/detail.cfm?id=2209336) 的关键不是“队列是否非空”，而是**一个 interval 内观察到的最小驻留时间是否仍高于 target**：若连最快离队的请求都等太久，说明不是瞬时 burst。完整 CoDel 还包含 dropping state 与控制律；下面只是用于应用准入的简化信号，**不是 CoDel 实现**。
 
 ```python
-TARGET, INTERVAL = 5, 100   # ms：可容忍排队延迟 / 观测窗口
+# 教学伪代码：单 worker/受锁保护的状态；生产中使用 monotonic clock。
+TARGET_MS, INTERVAL_MS = 5, 100  # 仅为网络/低延迟服务示例
+interval_start = monotonic_ms()
+min_sojourn_ms = float("inf")
+overloaded = False
 
-def admit(req):
-    if now() - req.enqueue_time < TARGET:
-        overloaded_since = None; return True     # 队列疏通了，重置
-    if overloaded_since is None:
-        overloaded_since = now(); return True    # 首次超标，容忍突发
-    return now() - overloaded_since <= INTERVAL  # 持续 100ms 都在堵 → 开始丢
+def observe_on_dequeue(req):
+    global interval_start, min_sojourn_ms, overloaded
+    now = monotonic_ms()
+    sojourn = now - req.enqueue_monotonic_ms
+    min_sojourn_ms = min(min_sojourn_ms, sojourn)
+
+    if now - interval_start >= INTERVAL_MS:
+        overloaded = min_sojourn_ms > TARGET_MS
+        interval_start = now
+        min_sojourn_ms = float("inf")
+
+    if now >= req.deadline_monotonic_ms:
+        return "DROP_EXPIRED"
+    if overloaded and req.priority == "SHEDDABLE":
+        return "SHED"
+    return "PROCESS"
 ```
 
-配套两条：**① 丢队列头部（最老的）而不是尾部** —— 最老的请求最可能已被客户端放弃，做完它是纯浪费（LIFO 处理 + 丢老请求，反直觉但极其有效）。**② 拒绝必须比处理便宜至少 100×** —— 若"拒绝"路径要做鉴权 + 查数据库配额，过载时拒绝本身就会把你压死；卸载判断必须在最外层、在解析 body 之前。
+默认保持 FIFO/公平调度，在队首离队时先丢已过 deadline 的旧请求；这与“改成 LIFO 处理所有新请求”不同，后者会饿死旧请求并破坏顺序。只有业务语义允许“新请求价值显著更高”且有最大等待/公平界限时才考虑 LIFO。拒绝路径应显著便宜，但仍要做最低限度的防滥用/身份分类；“至少 100×”是测量目标示例，不是算法要求。
 
 ### 优先级与公平性
 
@@ -321,11 +341,11 @@ criticality 必须**随调用链传播**（和 deadline 一样）：一个 `SHED
 | **向量检索** | hybrid（BM25 关键词检索 + dense 向量检索，再用 RRF 融合两份排名） | 只走 BM25（延迟更低，召回（recall：该被找出来的文档里实际被找出来的比例）略降） | 跳过检索，纯模型回答 + 显式标注"未查文档" | 同 L2 | 检索 p99 > 800ms 自动 |
 | **MCP**（Model Context Protocol，把外部工具与数据源暴露给模型的标准协议）**/ 工具调用** | 全部工具可用 | 禁用高延迟工具（外部 API 类） | 只保留只读工具 | 纯对话模式 | 按工具独立熔断 |
 | **用量计量（metering）** | 实时写入 | 本地缓冲 + 异步补写 | 只写本地磁盘 WAL（write-ahead log：先把要做的事顺序追加进日志文件，崩溃后照日志重放），事后补账 | **绝不阻塞主链路** | 永远异步 |
-| **鉴权 / 授权** | 在线校验 | 用缓存的授权决策（TTL 60s） | — | **拒绝服务** | 安全域不降级 |
+| **鉴权 / 授权** | 在线校验 | 仅对明确允许陈旧的低风险读，使用带主体/资源/动作/权限版本的短期缓存 | — | 高风险写/撤权路径拒绝；低风险读按策略决定 | 安全边界按风险分层 |
 | **个性化排序** | 模型排序 | 规则排序 | 默认顺序 | 默认顺序 | 超时即降级 |
-| **审计日志（audit log）** | 同步落库 | 异步队列 | 落本地磁盘 | **拒绝服务**（合规要求） | 按合规等级 |
+| **审计日志（audit log）** | 可靠记录 | 事务 outbox / 独立持久队列 | 受限本地 WAL + 补传 | 对必须留痕的高影响动作拒绝；普通读按政策处理 | 由控制/合同等级决定 |
 
-**从这张表能读出的三条设计原则**：① **安全与合规（compliance）相关的依赖不降级，直接拒绝**（鉴权、审计）—— 降级它们等于制造合规事故。② **计费/计量永远异步**，绝不放在同步链路上。③ **每一级降级都要有明确的"用户可见变化"且产品/法务事先批准过** —— "悄悄用更差的模型回答"是产品决策，不是工程能单方面定的。
+**从表里读三条原则**：① 安全/合规不能“绕过”，但可设计受约束的缓存、outbox 与低风险只读模式；哪些动作 fail closed 必须按威胁模型和合同定义。② 计量处理通常异步，但“业务成功 + 待计量事实”要用 outbox/WAL 原子关联，不能静默丢。③ 每一级降级都要写清用户可见变化并事先审批。
 
 **降级开关必须满足四条**：① 无需重新部署即可翻转（feature flag，秒级生效）；② 有自动触发条件 + 人工强制开关；③ 每次翻转进审计日志与事件时间线；④ 有自动恢复逻辑且演练过 —— 否则会有人忘了关，降级变成常态。
 
@@ -338,11 +358,12 @@ criticality 必须**随调用链传播**（和 deadline 一样）：一个 `SHED
 多数团队把缓存当性能层。它同时是**最便宜的可用性层**。
 
 ```http
+# 只适用于所有用户看到相同内容、且不含认证/租户私有数据的公开响应：
 Cache-Control: public, max-age=60, s-maxage=300,
                stale-while-revalidate=600, stale-if-error=86400
 ```
 
-**`stale-if-error`**（[RFC 5861](https://datatracker.ietf.org/doc/html/rfc5861)）：源站 5xx 时 CDN 继续返回最多 24 小时前的旧内容 —— 一行配置把很多"全站 500"变成"内容略旧"。应用内也要实现同一语义：回源（origin fetch：缓存里没有或不能用时，转身去后面的源站/数据库把数据取回来）失败时返回带过期标记的旧值 + 记录降级指标。
+**`stale-if-error`**（[RFC 5861](https://datatracker.ietf.org/doc/html/rfc5861)）允许缓存错误时返回一定陈旧范围内的对象；86400 秒只是公开内容示例。对认证或租户响应，误用 `public` 会造成跨用户泄露，应默认 `private`/`no-store`，或使用经过安全评审、包含租户与权限版本的缓存键，并正确设置 `Vary`。
 
 **代价必须写清楚**：陈旧数据是有语义的。价格、库存、权限**不能** stale-if-error（会造成超卖 overselling、越权）；文章、配置、模型元数据可以。**给每个缓存键标注"允许的最大陈旧度（staleness）"**，别一刀切。详见 [`01-building-blocks/02-caching.md`](../01-building-blocks/02-caching.md)。
 
@@ -357,8 +378,10 @@ Cache-Control: public, max-age=60, s-maxage=300,
              │  p99 从 40ms → 900ms（单实例）
              ▼
 [T+15s]  订单服务 每个实例的在途请求数暴涨
-             │  Little's Law：N = λ × W = 500 QPS × 0.9s = 450 > 线程池 200
-             │  → 线程池满，新请求进队列
+             │  同一 1 min 窗口测得平均线程占用时间 450ms；900ms 的 p99 只作尾部诊断
+             │  200 个线程最多支撑约 200/0.45 = 444 QPS < 500 QPS 到达率
+             │  等价地，若要稳态完成 500 QPS，Little's Law 要求平均占用 500×0.45=225 个线程
+             │  → 当前线程池无法形成稳态，完成率 < 到达率，队列开始持续增长
              ▼
 [T+30s]  BFF 调用订单服务开始超时（BFF 超时 = 800ms）
              │  BFF 每层配了 3 次重试 → 订单服务实际收到 3× 流量
@@ -420,8 +443,8 @@ AZ-A 挂 → B/C 流量 ×1.5           3 AZ 各预置 50%（总 150%）
 | 3 AZ × 67% + 快速卸载 | +100% 峰值 | 短暂降级，靠卸载保核心 | 卸载逻辑必须可靠 |
 | 2 region 主备 | +100% | region 级 RTO 分钟级 | 故障转移流程被演练过 |
 
-**同样的原则适用于所有控制面依赖**：服务发现（service discovery）挂了要能用**上次已知的**端点列表继续工作；配置中心（configuration service）挂了用磁盘上最后一份配置，**绝不 fail-closed 到"没有配置"**；KMS（密钥管理服务）挂了要有带 TTL 的数据密钥（DEK：data encryption key，真正用来加解密业务数据的那把密钥，本身被 KMS 保管的主密钥加密后存起来）缓存。
-> **规则**：数据面（data plane）在控制面（control plane）完全不可用时，应能以当前状态**继续运行至少 1 小时**。
+**同样的原则适用于控制面依赖**：服务发现可用经过验证的 last-known-good 端点；配置中心故障时保留已签名/已验证的旧配置，而不是加载空值；KMS 可按威胁模型缓存解包后的 DEK。缓存会延后撤权/轮换生效，敏感操作可能仍需 fail closed。
+> **目标示例**：数据面在控制面不可用时以当前状态运行多久，应从控制面修复时间、配置最大陈旧度和安全撤销目标共同推导；“至少 1 小时”不是所有系统的统一规则。
 
 ---
 
@@ -432,11 +455,11 @@ Agent 系统把上面所有问题的时间尺度放大了 2–3 个数量级，�
 **① 超时预算在 Agent 循环里是复合的。** 一次 run = 15–40 次模型调用 + 若干工具调用，单次调用的 30s 超时思维完全失效。正确做法：给**整个 run** 三个独立上限 —— wall-clock deadline（如 10 分钟）、token 预算（如 500k）、步数上限，任一触顶即优雅终止并返回部分结果。参考 Claude Code 的层级硬上限：subagent 嵌套默认 **3 层**、Dynamic Workflows 同时最多 **16 个 Agent**、单次运行总计 **1,000 个 Agent**（2026 年中量级，随版本变动）。
 
 **② 重试会击穿 prefix cache（前缀缓存：多个请求开头那一段完全相同时，复用它已经算好的中间结果），代价是钱和延迟。** 换实例重试 = KV cache（缓存已处理 token 的注意力中间结果，见 [02-observability.md](02-observability.md) §10）全 miss。vLLM 自动前缀缓存在共享 system prompt 场景命中率 70–90%，某租户 TTFT 从 480ms 降到 110ms；缓存感知路由（cache-aware routing）的对照实验里精确路由 P90 TTFT **0.542s** vs 随机路由 **92.5s**（约 170× 差距；8 pod / 16×H100 / 150 租户口径）。
-> **推论**：LLM 网关应该"**先在原实例上重试一次，再换实例**"，与传统微服务的"立刻换实例"相反。另注意 Anthropic 的缓存失效级联顺序是 `tools → system → messages` —— 重试时顺手改了工具定义，整个缓存作废。
+> **推论**：LLM 重试应缓存感知，但不能无条件先打原实例。若是连接建立失败、实例过载或 GPU 错误，应避开原实例；若请求已幂等、原实例健康且只是可安全重试的瞬时错误，保留亲和可能省 TTFT。策略要同时看 failure reason、deadline、幂等性与 cache key，供应商缓存规则以当前文档为准。
 
 **③ 供应商过载是常态，不是异常。** 把 429 / `overloaded` 当成**一等公民（first-class）的容量信号**：按 `Retry-After` 退避、跨供应商/跨 region 的 fallback 链、以及**成本感知降级**（Opus 5 $5/$25 每百万 token → Sonnet 5 → Haiku 4.5 $1/$5；2026 年中量级，随时变动）。降级链必须事先跑过质量评测，否则你是在用未知质量换可用性。
 
-**④ 单指标 SLO 不够。** 同样满足 `TTFT ≤ 1.5s`（首 token 时间；TPOT 是首 token 之后每个 token 的平均间隔，见 [01-slo-and-error-budget.md](01-slo-and-error-budget.md) §9）的两个部署，P95 TPOT 可以是 **~50ms** 和 **~494ms**（约 10× 差异）。**TTFT 与 TPOT 必须分别设 SLO**，只看 TTFT 的熔断器会放过一个体感极差的部署。可抄的生产模板（GLM-5.2，24×B300 口径）：`mean TTFT ≤ 2.5s`、`mean TPOT ≤ 20ms`。
+**④ 单一延迟指标不够。** 同样满足 `TTFT ≤ 1.5s`（首 token 时间；TPOT 是首 token 之后每个 token 的平均间隔，见 [01-slo-and-error-budget.md](01-slo-and-error-budget.md) §9）的两个部署，P95 TPOT 可以是 **~50ms** 和 **~494ms**（约 10× 差异）。TTFT 与 TPOT 必须分别约束，只看 TTFT 的熔断器会放过一个体感极差的部署。`mean TTFT ≤ 2.5s`、`mean TPOT ≤ 20ms` 是某个 GLM-5.2 / 24×B300 基准的工程目标，可作诊断参考；要计算燃尽率，应把内部 SLO 写成“有效请求中，同时满足 TTFT ≤ X、TPOT ≤ Y 且成功的比例 ≥ Z%”。
 
 **⑤ 失败的运行也要花钱。** 生产遥测显示 **14.2% 的总花费花在最终失败的运行上**（63.9 万执行步 / 2.36 万次运行样本）。传统系统里失败请求几乎免费，Agent 系统里跑了 30 步才失败的请求可能比成功的还贵 —— **"早失败（fail fast）"在这里有直接财务价值**：循环检测、步数上限、轨迹级中途放弃判据都是成本控制手段。
 
@@ -450,8 +473,8 @@ Agent 系统把上面所有问题的时间尺度放大了 2–3 个数量级，�
 |---|---|---|
 | **每一层都加重试** | 放大 27–81× | 一条链只允许一层重试 |
 | **给所有依赖都加熔断器** | 配置量爆炸，误熔断比真故障还多；低 QPS 依赖统计样本不足必然误判 | 只给**跨进程 + 有故障历史 + 有明确降级路径**的依赖加；其余用 outlier detection |
-| **熔断没有降级路径** | 熔断只是把"慢失败"变成"快失败"，用户体验一样是错误 | **熔断必须配一个兜底（fallback）**，否则不如不熔断 |
-| **超时统一设 30 秒** | 一个坏依赖能占住线程 30 秒 | 从 SLO 反推，每个依赖独立 |
+| **熔断打开后的行为未定义** | 用户拿到随机错误，调用方可能继续重试 | 明确定义 fast-fail、排队、备用供应商或安全 fallback；即使没有业务兜底，熔断仍能保护资源，不是“不如不熔断” |
+| **超时统一设 30 秒** | 一个坏依赖能占住线程 30 秒 | 从用户旅程 deadline 与延迟目标反推，每个依赖独立 |
 | **健康检查和业务共用线程池** | 过载时好实例被平台杀掉 | 独立端口 + 独立线程 + liveness 只查死锁 |
 | **无界队列 / 只靠"最大重试 3 次"** | 前者是隐藏的无限延迟，后者控制不了总量 | 有界队列按 deadline 算长度；用重试预算 |
 | **降级只写在文档里** | 故障时没人记得也没人敢按 | 降级开关 + 定期演练 + 自动触发 |
@@ -465,16 +488,17 @@ Agent 系统把上面所有问题的时间尺度放大了 2–3 个数量级，�
 ## 13. 参数速查
 
 ```
-超时       = max(依赖 p99.9 × 1.3, 分配到的预算)；必须 < 调用方剩余 deadline
-空闲超时    = 对端空闲超时 − 5s
-隔板容量    = 峰值 QPS × p99 延迟(s) × 1.2       （Little's Law）
-队列长度    = 容量 × (deadline − p99) / p99      （排到队尾还来得及）
+超时       = 从可接受误杀率选候选值，并验证候选值 < 剩余 deadline − guard；冲突时改设计/预算
+空闲超时    = 通常略短于已知对端关闭点 + 连接校验；差值按网络抖动实测
+平均在途起点 = 峰值窗口内的平均 QPS × 同窗口平均停留时间(s)  （Little's Law）
+隔板硬上限   = 从这个起点出发，结合尾延迟、突发、故障余量与压测结果确定
+队列长度    = 让排队等待 + 剩余服务时间分布仍落在 deadline 内；从有界小值起步，用负载测试校准
 重试        = Full Jitter，base 100ms，cap 20s，尝试 ≤ 3 次，全链路仅一层
 重试预算    = 重试量 / 总量 ≤ 10%（Envoy budget_percent 20 / gRPC maxTokens 10 tokenRatio 0.1）
-熔断        = minimumNumberOfCalls 20–50，failureRate 50%，slowCall p99×1.5，open 30–60s
+熔断        = minimumNumberOfCalls / failureRate / slowCall / open 时长都从流量、基线、deadline 与误熔断成本校准；20–50 / 50% / 30–60s 只作起点
 实例剔除    = consecutive_5xx 5，base_ejection 30s，max_ejection_percent ≤ 10%
-卸载        = CoDel target 5ms / interval 100ms；丢最老的；拒绝路径成本 < 处理的 1%
-静态稳定    = 3 AZ 各 50% 容量；控制面全挂时数据面能撑 ≥ 1 小时
+卸载        = 以队列驻留时间/最小驻留窗口为信号；target/interval、优先级与公平性按负载校准
+静态稳定    = 预置 N+1 容量示例；控制面断连窗口由修复时间与安全陈旧度共同决定
 Agent run  = wall-clock deadline + token 预算 + 步数上限，三选一触顶即停
 ```
 
@@ -502,4 +526,6 @@ Agent run  = wall-clock deadline + token 预算 + 步数上限，三选一触顶
 
 ---
 
-**下一篇** → [04-incident-and-chaos.md](04-incident-and-chaos.md)
+**目录下一篇** → [04-incident-and-chaos.md](04-incident-and-chaos.md)
+
+**主学习链下一篇** → [02-observability.md](02-observability.md)（先知道系统会怎样失败，再学习如何用信号发现并定位这些失败）。

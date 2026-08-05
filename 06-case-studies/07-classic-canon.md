@@ -4,36 +4,36 @@
 > 这 10 题各自都有一篇**完整展开版**，就在 [`08-url-shortener.md`](08-url-shortener.md) 到 [`17-object-storage.md`](17-object-storage.md)
 > （编号一一对应：本篇第 N 题 = 文件 `0(7+N)`，例如第 3 题 News feed → [`10-news-feed.md`](10-news-feed.md)）。
 >
-> **本篇只有两个正确用法**：
-> ① **开局摸底** —— 用一天扫完 10 题，认出 4 种母题，标出你说不出子问题的那几题，然后去读它们的展开版；
+> **本篇有两个用途**：
+> ① **诊断性摸底** —— 只扫 §0 和十题题面，不背结论；标出认不出母题的题，然后从对应展开版学习；
 > ② **临场复习** —— 深挖读完之后，面试前一天连着扫一遍，30 分钟，检查母题识别还在不在。
 >
 > **错误用法是把它当成学这 10 题的唯一材料。** 它每题只写 20%，剩下 80%（估算、深挖、失败模式、数字推导）
 > 全在展开版里，而面试深挖阶段的 18 分钟考的正是那 80%。
 
 > 前 6 个案例是深度题，这一篇是**广度题**：10 道最经典的通用系统设计题，每题只写面试里真正拿分的那 20%。
-> 而这 10 题其实只有 **4 种母题**。认出母题比背题重要 —— 认出来了，没见过的题也能现推；背题的人换个题面就崩。
+> 前 9 题可以复用 **4 种高频母题**；第 10 题对象存储是刻意保留的边界案例。分类的价值是复用推理，不是把所有题硬塞进四个格子。
 
 ---
 
 ## 怎么用这一篇
 
-**这一篇每题只写 20%，它假设你已经读过展开版。** 留下的那 20% 是面试里直接拿分的部分（母题、必问的澄清问题、胜负手、必答的深挖点）；被砍掉的 80% —— 完整估算、每个数字怎么推出来、失败模式、撞墙信号与演进触发条件 —— 全在 [`08-url-shortener.md`](08-url-shortener.md) 到 [`17-object-storage.md`](17-object-storage.md) 里。而面试深挖阶段的 18 分钟，考的正是那 80%。
+**正式复习时，这一篇假设你已经读过展开版。** 诊断性摸底是例外：只用它定位缺口，不把压缩结论当成已经学会。留下的 20% 是母题、必问问题和深挖入口；被砍掉的估算、推导、失败模式与演进条件都在 [`08-url-shortener.md`](08-url-shortener.md) 到 [`17-object-storage.md`](17-object-storage.md) 里。
 
 **先对号入座，再决定从哪读**
 
 | 你现在的状态 | 该怎么用这一篇 |
 |---|---|
-| **第一次见这些题** | **别从这里开始，直接去 08–17。** 这里的"胜负手"三个字，在没读过推导时只是一句你能背下来、但被追问一句就散架的结论 |
+| **第一次见这些题** | 可先用 §0 做 10 分钟诊断，但**正式学习从 08–17 开始**。不要背这里的“胜负手” |
 | 展开版读过一遍 | 用一天扫完 10 题，标出你复述不出"决定评分的那个子问题"的那几篇，回去重读它们的展开版 |
 | 面试前一天 | 连着扫一遍，30 分钟，只检查一件事：母题还认不认得出来 |
 | 明天就面、来不及读展开版 | 那就只读 §0 和每题的"一句话本质"+"胜负手"，其余跳过 —— 但要知道你是在赌面试官不深挖 |
 
-**这一篇独有的价值只有一个：§0 的 4 种母题分类。**
+**这一篇独有的主要价值是 §0 的 4 种高频母题分类。** 对象存储题是刻意保留的边界案例：它的核心是控制面、元数据面与字节数据面分离，不强塞进四类。
 
 其余每一段，在展开版里都有更完整的版本；唯独"这 10 题其实只有 A/B/C/D 四类"这个横向视角，08–17 里没有 —— 每篇展开版只在自己那一题的范围内说话，看不到共性。而面试里真正救命的恰恰是它：**遇到一道没见过的题，你要么在 30 秒内认出它是哪一类母题、直接调用那一类的标准武器和撞墙条件，要么从零开始现想。** 背题的人换个题面就崩，认母题的人不会。
 
-所以正确读法是**竖着读 §0 的表，横着扫 §1 的十题**：先记住 4 类母题各守什么不变量、用什么武器、在哪撞墙，再把十题当成这 4 类的十个实例去逐一验证。§1 里每题标注的母题不是分类标签，是这个验证过程的答案 —— 你该做的是先自己判一次，再对答案。
+所以正确读法是**竖着读 §0 的表，横着扫 §1 的十题**：先理解 4 类母题各守什么不变量、用什么武器、在哪撞墙，再用前 9 题验证；最后用对象存储检验自己能否识别分类边界。§1 的标注是推理结果，不是要死背的标签。
 
 ---
 
@@ -68,10 +68,10 @@
 | 6 | [Ride-hailing](13-ride-hailing.md) | C+D | 司机独占性与超时收敛 | [05-consensus-and-coordination](../01-building-blocks/05-consensus-and-coordination.md) |
 | 7 | [Ticket booking](14-ticket-booking.md) | C | 不超卖、不锁死、能自动释放 | [01-storage-engines](../01-building-blocks/01-storage-engines.md) |
 | 8 | [Payment system](15-payment-system.md) | A+C | 三方状态不一致怎么收敛 | [02-event-driven-and-cqrs](../02-architecture-patterns/02-event-driven-and-cqrs.md)、[04-usage-based-billing](04-usage-based-billing.md) |
-| 9 | [Autocomplete](16-search-autocomplete.md) | B | 热度更新与个性化的成本 | [02-context-engineering-and-rag](../04-ai-agent-systems/02-context-engineering-and-rag.md) |
-| 10 | [Object storage](17-object-storage.md) | — | 字节不流经应用层 | [04-networking-and-edge](../01-building-blocks/04-networking-and-edge.md) |
+| 9 | [Autocomplete](16-search-autocomplete.md) | B | 热度更新与个性化的成本 | [01-storage-engines](../01-building-blocks/01-storage-engines.md)、[02-caching](../01-building-blocks/02-caching.md) |
+| 10 | [Object storage](17-object-storage.md) | **边界案例** | 字节不流经应用层 | [04-networking-and-edge](../01-building-blocks/04-networking-and-edge.md) |
 
-**用法**：每题 45 分钟档的时间分配固定为 `澄清 5 / 估算 4 / 高层 10 / 深挖 18 / 收敛 5`，节奏见 [`07-interview/01-interview-framework.md`](../07-interview/01-interview-framework.md)。
+**用法**：45 分钟可先按 `澄清 5 / 估算 4 / 高层 10 / 深挖 18 / 收敛 5 / 转场与追问缓冲 3` 分配，再按面试官互动调整，节奏见 [`07-interview/01-interview-framework.md`](../07-interview/01-interview-framework.md)。
 
 ---
 
@@ -88,9 +88,9 @@
 
 **关键估算**
 ```
-1 亿跳转/天 = 1,157 QPS 均值 × 3（峰谷比）≈ 3,500 QPS 读；写 100 万/天 = 12 QPS ⇒ 读写比 100:1
+1 亿跳转/天 = 1,157 QPS 均值 × 3（峰均比）≈ 3,500 QPS 读；写 100 万/天 = 12 QPS ⇒ 读写比 100:1
 10 年存量 36.5 亿条 × 500 B ≈ 1.8 TB（含索引 ×3 ≈ 5 TB）
-Base62：62⁶ = 568 亿，62⁷ = 3.5 万亿 ⇒ 7 位永远够用
+Base62：62⁶ = 568 亿，62⁷ = 3.5 万亿 ⇒ 在本题 10 年规模与不回收策略下，7 位有充足余量
 Top 1% 链接占约 50% 流量 ⇒ 1 GB 缓存可覆盖 90%+ 请求
 ```
 
@@ -103,11 +103,11 @@ Top 1% 链接占约 50% 流量 ⇒ 1 GB 缓存可覆盖 90%+ 请求
                                 │ 302
                                 └─▶ Kafka: click 事件（异步，不阻塞跳转）
 ```
-- 号段（segment）分配：本地自增，**无锁无冲突**，发号对 DB 的写压力 ≈ 0。代价是实例重启丢一段号 —— 62⁷ 的空间里每天丢 10 万也要 9 万年才耗尽。Feistel 网络（或任意 64-bit 块置换）再把自增 ID 映射成不可预测整数：**双射保证零冲突，置换保证不可枚举**，比"哈希 + 撞了重试"强一个数量级。
+- 号段（segment）分配：本地自增，生成器之间无锁且不重复，发号对 DB 的写压力很低。Feistel 网络再把自增 ID 映射成不可预测整数：双射保证**自动生成码彼此不冲突**，置换降低可枚举性。若自动码与自定义 alias 共用语法空间，最终仍必须由唯一索引裁决；想承诺生成路径零冲突，就让两个命名空间语法不相交（展开版 §4.2）。
 - 跳转返回 **302 而不是 301**：301 会被浏览器永久缓存，你永远收不到统计、也无法改目标或封禁恶意链接 —— 这是不可逆的。
 
 **面试的胜负手**
-> 短码绝不用"哈希 + 撞了重试"生成 —— 重试让写路径尾延迟不可控，且会和用户占用的自定义码空间互相踩。我用号段分配 + Feistel 置换：双射零冲突、置换不可枚举。**自定义短码和自动短码放同一张表的同一个唯一索引下，由数据库唯一约束做唯一裁决者，应用层绝不做"先查再插"。**
+> 自动短码可以用随机/哈希候选 + 唯一约束 + 有界重试；空间足够稀疏时，它简单而可靠。若写入规模让碰撞尾延迟或可枚举性成为约束，再考虑号段分配 + Feistel 置换。无论哪种，自定义码和自动码都由同一唯一约束裁决，应用层不做有竞态的“先查再插”；重试必须复用同一个创建幂等键。
 > I'd never generate short codes by hashing and retrying on collision — retries make write-path tail latency unbounded, and they fight with the custom-alias namespace for the same keys. I'd use segment-based ID allocation plus a Feistel permutation: the bijection gives me zero collisions, and the permutation makes the codes unguessable, so nobody can crawl the whole namespace. Custom aliases and generated codes live in the same table under one unique index, so the database constraint is the only arbiter — the application never does check-then-insert.
 
 **必答的深挖点**
@@ -118,7 +118,7 @@ Top 1% 链接占约 50% 流量 ⇒ 1 GB 缓存可覆盖 90%+ 请求
 | 缓存穿透（拿随机码扫） | **这题不用布隆过滤器** —— 36.5 亿键 @1% 误判 = 4.4 GB，塞不进边缘节点。不可枚举性本身就是防线：单次命中率 0.104%，平均 962 次请求才撞到一个有效码，叠加 100 req/min/IP 限流后，采集 1% 存量要单 IP 约 667 年。再加 60 s 空值缓存就够了 |
 | 热点链接（一条被转爆） | L1 进程内缓存 1–5 s，直接削掉 Redis 单分片 90% QPS；再热就推 CDN |
 | 怎么过期与回收 | `expire_at` 索引 + 每日批量清理；**短码永不回收** —— 回收会让旧链接指向新目标，是安全事故 |
-| 统计要精确吗 | 不要。HyperLogLog / 批量 flush，0.8% 误差换 100× 成本 |
+| 统计要精确吗 | 总点击量用 counter/聚合；独立访客数才适合 HyperLogLog。两者都应异步批量写 |
 
 **失败模式**
 - **随机码在 B-Tree 上是随机插入**，页分裂严重；写超过 5k TPS 时按 code 前 2 位分片。
@@ -157,7 +157,7 @@ Top 1% 链接占约 50% 流量 ⇒ 1 GB 缓存可覆盖 90%+ 请求
            └─ 本地令牌桶(rate_i, burst_i)  ──▶  Quota Coordinator (Redis + Lua)
                    ├─ 有令牌 → 放行                        │ 按各实例上一秒用量份额
                    └─ 耗尽  → 429 + Retry-After            └─ 重算 rate_i（不是均分！）
- 降级：Coordinator 不可达 → 退回静态 rate/N 继续本地判定，绝不整体拒绝
+ 降级：Coordinator 不可达 → 普通读接口可退到有硬上限的本地配额；登录、支付和管理写按风险 fail-closed
 ```
 - 选**令牌桶**：天然支持 burst，且天然支持"一次取 N 个令牌"（TPM/token 限流必需）。滑动窗口日志精确但内存 O(请求数)，只用于低基数高价值场景。
 - 配额按**上一秒实际用量份额**再分配，不是均分 —— 流量倾斜（80% 打到 3 个实例）时均分会误杀 60% 合法请求。429 必须带 `Retry-After` 与 `X-RateLimit-Remaining/Reset`，否则客户端立刻重试，限流器变成放大器。
@@ -346,8 +346,8 @@ Top 1% 链接占约 50% 流量 ⇒ 1 GB 缓存可覆盖 90%+ 请求
 - **回源路径上的信号量是这题的灵魂**：它把"缓存挂了"从"DB 崩溃"变成"部分请求降级"。写路径则是先写 DB、再**删**缓存（不是更新），彻底方案是订阅 binlog/CDC 作为唯一失效来源，见 [`02-caching`](../01-building-blocks/02-caching.md) §2。
 
 **面试的胜负手**
-> 分布式缓存最重要的设计不在缓存里，在**未命中路径上**。100 万 QPS、99% 命中率的系统，缓存全挂时 DB 要接 50 倍于上限的流量，秒级死亡，而且死后缓存永远填不满 —— 这是一个无法自愈的故障。所以回源必须有一个**能说出数字的**并发上限：用 Little's Law 从 DB 的 p99 20 ms 和 1.2 万安全 QPS 算出 240，取 200；而且它必须落在**数据库连接池**上，不能是应用内的信号量 —— 600 个应用实例分不了 200 个许可。**宁可拒绝 90% 的请求，也不能让数据库死掉：活着的数据库能把缓存重新喂满，死掉的不能。**
-> The most important part of a distributed cache isn't in the cache — it's on the miss path. At a million QPS with a ninety-nine percent hit rate, losing the cache sends the database fifty times its hard limit. It dies in seconds, and once it's dead the cache can never refill, so that failure doesn't self-heal. So the origin path needs a concurrency cap I can put an actual number on: Little's Law over the database's twenty-millisecond p99 and its twelve-thousand safe QPS gives me two hundred. And I enforce it in the connection pool, not with a semaphore inside the app — six hundred app instances can't meaningfully split two hundred permits. I'd rather shed ninety percent of requests than let the database die — a live database can refill the cache, a dead one can't.
+> 分布式缓存最重要的设计不在缓存里，在**未命中路径上**。100 万 QPS、99% 命中率的系统，如果数据库安全上限是 2 万 QPS，缓存全挂会送来约 50 倍于上限的回源流量，而且数据库倒下后缓存也无法回填。回源必须有一个可校准的全局并发上限：例如压测得到数据库安全吞吐 1.2 万 QPS、连接平均占用 15 ms，则 Little's Law 给出平均在途约 180；可先把共享数据库代理/准入层上限设为 150，保留波动余量，再用排队等待、拒绝率和 DB p99 调整。不要把 p99 延迟直接代进 Little's Law，也不要让 600 个实例各自误以为自己拥有 150 个许可。**宁可有界拒绝，也不要让真相源进入无法自愈的过载。**
+> The most important part of a distributed cache is the miss path. At one million QPS and a 99% hit rate, losing the cache can send roughly fifty times the database's safe load to origin. Suppose load tests show 12,000 safe QPS and a mean connection-hold time of 15 ms: Little's Law gives about 180 requests in flight. I might start a shared database proxy or admission layer at 150, leaving headroom, then tune it from queue time, rejection rate, and database p99. I would not substitute p99 for the mean in Little's Law, and I would not give each of 600 app instances its own allowance of 150. Bounded shedding keeps the source of truth alive so the cache can recover.
 
 **必答的深挖点**
 
@@ -455,20 +455,25 @@ Top 1% 链接占约 50% 流量 ⇒ 1 GB 缓存可覆盖 90%+ 请求
  ─▶ 座位保留 Hold（**一张 seat 表，不要拆两张 —— 拆了就要跨表原子性**）:
       UPDATE seat SET hold_id=?, hold_expire_at=now()+interval '15 min'
        WHERE event_id=? AND seat_id=? AND booking_id IS NULL
+         AND COALESCE(payment_state, 'none') NOT IN ('processing', 'unknown')
          AND (hold_expire_at IS NULL OR hold_expire_at < now());
       ← 单条条件更新 = 唯一裁决者；影响 0 行即抢失败，不重试、不加锁
               │ 成功 → hold_id。**用户看到 10 min 倒计时，库里存 15 min**
               │   （hold 必须 > 支付 deadline + 安全带，见下面的"支付成功但座位已释放"）
               ▼
- ─▶ 支付（幂等键 = hold_id）→ 成功: 同一事务内 hold → booking；超时/失败: 释放
- 释放的两条路（必须都有）:
-   ① 惰性：读到 expire_at < now 的 hold 一律视为无效、可被覆盖   ← 正确性靠这条
-   ② 主动：Scheduler 每 30 s 扫描清理                          ← 体验靠这条
+ ─▶ 支付（幂等键 = hold_id）
+      ├─ 明确成功: 同一事务内 hold → booking
+      ├─ 明确拒付/取消: 标记 failed 后释放
+      └─ 超时/网络错误: payment_state=UNKNOWN，冻结该 hold，不得释放或转卖
+             └─ 主动查单 + webhook + 对账收敛；确认失败才释放，确认成功才出票
+ 释放的两条路（必须都有，但都跳过 processing / UNKNOWN）:
+   ① 惰性：读到 expire_at < now 且没有在途/未知支付的 hold，才视为无效、可被覆盖 ← 正确性靠这条
+   ② 主动：Scheduler 每 30 s 扫描同样的安全集合                         ← 体验靠这条
 ```
 
 **面试的胜负手**
-> 不超卖、不锁死、能自动释放，这三件事必须用**三个不同的机制**。不超卖用数据库唯一约束或条件更新 `WHERE n > 0` —— 单条语句原子，不需要分布式锁，也就没有"持锁者崩溃"这一整类问题；不锁死用 hold 的 `expire_at` **惰性判定**，正确性只依赖读时比时间，后台扫描器挂了也不会永久锁死库存；秒杀峰值用**准入层**解决，而不是让 6 万 QPS 全部撞到库存行上。用一把分布式锁同时解决这三件事的方案，会在"持锁进程 GC 暂停 30 秒"这个追问上崩掉。
-> Not overselling, not deadlocking, and releasing holds automatically are three separate problems, and they need three separate mechanisms. Not overselling comes from a unique constraint or a conditional update — `WHERE n > 0` — atomic in a single statement, no distributed lock, so the whole "what if the lock holder crashed" class of bugs never exists. Not deadlocking comes from evaluating the hold's expire_at lazily: correctness only depends on comparing timestamps at read time, so a dead sweeper can't lock inventory up forever. And the flash-sale peak gets handled at the admission layer, instead of letting 60k QPS land on one inventory row. Any design that leans on a single distributed lock for all three falls apart the moment you ask what happens when the holder GC-pauses for thirty seconds.
+> 不超卖、不锁死、能自动释放，这三件事必须用**三个不同的机制**。不超卖用数据库唯一约束或条件更新 `WHERE n > 0` —— 单条语句原子，不需要分布式锁，也就没有"持锁者崩溃"这一整类问题；不锁死用 hold 的 `expire_at` **惰性判定**，正确性只依赖读时比时间，后台扫描器挂了也不会永久锁死库存；秒杀峰值用**准入层**解决，而不是让 6 万 QPS 全部撞到库存行上。唯一例外是支付状态未知：网络超时只说明“不知道渠道是否已扣款”，此时不能把 hold 当普通过期项释放，必须先查单/回调/对账收敛。用一把分布式锁同时解决这三件事的方案，会在"持锁进程 GC 暂停 30 秒"这个追问上崩掉。
+> Not overselling, not deadlocking, and releasing holds automatically are three separate problems, and they need three separate mechanisms. Not overselling comes from a unique constraint or a conditional update — `WHERE n > 0` — atomic in a single statement, no distributed lock, so the whole "what if the lock holder crashed" class of bugs never exists. Not deadlocking comes from evaluating the hold's expire_at lazily: correctness only depends on comparing timestamps at read time, so a dead sweeper can't lock inventory up forever. The exception is an unknown payment: a network timeout does not prove the channel declined, so that hold stays fenced until a status query, webhook, or reconciliation resolves it. And the flash-sale peak gets handled at the admission layer, instead of letting 60k QPS land on one inventory row. Any design that leans on a single distributed lock for all three falls apart the moment you ask what happens when the holder GC-pauses for thirty seconds.
 
 **必答的深挖点**
 
@@ -477,10 +482,12 @@ Top 1% 链接占约 50% 流量 ⇒ 1 GB 缓存可覆盖 90%+ 请求
 | 为什么不用分布式锁 | 锁要正确必须配 fencing token（GC 暂停会让锁过期而持有者不知道）；唯一约束天然原子，成本还低一个量级 |
 | 只买张数（不选座）怎么扣 | 单行 = 热点，~1,000 TPS 封顶。**桶数 = ceil(准入后峰值 TPS / 单行 TPS)** —— 削峰做对后是 `3,000 ÷ 1,000 = 3`，取 8 留余量；削峰没做才要 120 个。**桶越多碎片化越重**：1 万张剩 200 张时，8 桶每桶 25 张（买 4 张一次成功），100 桶每桶 2 张（几乎必然要借桶）。借桶必须按 `bucket_id` 升序遍历，随机会活锁 |
 | Redis 预扣 + 异步落库行吗 | 行，但它把正确性从"DB 事务"降级成"Redis 不丢数据"，必须持久化 + 主从 + 对账，且要**显式说出这个代价** |
-| 支付成功但座位已被释放 | 支付回调幂等且能"复活" hold：先查座位是否已被占，占了就自动退款 + 通知。**这条路径必须设计，不能假装不会发生**；并且每小时对 `seat / hold / 支付流水` 三方对账 —— 不对账的库存系统必然长期漂移 |
+| 支付调用超时怎么办 | 写入显式 `UNKNOWN`，保持座位 fenced，主动查单 + webhook + 对账；**超时不能走失败释放分支**。只有渠道确认失败/取消才能释放，确认成功才能出票 |
+| 支付成功但座位已被释放 | 主路径先靠 `processing/UNKNOWN` 禁止过期复用；仍遇到竞态时，支付回调要幂等并尝试在同一事务内完成 booking。若座位已经卖给别人，只能自动退款 + 通知。**这条路径必须设计，不能假装不会发生**；并且每小时对 `seat / hold / 支付流水` 三方对账 —— 不对账的库存系统必然长期漂移 |
 
 **失败模式**
 - **只靠扫描器释放 hold**：扫描器 OOM 或积压 → 1 万座位卡死 → 显示售罄但实际有空座。惰性判定是唯一兜底。
+- **支付 timeout 直接释放**：渠道其实已扣款，座位又卖给第二个人 → 两人付一张票。timeout 必须进入 `UNKNOWN` 并冻结库存，不能映射成 `failed`。
 - **单行库存热点**：行锁等待会占满连接池，把整个数据库拖垮，而不只是这一行慢；叠加客户端自动重试 3 次，峰值还会再翻 3 倍。
 
 **常见错误答法**
@@ -524,8 +531,8 @@ Top 1% 链接占约 50% 流量 ⇒ 1 GB 缓存可覆盖 90%+ 请求
 ```
 
 **面试的胜负手**
-> 支付系统里最贵的一个词是"超时"。网络超时的语义是**状态未知**，不是失败 —— 对方可能已经扣了钱。把 timeout 直接写成 failed 并让用户重试，是重复扣款的第一大来源。所以我的状态机里有一个显式的 `UNKNOWN` 状态，它只能被主动查询、渠道回调、或 T+1 对账这三条路径之一推进，**绝不能由超时本身推进**。另外分布式系统里没有 exactly-once，只有 at-least-once 投递 + 幂等处理，所以幂等键必须由业务语义派生，不能让客户端每次重试生成新 UUID。
-> The most expensive word in a payment system is 'timeout'. A network timeout means unknown, not failed — the counterparty may already have moved the money. Mapping timeout to failed and letting the user retry is the number one source of double charges. So my state machine has an explicit UNKNOWN state, and it can only be advanced by an active status query, a channel webhook, or T+1 reconciliation — never by the timeout itself. And since there's no such thing as exactly-once delivery, only at-least-once plus idempotent processing, the idempotency key has to be derived from business semantics, never a fresh UUID per retry.
+> 支付系统里最贵的一个词是"超时"。网络超时的语义是**状态未知**，不是失败 —— 对方可能已经扣了钱。把 timeout 直接写成 failed 并让用户重试，会制造重复扣款风险。所以状态机里要有显式的 `UNKNOWN`，由主动查询、渠道回调或约定周期的对账推进，不能由超时本身猜测终态。消息/数据库在各自事务边界内可以提供更强保证，但跨支付渠道的业务效果通常仍靠 at-least-once、稳定业务操作 ID、幂等状态转换与对账形成 effectively-once；随机 UUID 可以作 ID，前提是同一次业务操作的所有重试都复用它。
+> The most expensive word in a payment system is 'timeout'. A network timeout means unknown, not failed — the counterparty may already have moved the money. Mapping timeout to failed and letting the user retry is the number one source of double charges. So my state machine has an explicit UNKNOWN state, and it can only be advanced by an active status query, a channel webhook, or T+1 reconciliation — never by the timeout itself. Some internal platforms provide exactly-once processing inside their transaction boundary; across a payment channel, I still use a stable operation ID, an idempotent state transition, and reconciliation. A fresh UUID per retry would represent a new operation and defeat that protection.
 
 **必答的深挖点**
 
@@ -609,7 +616,7 @@ Top 1% 链接占约 50% 流量 ⇒ 1 GB 缓存可覆盖 90%+ 请求
 
 ### 10. 设计对象存储 / 文件上传（Design an Object Storage / File Upload Service）
 
-**一句话本质**：唯一的考点是**别让文件字节流经你的应用服务器**。分片、断点续传、去重，全都是这一条的推论。
+**一句话本质**：对大文件上传，默认把**控制面**留在应用层、让**字节数据面**直达对象存储；小文件、需要同步检查或客户端受限时可以选择代理上传。
 
 **必问的 3 个澄清问题**
 1. 最大文件多大？→ 5 MB 头像和 50 GB 视频是两个系统（后者必须分片 + 断点续传）。
@@ -623,8 +630,8 @@ Top 1% 链接占约 50% 流量 ⇒ 1 GB 缓存可覆盖 90%+ 请求
   单台 4 vCPU 应用机的转发上限只有 100–200 MB/s（取 150）⇒ 26 台跑满
     ÷ 60% 目标利用率 = 43 台 → × 1.5（跨 3 AZ 且要能挂一个）= **65 台纯做字节搬运**
   ⇒ 预签名直传后应用层每次上传只过约 1 KB 控制消息 ≈ 2 GB/天 ⇒ **3 台**
-  ⚠ 直传**不省出网单价**（EC2→Internet 与 S3→Internet 同价）。省的是机器、部署耦合与失败面；
-     真正砍出网费的是 CDN（S3 → CloudFront 回源免费）
+  ⚠ 不要假设直传一定改变出网单价；费用取决于云厂商、地域、LB/传输处理和 CDN 路径。
+     稳定收益是减少应用层带宽、连接与发布耦合，具体账单实施时重算
 存储 10 TB/天 × 365 = 3.6 PB/年；热 5% / 温 20% / 冷 75% 分层可省 60–70%
 分片：50 GB ÷ 8 MB = 6,400 片；单片失败只重传 8 MB 而不是 50 GB
 ```
@@ -633,28 +640,30 @@ Top 1% 链接占约 50% 流量 ⇒ 1 GB 缓存可覆盖 90%+ 请求
 ```
  ① Client ─▶ App: POST /uploads {filename,size,sha256}
       App: 校验配额与权限 → 生成 object_key → 写 metadata(status=pending)
-           → 返回预签名 URL（15 min 有效，绑定 size/content-type 条件）
+           → 返回预签名 URL（15 min；绑定 key/content-type/checksum，
+              大小按厂商能力签入或完成后校验）
  ② Client ═════════ 字节直传 ═════════▶ 对象存储（S3/GCS/OSS）
            应用服务器完全不在这条路径上；分片并发 4–8，失败仅重传该片
- ③ Client ─▶ App: POST /uploads/{id}/complete {parts[etag]} → 校验 sha256 → ready
-           → 发 object_created 事件 ─▶ Kafka ─▶ 转码 / 扫毒 / 缩略图 / 索引
+ ③ Client ─▶ App: POST /uploads/{id}/complete {parts[etag]}
+           → 把 ETag 当不透明 part 标识；比对存储侧全对象 checksum
+           → verifying ─▶ 扫毒通过 ─▶ ready，再发可消费事件
  ④ 下载: Client ─▶ App 换取 CDN 签名 URL（短 TTL）─▶ CDN ─▶ 回源
  ── 元数据在数据库，字节在对象存储，两者靠 status 字段 + lifecycle 规则收敛 ──
 ```
 - 元数据与数据分离必然带来不一致（客户端传完了但没调 complete）。解法是"状态 + 双兜底"：`pending` 超 24 h 由清理任务删除，**同时**在对象存储上配 lifecycle 规则自动清理未完成的 multipart。
-- 秒传（去重）：客户端先算 sha256，命中就建引用、零字节上传。代价是引用计数 + 一个隐私面（能探测某文件是否已被他人上传过）。
+- 秒传（去重）：客户端 sha256 只能当候选键，不能当可信完整性证明。只有服务端已验证该对象、调用者通过权限/所有权证明时才建引用；否则仍上传并由存储侧 checksum 或受信后台验证。代价是引用计数，以及“能否探测他人是否上传过某文件”的隐私面。
 
 **面试的胜负手**
-> 这题只有一个真正的评分点：**文件字节永远不经过应用服务器**。而理由不是省带宽 —— 出网单价是一样的。理由是：转发方案下应用层要 **65 台**机器纯搬字节，单文件大小被 LB 空闲超时卡在几百 MB，而且**每次滚动部署都会掐断在途上传，等于把上传成功率绑在了部署频率上**。预签名直传把应用层降到 **3 台**，只处理每次上传约 1 KB 的控制消息。**65 台 → 3 台就是这题唯一必须背下来的数字对。**剩下的一切 —— 分片、断点续传、去重、转码 —— 都是这个决策的推论。**唯一的代价是元数据与数据会短暂不一致，我用 pending 状态 + 存储侧 lifecycle 规则两条路兜底。**
-> There's exactly one thing being graded here: file bytes must never pass through your application servers. And the reason isn't bandwidth cost — egress is priced the same either way. The reason is that proxying needs sixty-five machines doing nothing but copying bytes, it caps single-file size at a few hundred megs because of load-balancer idle timeouts, and every rolling deploy kills the uploads in flight — so your upload success rate is now coupled to your deploy frequency. Presigned direct upload drops the app tier to three machines handling about a kilobyte of control messages per upload. Sixty-five to three is the one number pair to memorize here. Everything else — multipart, resumable uploads, dedup, transcoding — falls out of that one decision. The only cost is that metadata and bytes diverge for a while, and I cover that with a pending state plus a storage-side lifecycle rule.
+> 这题的主轴是：**大文件字节默认不经过应用服务器**。理由不是简单的“省出网单价”，而是解除应用机器数、部署和负载均衡超时与上传成功率的耦合。在这组假设下，转发需要约 **65 台**，直传控制面约 **3 台**；这组数必须跟假设一起说，不能当通用常数。代价也不只元数据短暂不一致：还包括签名 URL 泄漏面、两套状态的对账和厂商协议差异，因此要用短 TTL、`pending/verifying/ready`、服务端校验和与 lifecycle 兜底。
+> The main design axis is that large-file bytes should normally bypass the application tier. The reason is not simply egress price; it is to decouple upload success from application fleet size, load-balancer timeouts, and rolling deployments. Under these assumptions the estimate is roughly sixty-five proxy nodes versus three control-plane nodes, but the pair must travel with its assumptions. The costs include metadata-byte reconciliation, signed-URL exposure, and provider-specific upload semantics, so I use short TTLs, explicit pending/verifying/ready states, trusted checksums, and storage lifecycle cleanup.
 
 **必答的深挖点**
 
 | 面试官会挖 | 你要说 |
 |---|---|
-| 分片大小怎么选 | 8–16 MB。太小 → 请求数爆炸（50 GB ÷ 1 MB = 5 万请求）；太大 → 重传代价与内存占用高。S3 的 10,000 片上限是硬约束 |
-| 断点续传怎么做 | 重连后调 `ListParts`，**正确性一律以服务端视角为准**（客户端本地记录在换设备、清缓存、多端并发时会失效），只补缺片。**服务端不需要为此维护任何额外状态 —— `upload_id` 本身就是那个状态** |
-| 预签名 URL 泄露 / 超额上传 | 短 TTL（15 min）+ 绑定 content-length / content-type 条件；配额在**发券时**校验并把 size 上限写进预签名条件，存储侧直接拒超限 PUT，不要传完再校验 |
+| 分片大小怎么选 | 在这里取 8–16 MB。太小 → 请求数爆炸（50 GB ÷ 1 MB = 5 万请求）；太大 → 重传代价与内存占用高。AWS S3 的 10,000 片上限是本案例约束；其他厂商要查各自文档 |
+| 断点续传怎么做 | 客户端持久保存每片的 `(part_number, ETag/part_identifier)`，跨设备时把 manifest 存进应用元数据；重连后用分页 `ListParts` 核验存储侧已收到的片并补缺。`upload_id` 和 manifest 各解决一半问题，不能把 listing 当成唯一完成清单 |
+| 预签名 URL 泄露 / 超额上传 | 短 TTL（15 min）+ 精确 key/content-type/checksum。若厂商允许把 `Content-Length` 签入 PUT 就使用；否则完成后 HEAD 校验并隔离/删除超限对象。`content-length-range` 是 POST policy 条件，不是通用 PUT 参数 |
 | 冷热分层 | 按 last_access 自动降级（标准 → IA → 归档）；归档层**取回延迟是分钟到小时级**，产品必须显式暴露这个等待 |
 
 **失败模式**
@@ -662,16 +671,16 @@ Top 1% 链接占约 50% 流量 ⇒ 1 GB 缓存可覆盖 90%+ 请求
 - **元数据与对象漂移**：定期双向对账 —— DB 有记录但对象不在（标记损坏）；对象在但 DB 无记录（孤儿对象，按 lifecycle 清）。**热点对象**：爆款文件打穿单个存储前缀（部分对象存储对单前缀有 QPS 上限），修法是 CDN + 多副本 key `obj#0..obj#9`。
 
 **常见错误答法**
-- ❌「客户端传到应用服务器，服务器再转存 S3」—— 65 台机器纯搬字节、单文件被 LB 超时卡在几百 MB、每次部署掐断在途上传。本题唯一的"立即出局"错误。（注意别把理由说成"省出网费" —— 单价一样，说错理由同样掉分。）
-- ❌「大文件一次 PUT 传完」—— 网络抖一次就要从头再来，且 LB 的空闲超时（常见 60 s）会直接杀掉连接。
+- ❌「不看文件大小和处理要求，一律经应用层代理」—— 大文件会把应用扩展维度变成带宽和长连接；若确实代理，必须证明流式转发、连接排空、超时、重试和容量都能承受。
+- ❌「大文件一次 PUT 传完」—— 网络抖动后通常要重传整对象，也缺少可靠的分片级恢复；代理链上的 idle/request timeout 还要逐层核对。持续传输不会仅因为 60 秒 idle timeout 自动断开，不能把 idle timeout 错算成固定文件大小上限。
 
 ---
 
-## 2. 把 10 题压成 4 条肌肉记忆
+## 2. 把前 9 题归约成 4 条肌肉记忆，再保留 1 个边界案例
 
 | 母题 | 一句话规则 | 反例（说了就掉分） | 覆盖题号 |
 |---|---|---|---|
-| **A · ID 与唯一性** | 唯一性由**存储层的唯一约束**裁决，应用层永不 check-then-act；幂等键必须从业务语义派生 | "先查再插"、"哈希撞了就重试"、"客户端每次重试生成新 UUID" | 1, 2, 8 |
+| **A · ID 与唯一性** | 唯一性由**存储层的唯一约束**裁决，应用层永不 check-then-act；幂等键必须稳定标识一次业务操作（可确定性派生，也可首次生成后持久复用） | "先查再插"、"哈希撞了就重试"、"客户端每次重试生成新 UUID" | 1, 2, 8 |
 | **B · 扇出与聚合** | 长尾（大 V / 热前缀 / 热 key）必须走**另一条物理路径**；阈值用成本交点算，不拍数字 | "全部写扩散"、"全部读扩散"、"遍历子树再排序" | 3, 5, 9 |
 | **C · 并发与库存** | 削峰在**准入层**，正确性在**条件更新**，释放在**惰性过期**；三件事三个机制 | "用分布式锁保护库存"、"先查余量再扣" | 2, 6, 7, 8 |
 | **D · 长连接与状态** | 推送管延迟、拉取管正确性；**每个状态都必须有超时和自动回退** | "推送保证送达"、"状态由客户端上报决定" | 4, 6 |
@@ -710,7 +719,9 @@ Top 1% 链接占约 50% 流量 ⇒ 1 GB 缓存可覆盖 90%+ 请求
 
 ---
 
-**下一篇** → [08-url-shortener.md](08-url-shortener.md)：本篇第 1 题的展开版 —— 发号器、100:1 读放大、以及 301 这个不可撤销的决定。
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**案例顺读下一篇** → [08-url-shortener.md](08-url-shortener.md)：本篇第 1 题的展开版 —— 发号器、100:1 读放大、以及 301 这个不可撤销的决定。
 
 > 从 08 开始是这 10 题的**逐题展开版**（08 → 17，顺序与本篇 1 → 10 一一对应）。
 > 复习时回到本篇，第一次学时去读展开版。

@@ -19,12 +19,12 @@
 
 | 概念 | 一句话 | 详见 |
 |---|---|---|
-| p50 / p99 / 尾延迟 | 排序后第 50% / 99% 位置的那个耗时；扇出到 N 个后端时慢的那个决定整体 | [00-concepts §3](../00-foundations/00-concepts.md)、[00/01 §7](../00-foundations/01-fundamentals.md) |
-| 最终一致与复制延迟 | 写完之后别人不一定立刻读到；中间那段窗口是合法的、不报警的 | [00-concepts §6](../00-foundations/00-concepts.md) |
+| p50 / p99 / 尾延迟 | 排序后第 50% / 99% 位置的那个耗时；扇出到 N 个后端时慢的那个决定整体 | [00-concepts §3](../00-foundations/00-concepts.md#3-为什么平均值是骗人的p50--p90--p99)、[00/01 §7](../00-foundations/01-fundamentals.md#7-尾延迟放大tail-latency-amplification) |
+| 最终一致与复制延迟 | 写完之后别人不一定立刻读到；中间那段窗口是合法的、不报警的 | [00-concepts §6](../00-foundations/00-concepts.md#6-什么是一致性--一个词两种完全不同的意思) |
 | 缓存的回源与热 key | 命中率 90% 的缓存挂掉 = 下游瞬间 10 倍流量；单个 key 太热要单独一条路径 | [01/02](../01-building-blocks/02-caching.md) |
-| 事件时间 vs 处理时间、有状态流处理 | 事件"发生"的时刻和你"算到"它的时刻是两回事，窗口聚合按哪个算结果完全不同 | [01/03 §6](../01-building-blocks/03-messaging-and-streams.md) |
-| Lakehouse 表格式与数据契约 | Iceberg/Delta 的快照与时间旅行；schema 变更要过 CI 门禁而不是靠口头约定 | [02/05 §2 §4](../02-architecture-patterns/05-data-platform.md) |
-| ML 系统坏掉时会返回 200 OK | 没有异常、没有报错，只有指标慢慢变差 —— 普通系统的监控对它是失明的 | [08/01 §4](01-ml-system-overview.md) |
+| 事件时间 vs 处理时间、有状态流处理 | 事件"发生"的时刻和你"算到"它的时刻是两回事，窗口聚合按哪个算结果完全不同 | [01/03 §6](../01-building-blocks/03-messaging-and-streams.md#6-流处理语义与状态) |
+| Lakehouse 表格式与数据契约 | Iceberg/Delta 的快照与时间旅行；schema 变更要过 CI 门禁而不是靠口头约定 | [02/05 §2 §4](../02-architecture-patterns/05-data-platform.md#2-lakehouse-表格式核心机制) |
+| ML 系统坏掉时会返回 200 OK | 没有异常、没有报错，只有指标慢慢变差 —— 普通系统的监控对它是失明的 | [08/01 §4](01-ml-system-overview.md#4-ml-系统特有的失败模式清单) |
 
 **这一章要回答的问题**
 
@@ -96,9 +96,8 @@ Google 把 skew 拆成三个来源：训练与服务**管道实现差异**、训
 按 `instance_id`（一次预测的唯一 id）把训练侧和服务侧的特征 join 起来逐列比
 （[Nubank 工程博客, 2023-06-27](https://building.nubank.com/dealing-with-train-serve-skew-in-real-time-ml-models-a-short-guide/)）。
 
-**唯一能把 skew 收敛到零、而不只是检测它的做法：服务端特征日志。**
-线上把实际喂进模型的那份向量连同 `request_id`、`prediction`、模型版本一起落盘，下一轮训练**直接用这份日志当训练集** ——
-"训练值"和"线上值"在定义上就是同一份数据。代价两条：① 存储，500 列 × 8 B × 10 亿次预测/天 ≈ 4 TB/天原始，
+**服务端特征日志能显著减少“训练值与实际服务值不同”的实现偏斜，但不是归零按钮。**
+线上把实际喂进模型的向量连同 `request_id`、`prediction`、模型版本落盘，下一轮训练可把它作为重要来源。它让已曝光样本共享线上值，但仍可能有日志丢失/采样偏差、标签 join 错误、新特征无历史、反馈回路和处理逻辑变化。代价两条：① 存储，500 列 × 8 B × 10 亿次预测/天 ≈ 4 TB/天原始，
 要按列存 +（只做监控时）1–5% 采样，做训练集则必须全量或分层采样；② 你只能学到**已上线的特征**，
 新特征必须先 **shadow（影子：新特征照常计算并落盘，但不参与线上打分）**记录几周才能进训练集。
 **"新特征先 dark launch"的真正理由是攒训练数据，不是稳定性。**
@@ -112,7 +111,7 @@ Google 把 skew 拆成三个来源：训练与服务**管道实现差异**、训
 （[Vertex AI ModelMonitoringObjectiveConfig](https://docs.cloud.google.com/vertex-ai/docs/reference/rest/v1beta1/ModelMonitoringObjectiveConfig)）。
 但分布相同 ≠ 逐条相同：把两列的值整体打乱，分布距离是 0，匹配率是 0。**能逐条比就别比分布。**
 
-⚠️ **skew 不是 drift。** 两者基线不同：**skew 是拿线上值和训练集比，drift 是拿今天和上一个时间窗比。**
+⚠️ **skew 不是 drift。** skew 比训练与服务；drift 同时保留冻结的训练/发布基线（累计偏移）和季节性/近期参照（短期异常）。只拿今天和上一个窗口比会吞掉缓慢漂移。
 只做 drift 监控会完全漏掉"部署第一天就存在"的管道实现差异 —— 它每天都一样地错，drift 曲线看起来非常平稳。
 修好它值多少钱：Google Play 修复 training-serving skew 后，主落地页安装率提升 **2%**（同上 Google Cloud 博客）——
 在成熟业务里，2% 是一个模型结构改动很难拿到的量级。
@@ -159,21 +158,24 @@ JOIN   feat_daily f
 --    有 ASOF 语法的引擎（DuckDB / ClickHouse / Databricks）直接写
 SELECT l.request_id, l.y, f.user_ctr_7d
 FROM   labels l
-ASOF JOIN feat_versioned f
+ASOF LEFT JOIN feat_versioned f
   ON   f.user_id = l.user_id AND f.event_time <= l.label_time;
 
 -- ✅ 没有 ASOF 语法时的等价写法（Spark / Hive 通用）
 SELECT request_id, y, user_ctr_7d FROM (
   SELECT l.request_id, l.y, f.user_ctr_7d,
-         ROW_NUMBER() OVER (PARTITION BY l.request_id ORDER BY f.event_time DESC) AS rn
-  FROM   labels l JOIN feat_versioned f
+         ROW_NUMBER() OVER (
+           PARTITION BY l.request_id
+           ORDER BY f.event_time DESC, f.ingested_at DESC, f.feature_version DESC
+         ) AS rn
+  FROM   labels l LEFT JOIN feat_versioned f
     ON   f.user_id = l.user_id
    AND   f.event_time <= l.label_time
    AND   f.event_time >  l.label_time - INTERVAL 7 DAY   -- 必须限定下界，否则全表扫
 ) WHERE rn = 1;
 ```
 
-代价要说清楚：**as-of join 比按天 join 贵一个量级。** 它是不等值 join，Spark 上会退化成 sort-merge
+代价要量出来：as-of join 通常比等值按天 join 更贵，但是否到一个数量级取决于分区、排序、实体基数、窗口下界和引擎实现。它是不等值 join，Spark 上可能走 sort-merge
 （先按 `user_id, event_time` 全局排序）；1 亿条标签 × 每用户日均 20 个特征版本 = 20 亿行右表，典型是几百 core-hour 一次。
 那个 `event_time > label_time − 7d` 的下界不是可选项，它把右表扫描量从"全历史"压到"7 天"。
 Databricks 的语义定义可以直接照抄：时序特征表必须声明 timestamp key（`TimestampType` / `DateType`），训练集构造用 AS OF join ——
@@ -195,7 +197,7 @@ Databricks 的语义定义可以直接照抄：时序特征表必须声明 times
 
 | 手段 | 做法 | 能抓到什么 | 抓不到什么 |
 |---|---|---|---|
-| **单列 AUC 体检** | 每列单独当作打分器算 AUC | 任何单列 AUC > 0.75 都当嫌疑处理 | 多列共同泄漏、弱泄漏 |
+| **单列 AUC 体检** | 每列单独当作打分器算 AUC | 与历史/领域基线相比异常强时列为嫌疑；0.75 只可作示例起点 | 多列共同泄漏、弱泄漏 |
 | **严格时间外推验证** | 验证集时间**整体晚于**训练集最后一条，中间留 gap ≥ 一个特征窗口 | 按天 join 型穿越 | 特征表本身就是穿越版时无效 |
 | **在线-离线回放比对** | 用线上 fetch 日志的 (key, timestamp) 重新回填，逐条 diff（Chronon 模式） | **几乎全部** | 需要先有线上流量 |
 | **服务端特征日志当训练集** | 直接消灭"两份值" | **全部**（定义上不可能穿越） | 新特征必须先 shadow 攒数据 |
@@ -287,16 +289,16 @@ Databricks 的语义定义可以直接照抄：时序特征表必须声明 times
 
 ### 5.2 决定延迟的不是特征个数
 
-**本节唯一需要背下来的判断：延迟的驱动量是 feature view 的个数，不是特征的个数。**
-10 个特征分散在 5 个 feature view 里 = **5 次串行网络往返**；分散在 10 个里 = 10 次。
-**唯一的例外是 Redis：同一个 entity 的所有 feature view 共享一个 hash key，往返永远是 1 次**
+在线延迟由 payload 大小、分片数、feature view/实体的逻辑读取数以及能否 batch/并行共同决定。
+10 个特征分散在 5 个 view 里可能产生 5 次逻辑读取，但客户端可并行或 pipeline；关键是避免不必要的串行关键路径。
+Redis 只有在同 entity 数据落在同 key/slot 且使用 HMGET 等批量命令时才能接近一次往返
 （[Feast: Online Server Performance Tuning](https://docs.feast.dev/how-to-guides/online-server-performance-tuning)）。
 单个在线存储的分位数（Tecton 官方对比，是公开资料里最可信的一组）：
 
 | 在线存储 | p50 | p99 | p999 | 备注 |
 |---|---|---|---|---|
 | **Redis** | 600–700 µs | 2.5–3.0 ms | 9.0–12.0 ms | 同 entity 恒 1 次往返；单分片 cache.m5.2xlarge ≈ 18,000 QPS 或 18 GB |
-| **DynamoDB** | 3–4 ms | 20–25 ms | 60–120 ms | 最终一致读 = 0.5 RRU/查询；**单 entity key 3000 QPS 硬上限**，响应 2 MiB |
+| **DynamoDB** | 3–4 ms | 20–25 ms | 60–120 ms | 最终一致 4 KiB 读通常消耗 0.5 RCU；物理分区上限约 3,000 RCU/s，实际 QPS 取决于 item 大小、读一致性、分区与自适应容量 |
 | **PostgreSQL** | 3–10 ms | 未见公开分位 | — | Feast 口径；连接池是主要瓶颈 |
 
 （来源：[Tecton: Select Your Online Store](https://docs.tecton.ai/docs/beta/setting-up-tecton/connecting-an-online-store/connecting-an-online-store-aws/selecting-your-online-store)、Feast 调优文档。）
@@ -305,7 +307,7 @@ Databricks 的语义定义可以直接照抄：时序特征表必须声明 times
 
 | 步骤 | 朴素做法 | p99 | 收敛后的做法 | p99 |
 |---|---|---|---|---|
-| 用户侧 180 列（6 个 feature view） | 6 次串行 DynamoDB GetItem | 6 × 22 ≈ **132 ms** | 合并成同一个 entity 的 1 个 Redis hash，1 次 HMGET | **2.5–3.0 ms** |
+| 用户侧 180 列（6 个 feature view） | 6 次串行 DynamoDB GetItem | 不能把 6 个 p99 直接相加；需测端到端（粗略上界 132 ms） | 合并成同一个 entity 的 1 个 Redis hash，1 次 HMGET | **2.5–3.0 ms**（引用场景） |
 | 商品侧 200 候选 × 40 列 | 逐候选查 200 次 | 不可行 | 1 次 pipeline / MGET，200 key 一批（客户端按 slot 分组，每分片 1 次往返、分片间并行） | **3–5 ms** |
 | 用户 embedding（256 维 fp32 = 1 KB） | 每请求取一次 | +2 ms | 会话开始时预取，进程内缓存 TTL 2 h（Meta Mosaic 用的就是 2 h TTL） | **≈0**（命中时） |
 | 请求时变换 20 列 | pandas UDF | 8–15 ms | 原生 Python；重变换搬到写入侧预物化 | **1–2 ms** |
@@ -314,7 +316,7 @@ Databricks 的语义定义可以直接照抄：时序特征表必须声明 times
 
 四条动作，按 ROI 排序：
 
-1. **收敛 feature view**：把同一个 entity 的特征合进同一个 view / 同一个 hash key。这一条通常就吃掉 80% 的收益。
+1. **减少不必要的物理读取**：可把同 entity、同权限与相近更新周期的特征共置，或用批量/并行读取；“80% 收益”不是通用比例。合并过度会制造大 value、写放大和权限耦合，必须按 RTT 与载荷压测。
 2. **批量取数**：200 个候选是一次 MGET，不是 200 次 GET。Feast 的 DynamoDB 批量固定 100（API 上限），要调的是 `max_read_workers`。
 3. **重变换搬到写入侧**（`write_to_online_store=True`），读路径只做拼装。Feast 官方实测请求时变换用原生 Python 比 pandas
    快 **3–10×**（[Feast blog, 2025-01-14](https://feast.dev/blog/feature-transformation-latency/)）—— 请求时用 pandas
@@ -328,15 +330,15 @@ Databricks 的语义定义可以直接照抄：时序特征表必须声明 times
 | 约束 | 数值 | 撞墙的信号 |
 |---|---|---|
 | 单请求从在线存储取回的字节 | ≤ **2 MB**（Tecton SLO 资格线，[文档](https://docs.tecton.ai/docs/monitoring/online-serving)） | 算一遍：200 候选 × 40 列 × 8 B = 64 KB，很安全；但**把用户 1000 长度的行为序列（8 KB）跟着每个候选重复带一遍 = 1.6 MB**，当场撞线 |
-| Redis 查询耗时 | ≤ **25 ms**（超过不算 SLO-eligible）；后端超时 **2 s** | p999 超过 12 ms 就该看大 key 和分片倾斜了 |
-| DynamoDB 单 entity key | **3000 QPS** 硬上限 | 爆款商品 / 头部商户会稳定撞上，必须像热 key 一样单独处理（[01/02 §4](../01-building-blocks/02-caching.md)） |
-| 成本拐点 | 100K 读写 QPS：Redis ≈ **$76,404/年** vs DynamoDB ≈ **$788,476/年**；500 GB 数据集：DynamoDB ≈ **$9,329/年** vs Redis ≈ **$305,619/年**（Tecton 估算） | **高 QPS 选 Redis，大数据量选 DynamoDB。** 两者都要的场景就分层：热实体 Redis、长尾 DynamoDB |
+| Redis 查询耗时 | Tecton 文档的 ≤25 ms / 后端 2 s 是产品资格线与保护上限，不是业务请求预算 | 从调用方剩余 deadline 倒推更短超时；高分位突变时检查大 key、排队与分片倾斜 |
+| DynamoDB 热分区 | 约 **3000 RCU/s / 1000 WCU/s** 的物理分区量级，不等于固定 QPS | 爆款实体可能形成热分区；按 item 大小、一致性和实际分区吞吐做压测与散列 |
+| 成本拐点 | 特定 Tecton 估算快照：100K 读写 QPS、500 GB 下两类后端成本方向不同 | 按当前 region、请求大小、一致性、折扣和运维成本重算；分层是候选方案，不是只由“高 QPS/大数据”两句话决定 |
 
 规模上限的参照物：DoorDash 每秒从 Redis 读取数千万个 key/value，只读负载下单次查找约 **1.9 µs**，把扁平 KV 改成 Redis Hash 显著降 CPU
 （[DoorDash, 2020-11-19](https://careersatdoordash.com/blog/building-a-gigascale-ml-feature-store-with-redis/)；
 后续"客户端缓存再提 70%"的说法来自标题与检索摘要，**未能直接核实原文**）。
 ⚠️ 这一整节讲的是**行式 KV 取数**；LLM 服务侧那套"缓存"（KV cache 复用、continuous batching —— 复用的是模型算出的中间张量，
-不是特征值）是完全不同的问题，见 [04/01 §2 §3](../04-ai-agent-systems/01-llm-serving-infra.md)。
+不是特征值）是完全不同的问题，见 [04/01 §2 §3](../04-ai-agent-systems/01-llm-serving-infra.md#2-kv-cache显存预算的主项公式--算例)。
 
 ---
 
@@ -389,7 +391,7 @@ Databricks 的语义定义可以直接照抄：时序特征表必须声明 times
 | 在线服务 p50/p99/错误率 | 按 feature view 分组 | 定位是哪个 view 拖慢了整体 |
 
 注意基数：按 `feature × 天 × 模型版本 × 机房` 打标签会让指标基数指数膨胀，而基数是可观测性的唯一成本变量
-（[05/02 §2](../05-reliability/02-observability.md)）。实践上按 feature view 聚合，逐列比对走离线批任务。
+（[05/02 §2](../05-reliability/02-observability.md#2-指标基数是最容易失控的成本变量)）。实践上按 feature view 聚合，逐列比对走离线批任务。
 
 **下线（这是最容易出事的一步）**：
 
@@ -459,10 +461,9 @@ skew 来自有状态实时特征**，这三类场景下离线+在线 feature sto
    而不是成果；能证伪它的只有一件事，就是拿线上真实的 key 和时间戳把特征重算一遍逐条 diff。
 2. **feature store 统一的是定义，skew 活在执行语义里。** 同一份 SQL 在两个引擎、两个时钟下跑出来的东西可以完全不同，
    所以"上了平台就没有 skew 了"这句话在 Uber 那次 Tier-1 事故里就已经被证伪 —— 那次的根因甚至不是特征值，是元数据。
-3. **在线特征的延迟预算按 feature view 的个数算，不按特征个数算。**
+3. **在线特征延迟要按串行关键路径算，不只数 feature view 或特征列。**
    200 个特征收在一个 Redis hash 里是 1 次往返 ≈3 ms（Redis p99 2.5–3.0 ms）；
-   同样这 200 个特征分散在 10 个 view 里，走 DynamoDB 就是 10 次串行往返 ≈200 ms（p99 20 ms/次），
-   走 Redis 也要 ≈30 ms —— 无论哪个存储，**决定你能不能进 10 ms 的从来不是你取了多少列，是你往返了几次**。
+   同样数据分散在 10 个 view 里会增加逻辑读取与分片机会，但可用 multi-get/pipeline/并行减少串行 RTT。是否能进 10 ms 必须看 payload、分片、批量能力与端到端实测，不能把多个 p99 直接相加。
 
 ---
 
@@ -479,4 +480,6 @@ skew 来自有状态实时特征**，这三类场景下离线+在线 feature sto
 
 ---
 
-**下一篇** → [07-model-quality-and-experimentation.md](07-model-quality-and-experimentation.md)：特征对齐之后，轮到"离线指标到底能不能信"——离线评测、在线实验与影子部署。
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**ML Systems 专章顺读下一篇** → [07-model-quality-and-experimentation.md](07-model-quality-and-experimentation.md)：特征对齐之后，轮到"离线指标到底能不能信"——离线评测、在线实验与影子部署。

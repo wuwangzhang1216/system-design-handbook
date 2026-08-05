@@ -1,7 +1,9 @@
 # 02 · 可观测性
 
 > 可观测性（observability）不是"装了 Prometheus + ELK + Jaeger"，是**你能不能在不发新代码的前提下回答一个你从没预想过的问题**。
-> 它同时也是你云账单上通常排第二的那一项——仅次于计算。绝大多数团队为自己从来不查的数据付了 70% 的钱。
+> 它也可能成为主要云成本，但排名和“未查询比例”要用自己的账单与查询审计证明，不能套用统一百分比。
+>
+> **阅读分层与时间边界**：§1–§5 是 Core，§6–§10 是进阶落地。价格、保留期、开销和工具状态为示例或 **2026-08 快照**；先学数据模型和取舍，再按自己的流量验证数字。
 
 ---
 
@@ -18,12 +20,12 @@
 
 | 概念 | 一句话 | 详见 |
 |---|---|---|
-| 分位数，以及"分位数不能取平均" | p99 是排序后第 99% 位置的值；两台机器的 p99 不能平均，要先合并桶 | [00-concepts §3](../00-foundations/00-concepts.md) |
-| 延迟 / 吞吐 / 并发 | 并发 = 吞吐 × 延迟；下游一慢，在途请求数立刻上涨 | [00-concepts §2](../00-foundations/00-concepts.md) |
-| 一个请求的旅程 | 从 DNS 到 LB 到应用到缓存到 DB，每一跳都可能是"慢"的那一跳 | [00-concepts §1](../00-foundations/00-concepts.md) |
-| 尾延迟与扇出放大 | 每个后端都很快，不代表用户觉得快 | [01-fundamentals §7](../00-foundations/01-fundamentals.md) |
-| 背压 | 处理不过来时向上游反压，而不是无限排队 | [01-fundamentals §6](../00-foundations/01-fundamentals.md) |
-| SLI / SLO / 错误预算 / 燃尽率 | `好事件 / 有效事件` 这个比值，以及"多久会把预算烧光" | [01-slo-and-error-budget.md §1、§5](01-slo-and-error-budget.md) |
+| 分位数，以及"分位数不能取平均" | p99 是排序后第 99% 位置的值；两台机器的 p99 不能平均，要先合并桶 | [00-concepts §3](../00-foundations/00-concepts.md#3-为什么平均值是骗人的p50--p90--p99) |
+| 延迟 / 吞吐 / 并发 | 并发 = 吞吐 × 延迟；下游一慢，在途请求数立刻上涨 | [00-concepts §2](../00-foundations/00-concepts.md#2-延迟吞吐并发--三个最常被混淆的词) |
+| 一个请求的旅程 | 从 DNS 到 LB 到应用到缓存到 DB，每一跳都可能是"慢"的那一跳 | [00-concepts §1](../00-foundations/00-concepts.md#1-一个请求到底经历了什么) |
+| 尾延迟与扇出放大 | 每个后端都很快，不代表用户觉得快 | [01-fundamentals §7](../00-foundations/01-fundamentals.md#7-尾延迟放大tail-latency-amplification) |
+| 背压 | 处理不过来时向上游反压，而不是无限排队 | [01-fundamentals §6](../00-foundations/01-fundamentals.md#6-背压backpressure没有它系统就会雪崩cascading-failure) |
+| SLI / SLO / 错误预算 / 燃尽率 | `好事件 / 有效事件` 这个比值，以及"多久会把预算烧光" | [01-slo-and-error-budget.md §1、§5](01-slo-and-error-budget.md#1-sli优先写成-好事件--有效事件) |
 
 **这一章要回答的问题**
 
@@ -76,7 +78,7 @@
 | 偶发 5xx（万分之一） | **尾部采样（tail-based sampling） Traces** | Logs | 头部采样（head-based sampling） 1% 会把它采没 |
 | 一次部署后回归 | Metrics（版本维度） | 差分 Profiles | — |
 | 跨服务的因果（谁触发了谁） | **Traces** | — | 日志时间戳对不齐，永远拼不出来 |
-| 队列堆积 / 背压（backpressure：处理不过来时反向压制上游而不是无限排队，见 [`00/01 §6`](../00-foundations/01-fundamentals.md)） | Metrics（队列深度 + 队首等待） | Traces | 只看利用率会漏掉排队 |
+| 队列堆积 / 背压（backpressure：处理不过来时反向压制上游而不是无限排队，见 [`00/01 §6`](../00-foundations/01-fundamentals.md#6-背压backpressure没有它系统就会雪崩cascading-failure)） | Metrics（队列深度 + 队首等待） | Traces | 只看利用率会漏掉排队 |
 | 死锁（deadlock） / goroutine 泄漏（leak） | **Profiles（goroutine/mutex）** | — | 其他三支柱完全无能为力 |
 | 成本异常（某租户烧钱） | 低基数 Metrics + **离线明细表** | — | 做成高基数 metric = 拿 TSDB 当数据仓库 |
 
@@ -84,7 +86,7 @@
 
 ---
 
-## 2. 指标：基数是唯一的成本变量
+## 2. 指标：基数是最容易失控的成本变量
 
 ### 基数就是笛卡尔积
 
@@ -97,7 +99,7 @@ http_request_duration_seconds{endpoint(200), method(4), status(8), pod(30), regi
   × 5,000（加一个 tenant_id 标签）                 = 403 亿 series      ← 破产
 ```
 
-**每增加一个基数为 N 的标签，成本乘以 N。不是加 N，是乘 N。** 这是唯一要记的成本公式。
+**在其他标签组合都真实出现的最坏情况下，增加一个有 N 个值的标签可把 series 数乘以 N，而不是只加 N。** 实际值取决于标签相关性与活跃组合；基数之外，采样间隔、保留期、副本数、直方图桶和查询扫描量也影响成本。
 
 按数量级锚点 **$1 / 1,000 活跃 series / 月**（2026 年中量级，各家差异很大且有阶梯折扣，**只用于数量级估算，不要当报价**）：上面的基线是 **$8,000/月**，加了 `tenant_id` 是 **$4,000 万/月**。加 `user_id` / `trace_id` 则是每个请求一条新 series——那不是指标，那是拿 TSDB 当日志用。
 
@@ -115,7 +117,7 @@ http_request_duration_seconds{endpoint(200), method(4), status(8), pod(30), regi
 1. **Allowlist，不是 denylist。** 在 Collector 里做标签白名单，新标签默认丢弃并计入 `dropped_labels_total`。denylist 永远追不上开发者的创造力。
 2. **查询审计驱动删除。** 把 90 天内所有 dashboard / 告警 / 手工查询引用的指标名与实际写入的求差集，直接 drop 差集。典型结果：**30–60% 的 series 从未被任何人查过。**
 3. **Exemplar 代替标签。** 在直方图（histogram） bucket 上挂几个 `trace_id` 样本，就获得了"从 p99 那根柱子一键跳到真实慢请求"的能力，**而基数不变**。这是过去五年最被低估的特性。
-4. **拆指标而不是加标签。** 要按租户看错误率？做 `tenant_slo_breach_total`（只在该租户 SLI 跌破阈值时 +1），基数 = 租户数 × 1，而不是租户数 × 所有维度。
+4. **必要时做受预算约束的专用指标，而不是给所有指标加标签。** 例如仅做 `tenant_slo_breach_total{tenant_bucket=...}`；若必须精确到 5,000 个企业租户，可接受“一租户一条”专用 series，但要限定活跃集合、只保留这一个维度并设 series 预算。明细错误率仍进日志/trace/离线表。
 
 ### RED / USE：不要发明自己的指标体系
 
@@ -132,7 +134,7 @@ http_request_duration_seconds{endpoint(200), method(4), status(8), pod(30), regi
 服务 A：1000 请求，p99 = 100 ms      服务 B：10 请求，p99 = 5000 ms
 ❌ avg(p99) = 2550 ms   ← 不是任何真实用户的体验
 ❌ max(p99) = 5000 ms   ← 系统性高估，让你去优化不存在的问题
-✅ 真实整体 p99 ≈ 100 ms（B 只占 1% 流量，其慢请求落在 p99.9 之后）
+✅ 仅凭这两个 p99 **无法推出整体 p99**：它可能约 100 ms，也可能到 5000 ms，取决于两边其余样本的分布
 ```
 
 这个错误在生产中无处不在，因为几乎所有 dashboard 工具都让你毫不费力地写出 `avg(p99_latency) by (service)`。**正确做法只有一个：聚合 bucket 计数，再从聚合后的分布算分位数。**
@@ -180,7 +182,8 @@ http_request_duration_seconds{endpoint(200), method(4), status(8), pod(30), regi
 ### 采样与 PII
 
 ```
-ERROR / WARN      → 100% 保留，永不采样
+审计/安全事件       → 按独立策略可靠保留，不与应用日志一起采样
+ERROR / WARN      → 优先保留；做指纹去重、速率上限与溢出计数，避免错误风暴打垮管道
 带 trace 的 INFO  → 与 trace 采样决策一致（同一条 trace 要么全留要么全丢）
 高频热路径 INFO   → 1–5%（按 trace_id 哈希，保证一致性）
 DEBUG             → 生产默认关闭，按 tenant / 请求头动态开启，带 15 分钟自动过期
@@ -196,7 +199,7 @@ PII（personally identifiable information，能定位到具体自然人的信息
 
 ### 上下文传播（context propagation）
 
-标准是 [W3C Trace Context](https://www.w3.org/TR/trace-context/)：`traceparent`（trace-id + span-id + flags）与 `tracestate`（厂商特定）。另有 `baggage`（[W3C Baggage](https://www.w3.org/TR/baggage/)）携带跨服务的业务标签（`tenant.id`、`experiment.id`）。⚠ **baggage 会被塞进每一跳的 HTTP 头**：放 5 个字段是工具，放 20 个字段就是每请求多几 KB 网络开销加一个信息泄露面（它会一路传给你的第三方依赖）。
+标准是 [W3C Trace Context](https://www.w3.org/TR/trace-context/)：`traceparent`（trace-id + span-id + flags）与 `tracestate`（厂商特定）。另有 `baggage`（[W3C Baggage](https://www.w3.org/TR/baggage/)）携带少量跨服务业务上下文。⚠ baggage 会进每一跳的 header，且可能被转发给第三方：只放经过分类的低敏值，限制字节数/字段数，并在出域边界 allowlist/清空。`tenant.id` 若属敏感标识，优先在可信服务内从认证上下文重建，而不是无条件放 baggage。
 
 **跨异步边界的传播才是难点：**
 
@@ -217,8 +220,8 @@ Agent 的工具调用       工具执行的 span 必须挂在这一步推理的 
 |---|---|---|---|---|---|
 | **头部固定比例** | 请求入口 | ❌ 1% 采样漏掉 99% 的错误 | ✅ 完全可预测 | 极低 | 流量大、错误率高、只看统计分布 |
 | **头部按属性** | 请求入口 | 部分（可对特定 endpoint/tenant 提高比例） | ✅ | 低 | **绝大多数团队的正确起点** |
-| **尾部采样** | trace 结束后 | ✅ **可以规则化保留所有错误/慢请求** | ⚠ 取决于规则 | **高** | 错误稀疏、必须抓全 |
-| **基于错误/延迟的头部提升** | 入口猜 + 下游可提升 | 部分 | 中 | 中 | 折中方案 |
+| **尾部采样** | trace 结束后 | ✅ 可优先保留错误/慢请求；仍受缓冲溢出、超时和出口失败影响 | ⚠ 取决于规则 | **高** | 错误稀疏、希望提高捕获率 |
+| **头部 RecordOnly + 本地错误旁路** | 入口决定是否记录；错误发生时另发结构化错误事件/局部 span | 只能保证局部证据，不能补回已丢的完整上游 trace | 中 | 中 | 无法承担尾采样但要保错误上下文 |
 | **自适应采样（adaptive sampling）** | 动态调比例保持恒定 span 速率 | 部分 | ✅ **最可预测** | 中 | 流量剧烈波动 |
 | **调试触发** | 请求头 `x-debug-trace: 1` | 定向 | ✅ | 极低 | 排障，**必须限流（rate limiting）+鉴权（authn/authz）** |
 
@@ -232,7 +235,9 @@ Agent 的工具调用       工具执行的 span 必须挂在这一步推理的 
 
 更麻烦的是：**同一条 trace 的所有 span 必须落到同一个 Collector 实例上**，否则实例 A 看不到实例 B 手里的 error span，做不出正确决策。这需要一层按 `trace_id` 哈希的负载均衡（OTel Collector 的 `loadbalancing` exporter）。**"尾部采样"实际上是"一个有状态、需要一致性哈希（consistent hashing：把节点和 key 映射到同一个环上，增删节点时只有相邻的一小段 key 需要换归属，见 [05-scaling-playbook.md](05-scaling-playbook.md) §5）的分布式系统"**——很多团队在预算会上答应了它，在实施时才发现这一点。
 
-**推荐的落地顺序（前四条覆盖 90% 场景，不够时才上尾部采样）**：① 头部按属性采样，默认 1%；② 应用侧发现 error 时直接把 trace flag 置为 sampled，错误 100% 留存；③ Exemplar 打通 metric → trace；④ 带鉴权与限流的 `x-debug-trace` 头做定向排查。
+**推荐的落地顺序**：① 按已知入口属性做头部采样，比例由预算决定；② 所有请求打低成本错误 counter，未采样 trace 发生错误时另发带 `trace_id` 的结构化错误事件/局部诊断，但明确它不是完整 trace；③ exemplar 打通 metric → trace；④ 带鉴权、限流和防伪的调试触发；需要“看见结果后再决定是否保留完整链路”时才上尾部采样。
+
+W3C `sampled` 位是传播中的头部决定。下游发现错误后把它从 0 改成 1，无法召回上游已经没记录/没导出的 span，还会让同一 trace 的决策不一致；除非整条链采用明确支持的延迟采样协议，否则不要把“事后翻 flag”描述成错误 trace 100% 留存。
 
 ---
 
@@ -304,7 +309,7 @@ processors:
 > **面试金句**
 > "计价必须放在后端：采集侧只上报 token 数（`input` / `output` / `cache_read` / `cache_creation` / `reasoning` 五个分开），后端拿 `(model_id, 时间点)` 查单价表算钱。把价格烧进 SDK 的后果是——供应商 9 月 1 日调价，你所有历史数据的口径就断了，而且没法回算。**遥测记录事实，不记录估值。**"
 
-**③ 多租户（multi-tenancy）拆分用的自定义属性必须第一天就打全**（`app.tenant.id`、`app.feature`、`app.request.id`）。**这类属性事后不可回溯补齐**，历史数据永远缺失——这是最常见也最贵的可观测性架构失误。
+**③ 多租户拆分所需属性要第一天进入合适的信号**：`app.tenant.id`、`app.request.id` 适合受访问控制的 trace/log/明细表；Collector 必须从 metrics 上剥离这些高基数字段。`app.feature` 只有枚举有界时才可做 metric label。属性事后无法补历史，但“打全”不等于“发到每一种遥测”。
 
 **④ 内容属性是 Opt-In，且是最大的 PII 面。** `gen_ai.input.messages` / `output.messages` / `system_instructions` / `tool.definitions` 默认不采集。打开前必须有：按环境/租户的开关 + 采样 + 脱敏管道 + 独立的短保留期。"评测需要全文"应被限制在采样子集上，而不是全量。
 
@@ -334,7 +339,7 @@ Trace： 采样后 15 天；错误 trace 30 天
 Profile：30 天；每次发布的基线 profile 永久保留（用于差分）
 ```
 
-**⚠ 两条不能碰的红线**：① 不要为省钱关掉 SLI 指标——它低基数低成本（一条旅程 4 个 counter），却是整套错误预算体系的地基。② 不要把成本压力转嫁成"出事时没有数据"——正确做法是**故障期间自动提高采样率（sampling rate）**（Collector 监听告警状态，错误率上升时把 trace 采样从 1% 拉到 100%），平时便宜、出事全量。
+**⚠ 两条红线**：① 不要为省钱关掉低基数 SLI 指标。② 不要让故障时恰好没有诊断数据。可在告警后提高**后续请求**的采样率，但要有摄入预算、持续时间、优先级和自动回落；从 1% 直接拉到 100% 可能在流量峰值把 Collector/后端打垮，也不能补回已结束的 trace。
 
 ---
 
@@ -434,13 +439,14 @@ Profile：30 天；每次发布的基线 profile 永久保留（用于差分）
 同理，agentic 多轮场景里工具输出插在上下文中间会打碎共享前缀，**stock prefix cache 命中率可跌破 20%**。所以：
 
 ```
-必须有的维度：prefix_cache_hit_ratio by (tenant, route, prompt_template_version)
-必须有的告警：某租户命中率 < 20% 且请求量 > 阈值 → ticket（不是 page，但必须有人看）
+全局低基数指标：prefix_cache_hit_ratio by (route, prompt_template_version, tenant_tier)
+租户级诊断：原始命中事件进 trace/日志/离线明细；对受控企业租户或 heavy hitters 临时/白名单生成专用 series
+告警示例：某 route/tier 命中率低于经基线校准的阈值且请求量充足 → ticket；精确租户由明细查询定位
 ```
 
 ### Trace 的形状变了
 
-传统请求 trace 是"扇出（fan-out：一个请求向下分发成 N 个并行子请求，见 [`00/01 §7`](../00-foundations/01-fundamentals.md)） 3–5 跳、总时长 200 ms"。Agent 会话是"**串行 40 步、总时长 8 分钟、嵌套 3 层子代理**"。三个后果：
+传统请求 trace 是"扇出（fan-out：一个请求向下分发成 N 个并行子请求，见 [`00/01 §7`](../00-foundations/01-fundamentals.md#7-尾延迟放大tail-latency-amplification)） 3–5 跳、总时长 200 ms"。Agent 会话是"**串行 40 步、总时长 8 分钟、嵌套 3 层子代理**"。三个后果：
 
 - **一条 trace 可能有数千个 span、几 MB 大小。** 默认 span 数上限（很多 SDK 是 1,000）会**静默截断**——你会得到一条"看起来正常结束了"的假 trace。必须显式配置并监控 `dropped_spans`。
 - **尾部采样的决策窗口要按会话时长设**（分钟级而非秒级），这会让 §4 的内存算例乘以 10–20。多数团队的正确选择是：**Agent 轨迹不走通用 trace 管道，走专门的轨迹存储**（Langfuse / LangSmith / Braintrust / 自建），通用管道只留一个汇总 span。
@@ -480,8 +486,8 @@ Profile：30 天；每次发布的基线 profile 永久保留（用于差分）
 
 ## 这一章的三句话
 
-1. **可观测性的成本几乎完全由一个变量决定：基数。** 加一个标签是乘以它的取值个数，不是加 —— 所以"要不要给这个指标多打一个维度"是一个财务决定，不是技术偏好。高基数的正确归宿永远是 trace 属性和日志字段，metric 侧只留 exemplar。
-2. **分位数不能取平均，也不能相加。** 任何 `avg(p99) by (service)` 的面板都在骗你，而且骗的方向不固定：它可能让你去优化一个不存在的问题，也可能让你彻底看不见真实的慢。唯一正确的做法是先合并直方图的桶，再从合并后的分布算分位数；"把各跳 p99 加起来当端到端 p99"是同一个错误的变体。
+1. **指标成本最容易被标签组合数击穿。** 新标签在最坏情况下按取值数乘大 series，此外还要算采样频率、桶数、保留期和副本。高基数通常进入受控 trace/log/明细表；只有被明确预算的一租户一 series 等少数场景例外。
+2. **分位数不能取平均，也不能相加。** 任何 `avg(p99) by (service)` 都没有所需的统计语义，而且误差方向不固定。应先合并可合并的原始分布表示（如同边界直方图桶或可合并 sketch），再计算总体分位数；"把各跳 p99 加起来当端到端 p99"是同一个错误的变体。
 3. **告警必须基于症状，原因型指标只配出现在 dashboard 和 runbook 里。** 判据是：一条 page 级告警必须能同时回答"谁受影响、我现在能做什么、不处理会怎样"，答不上来就降级成工单或直接删掉 —— 因为一个班次超过 2 条 page，人就开始批量点确认，这时候告警系统已经不再是一种控制手段了。
 
 ---
@@ -500,4 +506,6 @@ Profile：30 天；每次发布的基线 profile 永久保留（用于差分）
 
 ---
 
-**下一篇** → [03-resilience-patterns.md](03-resilience-patterns.md)
+**目录下一篇** → [03-resilience-patterns.md](03-resilience-patterns.md)
+
+**主学习链下一篇** → [05-scaling-playbook.md](05-scaling-playbook.md)（韧性与可观测性之后，再讨论如何识别容量墙并安全扩展）。

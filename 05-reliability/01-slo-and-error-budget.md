@@ -1,7 +1,9 @@
 # 01 · SLO 与错误预算
 
-> SLO 不是"可靠性目标"，是**不可靠性配额**。写下 99.9%，你真正做的决定是：这个月我允许自己坏 43.2 分钟，并且我打算把这 43.2 分钟花掉。
-> 一个从不用完错误预算（error budget）的团队，不是可靠，是发布得太慢了。
+> SLO 既是可靠性目标，也是**不可靠性配额**。对“按时间采样、30 天窗口”的可用性，99.9% 对应 43.2 分钟坏时间；对“按请求计数”的 SLI，它对应 0.1% 的有效事件，二者不能在流量波动时直接互换。
+> 长期不用预算可能意味着目标过松、变更过慢或测量漏掉了真实体验；先诊断，再决定是否收紧目标或加快变更。
+>
+> **阅读分层**：§1–§8 是通用 Core；§9 是 AI 扩展。本文的目标、门槛、采样率和成本均为示例；SLO 必须从自己的用户旅程、流量分布与业务后果校准。
 
 ---
 
@@ -17,12 +19,12 @@
 
 | 概念 | 一句话 | 详见 |
 |---|---|---|
-| 可用性与"几个 9" | 99.9% 对应每月 43 分钟停机，每加一个 9 停机时间除以 10 | [00-concepts §10](../00-foundations/00-concepts.md) |
-| 依赖串联相乘 | 三个 99.9% 的服务串起来只剩 99.7%，每加一个硬依赖只会更低 | [00-concepts §10](../00-foundations/00-concepts.md) |
-| 分位数 p50 / p99 | 把请求按耗时排序后处在某个百分比位置的值；平均值谁都不代表 | [00-concepts §3](../00-foundations/00-concepts.md) |
-| 分位数不能相加也不能取平均 | 要先把直方图的桶合并，再从合并后的分布算分位数 | [00-concepts §3](../00-foundations/00-concepts.md) |
-| 关键路径 | 用户必须等它完成的那条链；移出关键路径 = 变成异步 | [00-concepts §1](../00-foundations/00-concepts.md) |
-| LLM 的延迟量级 | 首 token 200 ms–2 s，之后每个 token 5–30 ms，输出是串行产生的 | [01-fundamentals §2](../00-foundations/01-fundamentals.md) |
+| 可用性与"几个 9" | 99.9% 对应每月 43 分钟停机，每加一个 9 停机时间除以 10 | [00-concepts §10](../00-foundations/00-concepts.md#10-可用性几个-9-是什么意思) |
+| 依赖串联相乘 | 当每个依赖都必经、且不可用事件近似独立时，三个 99.9% 串联约为 99.7%；相关故障要改算联合概率 | [00-concepts §10](../00-foundations/00-concepts.md#10-可用性几个-9-是什么意思) |
+| 分位数 p50 / p99 | 把请求按耗时排序后处在某个百分比位置的值；平均值谁都不代表 | [00-concepts §3](../00-foundations/00-concepts.md#3-为什么平均值是骗人的p50--p90--p99) |
+| 分位数不能相加也不能取平均 | 要先把直方图的桶合并，再从合并后的分布算分位数 | [00-concepts §3](../00-foundations/00-concepts.md#3-为什么平均值是骗人的p50--p90--p99) |
+| 关键路径 | 用户必须等它完成的那条链；移出关键路径 = 变成异步 | [00-concepts §1](../00-foundations/00-concepts.md#1-一个请求到底经历了什么) |
+| LLM 的延迟量级 | 首 token 200 ms–2 s，之后每个 token 5–30 ms，输出是串行产生的 | [01-fundamentals §2](../00-foundations/01-fundamentals.md#2-只背三个数量级其余用作估算查表2026-校准版) |
 
 **这一章要回答的问题**
 
@@ -50,7 +52,7 @@
 
 ---
 
-## 1. SLI：唯一正确的形式是 `好事件 / 有效事件`
+## 1. SLI：优先写成 `好事件 / 有效事件`
 
 ```
 SLI = good events / valid events × 100%
@@ -114,13 +116,13 @@ sum(rate(http_requests_slo_valid_total{journey="workspace_load"}[5m]))
 | 计划内维护窗口（maintenance window） | 若用户可见，**照样扣预算**。否则你会用"维护窗口"洗掉所有故障 |
 
 > **面试金句**
-> "我不会说 SLO 是 99.9%，我会说：这条旅程每月允许 43 分钟的坏体验，其中我给数据库分了 10 分钟、给认证服务分了 5 分钟、给我自己的代码分了 20 分钟，剩 8 分钟是未分配缓冲。这样当认证服务上个月烧了 12 分钟时，我有一个具体的数字去跟他们的 TL 谈，而不是'感觉你们最近不太稳'。"
+> “我不会只说 SLO 是 99.9%。如果这是按时间采样的 30 天 SLI，我会说明 43.2 分钟如何在依赖间分配；如果是按请求计数，我会报允许的坏事件数和各旅程权重。先统一计量单位，才能与依赖团队讨论超支。”
 
 ---
 
 ## 2. 可用性数字表（必背）
 
-以 30 天月（43,200 分钟）/ 365 天年（525,600 分钟）计：
+以下是**连续时间不可用预算**，以 30 天（43,200 分钟）/ 365 天（525,600 分钟）计。请求型 SLI 应用“有效请求数 × 错误比例”计算，只有请求率近似稳定时才能粗略换算成分钟。
 
 | 可用性 | 每周 | 每月 | 每年 | 现实中意味着什么 |
 |---|---|---|---|---|
@@ -155,17 +157,25 @@ sum(rate(http_requests_slo_valid_total{journey="workspace_load"}[5m]))
 
 ## 4. 依赖链的可用性乘法
 
-### 串联相乘
+### 串联相乘是有前提的规划近似
+
+精确写法是 `A_e2e = P(这次旅程所需组件全部可用)`。只有同时满足下面三个条件，才能把它近似成各组件可用性的乘积：
+
+1. 这些组件对**同一类有效旅程**都是必要依赖；只在 10% 请求上调用的依赖不能按 100% 权重直接乘。
+2. 各数字使用同一事件口径与同一时间窗口；不能把探针可用性、请求成功率和按分钟采样值混乘。
+3. 不可用事件近似独立。共享部署、DNS、证书、IAM、网络或控制面会产生相关失败，此时应从端到端旅程遥测估计 `P(all up)`，或用故障树/条件概率建模。
+
+下面的乘法和 N 依赖表都是在这三个前提下的**容量规划算例**，不是从组件 dashboard 自动推出用户 SLO 的公式：
 
 ```
 用户 ──▶ CDN ──▶ API GW ──▶ Auth ──▶ Profile ──▶ FeatureFlag ──▶ DB
        99.99%   99.95%    99.9%    99.9%      99.9%          99.95%
 
-端到端 = 0.9999 × 0.9995 × 0.999 × 0.999 × 0.999 × 0.9995 = 99.58%
+端到端 ≈ 0.9999 × 0.9995 × 0.999 × 0.999 × 0.999 × 0.9995 = 99.59%
                                               = 每月 3.0 小时不可用
 ```
 
-**每个团队都觉得自己 99.9% 很体面，用户拿到的是 99.58%。**
+**在这个近似独立、全部必经的算例里，每个团队都觉得自己 99.9% 很体面，用户拿到的却约是 99.59%。**
 
 N 个 99.9% 的**硬依赖**（hard dependency：它挂了你这一层就只能返回失败，没有任何兜底路径；反之叫**软依赖** soft dependency）串联：
 
@@ -178,7 +188,7 @@ N 个 99.9% 的**硬依赖**（hard dependency：它挂了你这一层就只能�
 | 20 | 98.02% | 14.3 h |
 | 50 | 95.12% | **35.1 h** |
 
-这张表就是**"分布式单体（distributed monolith）"最致命的量化证据**：把一个单体拆成 50 个必须同步调用的服务，你在架构上给自己判了 95% 可用性。
+这张表量化了**“分布式单体（distributed monolith）”的风险**：若一次旅程真的必须同步经过 50 个、各自约 99.9% 且故障近似独立的服务，乘积模型只有约 95%。真实值还会受调用占比、降级路径和相关故障影响，所以最终应以端到端旅程 SLI 验证，而不是把表格当测量结果。
 
 ### 打破乘法的三种手段
 
@@ -189,7 +199,7 @@ A_parallel = 1 - (1 - A)^n     （前提：故障独立）
 2 × 99% → 99.99%    2 × 99.9% → 99.9999%
 ```
 
-⚠ **"故障独立"几乎从不成立。** 共享失败域（failure domain：会因为同一个原因一起坏掉的那一组东西）包括：同一份配置推送、同一个 DNS、同一次部署、同一张证书、同一个控制面（control plane）、同一个 IAM。经验法则：**冗余最多买回 1–2 个 9**，之后收益被相关性吃光。判断方法：列出这两个副本共享的一切，那就是你的真实上限。
+⚠ **“故障独立”在真实系统里通常只近似成立。** 共享失败域（failure domain：会因为同一个原因一起坏掉的那一组东西）包括：同一份配置推送、同一个 DNS、同一次部署、同一张证书、同一个控制面（control plane）、同一个 IAM。冗余究竟能买回多少个 9，必须从共同原因故障率与演练数据估计；“1–2 个 9”至多是讨论起点，不是公式。先列出两个副本共享的一切，再建模共同失败项。
 
 **b) 优雅降级（graceful degradation） —— 把硬依赖变软依赖（soft dependency），性价比最高**
 
@@ -197,9 +207,14 @@ A_parallel = 1 - (1 - A)^n     （前提：故障独立）
 硬依赖：FeatureFlag 服务挂 → 页面 500
 软依赖：FeatureFlag 服务挂 → 用本地缓存的上一次快照 → 页面正常
 
-A_effective = 1 - (1 - A_dep) × (1 - A_fallback)
-   A_dep=0.999，A_fallback=0.99（缓存里有值的概率）→ 0.99999
+精确：A_effective = A_dep + (1 - A_dep) × P(fallback 可用 | 依赖不可用)
+      = 1 - P(依赖不可用 ∩ fallback 也不可用)
+若两者失败近似独立，才可估：
+A_effective ≈ 1 - (1 - A_dep) × (1 - A_fallback)
+   A_dep=0.999，A_fallback=0.99（缓存自身的边际可用性）→ 0.99999
 ```
+
+共享配置错误、权限撤销或同一控制面故障可能同时打坏依赖与缓存，此时乘积会夸大收益；应直接测“主路径失败时 fallback 仍成功”的条件概率。
 
 这是**唯一不需要加钱**的手段：把 FeatureFlag / 推荐 / 个性化 / 用量统计从关键路径（critical path）上摘下来，给每个都想好"挂了返回什么"。做完之后依赖链常常从 12 个硬依赖缩到 3 个。
 
@@ -207,7 +222,7 @@ A_effective = 1 - (1 - A_dep) × (1 - A_fallback)
 
 ### 依赖预算分配（Staff 级手法）
 
-把旅程的 43.2 min/月 预算显式切分：
+对一个按时间采样、30 天、99.9% 的旅程，可把 43.2 min 预算显式切分。若旅程是请求型 SLI，表中单位应改为坏事件数或预算百分比，不能把失败请求直接叫“停机分钟”：
 
 | 归属 | 分配 | 上月实际 | 状态 |
 |---|---|---|---|
@@ -224,10 +239,12 @@ A_effective = 1 - (1 - A_dep) × (1 - A_fallback)
 ## 5. 错误预算与燃尽率（burn rate）
 
 ```
-错误预算（事件数） = (1 - SLO) × 有效事件总数
-错误预算（时间）   = (1 - SLO) × 窗口长度
+错误预算（事件型） = (1 - SLO) × 有效事件总数
+错误预算（时间型） = (1 - SLO) × 窗口长度
 燃尽率 burn rate  = 观测到的错误率 / (1 - SLO)
 ```
+
+事件型与时间型是两种不同权重：前者让高流量分钟权重更大，后者让每一分钟权重相同。选哪一种取决于用户旅程；报告时必须带上单位，不能用同一场事故在两种口径间挑更好看的数字。
 
 燃尽率 = 1 表示"刚好在月底用完预算"。燃尽率 = 14.4 表示"以这个速度，50 小时用完整月预算"。
 
@@ -268,34 +285,72 @@ A_effective = 1 - (1 - A_dep) × (1 - A_fallback)
 2. **检测时延 = (1-SLO) × 燃尽率 × 长窗口 / 实际错误率**。全挂（错误率 100%）时：`0.001 × 14.4 × 60min / 1.0 = 0.86 min`。
 3. **短窗口 = 长窗口 / 12，唯一作用是压缩重置时间**。它作为 `AND` 条件存在：只有当"长窗口超阈值"**且**"短窗口仍在超阈值"时才告警。故障一恢复，短窗口 5 分钟内就掉下去，告警自动消。**没有短窗口的多燃尽率告警，是残废的。**
 
-### 可直接抄的 PromQL
+### 可运行的 Prometheus 规则示例
 
 ```yaml
-# ① 记录规则：把 SLI 预计算成 5m/30m/1h/6h/3d 五个窗口（不要在告警表达式里现算）
-- record: journey:slo_error:ratio_rate5m
-  expr: |
-    1 - ( sum(rate(http_requests_slo_good_total{journey="workspace_load"}[5m]))
-        / sum(rate(http_requests_slo_valid_total{journey="workspace_load"}[5m])) )
+groups:
+  - name: workspace-load-slo
+    interval: 30s
+    rules:
+      # valid-good 比 1-good/valid 更容易显式保护零分母；good 必须是 valid 的子集。
+      - record: journey:slo_error:ratio_rate5m
+        expr: |
+          clamp_min(
+            sum(rate(http_requests_slo_valid_total{journey="workspace_load"}[5m]))
+            - sum(rate(http_requests_slo_good_total{journey="workspace_load"}[5m])), 0
+          ) / clamp_min(sum(rate(http_requests_slo_valid_total{journey="workspace_load"}[5m])), 1e-12)
+        labels: {journey: workspace_load}
+      - record: journey:slo_error:ratio_rate30m
+        expr: |
+          clamp_min(sum(rate(http_requests_slo_valid_total{journey="workspace_load"}[30m]))
+            - sum(rate(http_requests_slo_good_total{journey="workspace_load"}[30m])), 0)
+          / clamp_min(sum(rate(http_requests_slo_valid_total{journey="workspace_load"}[30m])), 1e-12)
+        labels: {journey: workspace_load}
+      - record: journey:slo_error:ratio_rate1h
+        expr: |
+          clamp_min(sum(rate(http_requests_slo_valid_total{journey="workspace_load"}[1h]))
+            - sum(rate(http_requests_slo_good_total{journey="workspace_load"}[1h])), 0)
+          / clamp_min(sum(rate(http_requests_slo_valid_total{journey="workspace_load"}[1h])), 1e-12)
+        labels: {journey: workspace_load}
+      - record: journey:slo_error:ratio_rate6h
+        expr: |
+          clamp_min(sum(rate(http_requests_slo_valid_total{journey="workspace_load"}[6h]))
+            - sum(rate(http_requests_slo_good_total{journey="workspace_load"}[6h])), 0)
+          / clamp_min(sum(rate(http_requests_slo_valid_total{journey="workspace_load"}[6h])), 1e-12)
+        labels: {journey: workspace_load}
+      - record: journey:slo_error:ratio_rate3d
+        expr: |
+          clamp_min(sum(rate(http_requests_slo_valid_total{journey="workspace_load"}[3d]))
+            - sum(rate(http_requests_slo_good_total{journey="workspace_load"}[3d])), 0)
+          / clamp_min(sum(rate(http_requests_slo_valid_total{journey="workspace_load"}[3d])), 1e-12)
+        labels: {journey: workspace_load}
 
-# ② 告警：长窗口 AND 短窗口，两者都超阈值才响
-- alert: WorkspaceLoadBurnRateFast              # page，2% 预算
-  expr: |
-    journey:slo_error:ratio_rate1h > (14.4 * 0.001)
-    and journey:slo_error:ratio_rate5m > (14.4 * 0.001)
-  for: 2m
-  labels: {severity: page, slo: workspace_load}
-  annotations:
-    summary: "错误预算燃尽 14.4×，约 50 小时耗尽整月预算"
-    runbook: "https://runbooks/…/workspace-load"
-
-- alert: WorkspaceLoadBurnRateSlow              # ticket，10% 预算
-  expr: |
-    journey:slo_error:ratio_rate3d > (1 * 0.001)
-    and journey:slo_error:ratio_rate6h > (1 * 0.001)
-  labels: {severity: ticket, slo: workspace_load}
+      # 长窗 AND 短窗；阈值适用于 99.9% / 30 天示例。
+      - alert: WorkspaceLoadBurnRateFast
+        expr: |
+          journey:slo_error:ratio_rate1h{journey="workspace_load"} > (14.4 * 0.001)
+          and
+          journey:slo_error:ratio_rate5m{journey="workspace_load"} > (14.4 * 0.001)
+        for: 2m
+        labels: {severity: page, slo: workspace_load}
+        annotations:
+          summary: "workspace_load 正以 14.4x 以上燃尽错误预算"
+          runbook: "https://runbooks.example.com/workspace-load"
+      - alert: WorkspaceLoadBurnRateMedium
+        expr: |
+          journey:slo_error:ratio_rate6h{journey="workspace_load"} > (6 * 0.001)
+          and
+          journey:slo_error:ratio_rate30m{journey="workspace_load"} > (6 * 0.001)
+        labels: {severity: page, slo: workspace_load}
+      - alert: WorkspaceLoadBurnRateSlow
+        expr: |
+          journey:slo_error:ratio_rate3d{journey="workspace_load"} > 0.001
+          and
+          journey:slo_error:ratio_rate6h{journey="workspace_load"} > 0.001
+        labels: {severity: ticket, slo: workspace_load}
 ```
 
-⚠ **低流量服务的分母陷阱**：QPS = 0.5 的服务，5 分钟窗口只有 150 个请求，2 个失败就是 1.3% 错误率 → 直接触发 14.4× 页告警。对策：加最小事件数门槛（`and sum(rate(valid[1h])) > 1`），或对低流量服务只保留长窗口 + 工单级别。另外，3 天窗口的 `rate()` 在高基数（high cardinality：标签取值组合太多，导致时间序列条数爆炸，见 [02-observability.md](02-observability.md) §2）下会拖垮 Prometheus——必须用 recording rule 预计算。
+⚠ **低流量服务的分母陷阱**：QPS = 0.5 的服务，5 分钟约 150 个请求，2 个失败就是 1.3%。`sum(rate(valid[1h])) > 1` 检查的是“每秒超过 1 个请求”，**不是样本数**。若要门控 1 小时至少 1,000 个有效事件，可在告警末尾加 `and on() (sum(increase(http_requests_slo_valid_total{journey="workspace_load"}[1h])) >= 1000)`；门槛应由误报/漏报成本计算。更低流量可用合成探针、事件数/时间型 SLI、贝叶斯区间或长窗口 ticket，不能把“没有流量”当健康。长窗口查询则用 recording rule/分层预聚合控制成本。
 
 ---
 
@@ -315,7 +370,7 @@ A_effective = 1 - (1 - A_dep) × (1 - A_fallback)
 1. **用滚动 28/30 天窗口（rolling window），不是日历月。** 日历月会诱导出"月末冻结、月初狂发"的畸形节奏。
 2. **豁免（exemption / waiver）必须留痕（audit trail）**（谁批的、为什么、何时撤销）。三个月后回顾豁免列表：如果全是同一个人同一个理由，说明 SLO 定错了。
 3. **处置对象是"变更速率（change velocity）"，不是"某个人"。** 把 SLO 挂进个人绩效，结果一定是有人去改 SLI 的测量口径。依赖方超支子预算时，你有权把它降级为软依赖——这条要写进政策，否则跨团队谈判没有筹码。
-4. **预算长期用不完 = SLO 定低了或发布太慢。** 连续两季度剩余 > 70%，应主动收紧 SLO 或加快发布。这是最反直觉、也最能体现 Staff 视角的一条。
+4. **预算长期用不完是一个诊断信号，不是要求主动制造故障。** 连续多个窗口剩余很多时，检查 SLI 是否漏测、目标是否过松、变更是否被不必要地压慢；再决定收紧 SLO、扩大实验，或保持余量应对季节峰值。
 
 ---
 
@@ -329,7 +384,7 @@ A_effective = 1 - (1 - A_dep) × (1 - A_fallback)
 | 测量口径 | 你自己定义的 SLI，粒度细 | 合同定义，通常是粗粒度的"月度不可用分钟数" |
 | 谁能改 | 工程 + 产品，季度 review | 需要重新签合同 |
 
-**核心关系：SLO 必须严于 SLA，且错误预算留 3–10 倍余量。**
+**常见关系：内部 SLO 通常严于对外 SLA，留多少余量由测量差异、赔付阶梯、流量季节性和恢复能力决定。** 2×、3–10× 都只能是建模起点，不是合同规则。
 
 ```
 SLA  99.9%  → 月度 43.2 min，违反要退 10% 月费
@@ -339,7 +394,7 @@ SLO  99.95% → 月度 21.6 min（内部目标）
 告警 触发点 = 消耗 0.43 min 时（≈26 秒）
 ```
 
-典型 SLA 赔付阶梯（B2B SaaS，2026 年中的常见形态）：`< 99.9% 退 10% 月费 / < 99.0% 退 25% / < 95.0% 退 100%`。
+赔付阶梯示例（不是法律或行业统一口径）：`< 99.9% 退 10% 月费 / < 99.0% 退 25% / < 95.0% 退 100%`。真实值必须由合同定义，并明确排除项、请求方式、赔付上限与连续违约终止权。
 
 **但 SLA 里最贵的从来不是赔款，是"连续 N 个月违反 → 客户可无责终止合同"那一条。** 设计 SLA 时第一个要算的数字就是这个 N，那才是你的真实红线。
 
@@ -372,10 +427,10 @@ SLO  99.95% → 月度 21.6 min（内部目标）
 | **TPOT / ITL**（time per output token） | 首 token 之后的平均产出间隔 | 用户感知"流得顺不顺" |
 | **goodput** | **每秒完成且同时满足 TTFT 与 TPOT 阈值的请求数** | 唯一能用来做容量规划的指标 |
 
-> ⚠ 关键反例：在同一个 chatbot 负载上，两个**同样满足 TTFT ≤ 1.5s** 的配置，P95 TPOT 一个约 50 ms、另一个约 494 ms——**差 10 倍**（2026-07 实测量级）。
+> ⚠ 示例反例：某个 2026-07 chatbot 基准中，两个同样满足 TTFT ≤ 1.5s 的配置，P95 TPOT 约为 50 ms 与 494 ms。这个结果只说明 TTFT 不能替代 TPOT，不可移植成你的容量数字。
 > **只在 SLO 文档里写 "P95 TTFT < 2s" 而不写 TPOT，等于没有 SLO。**
 
-另外：TTFT 与输入长度强相关（prefill 预填充 —— 产出第一个 token 之前把整段输入先过一遍 —— 的耗时是 O(输入 token 数)），**TTFT 直方图必须按输入长度分桶（bucketing）**（<2K / 2–16K / 16–128K / >128K），否则一个长上下文（long context）请求就把整条曲线拉飞，而这个"劣化"其实符合物理规律。可抄的生产 SLA 量级：**mean TTFT ≤ 2.5 s、mean TPOT ≤ 20 ms**（744B MoE / 24×B300 / 16K–256K ctx，2026-07；条件不同不可移植）。
+另外，TTFT 与输入长度强相关。应按**有界、低基数**的输入长度档位分层（档位边界从真实分布确定），并同时给出全局用户旅程 SLI，避免只优化某一档。`mean TTFT ≤ 2.5s / mean TPOT ≤ 20ms` 只能视为特定硬件、模型与上下文下的历史样本；SLO 应用阈值达标率而非均值。
 
 **第 3 层：质量 SLI —— 采样 + 校准过的判定**
 
@@ -387,7 +442,7 @@ SLO  99.95% → 月度 21.6 min（内部目标）
 0.1% 请求 → 人工标注（周级，用来校准 judge）
 ```
 
-judge 上线门槛：**与人工标注（human annotation）的 Cohen's kappa（一致率的一种度量，扣掉了"瞎猜也会蒙对"的那部分：0 = 和随机猜一样，1 = 完全一致）≥ 0.6 可上线，≥ 0.8 算强**（人-人基线本身只有 0.5–0.8）。两条纪律：**换 judge 模型 = 换测量标准**，必须重跑校准并给 SLI 打版本号，否则你会看到 SLI 在零代码变更时跳变；judge 的系统性偏差**方向因模型而异**——风格偏差（style bias）量级 0.10–0.76 远大于位置偏差（position bias，≤0.04），冗长偏差（verbosity bias）有的模型 +0.24~+0.44（偏好长答案）而 Claude 系为 −0.12（偏好简洁）。详见 [`04-ai-agent-systems/06-evaluation-and-observability.md`](../04-ai-agent-systems/06-evaluation-and-observability.md)。
+judge 上线前必须在人工标注（human annotation）留出集上校准。**Cohen's kappa ≥ 0.6、≥ 0.8** 可分别作为中等/较强一致性的**教学起点**，不是跨任务通用上线阈值；每条 rubric 要结合人-人一致性基线、类别比例，以及误放坏例/误杀好例的代价，预先注册自己的 kappa、TPR、TNR 验收规则。两条纪律：**换 judge 模型 = 换测量标准**，必须重跑校准并给 SLI 打版本号，否则你会看到 SLI 在零代码变更时跳变；judge 的系统性偏差**方向因模型而异**——风格偏差（style bias）量级 0.10–0.76 远大于位置偏差（position bias，≤0.04），冗长偏差（verbosity bias）有的模型 +0.24~+0.44（偏好长答案）而 Claude 系为 −0.12（偏好简洁）。详见 [`04-ai-agent-systems/06-evaluation-and-observability.md`](../04-ai-agent-systems/06-evaluation-and-observability.md)。
 
 ### 非确定性（non-determinism）下的可用性：用 `pass^k` 而不是 `pass@k`
 
@@ -402,6 +457,8 @@ judge 上线门槛：**与人工标注（human annotation）的 Cohen's kappa（
 
 场景：企业内的代码修改 Agent（接需求 → 改代码 → 跑测试 → 提 PR）。
 
+下面是供内部 SLO 编译器/评审使用的**声明式示例，不是 Prometheus 原生配置**；字段名需映射到你们真实的 good/valid recording rules：
+
 ```yaml
 journey: agent.code_change
 window: 28d                       # 滚动窗口，不用日历月
@@ -411,7 +468,7 @@ slis:
   - name: request_availability
     good:  agent_requests_total{outcome!~"infra_error|provider_error|timeout"}
     valid: agent_requests_total{synthetic="false"}
-    objective: 0.999              # = 43 min / 30d
+    objective: 0.999              # 事件型目标；若另做 28d 时间型预算则为 40.32 min
   - name: stream_completion       # 流开始了但没收到 finish_reason = 坏事件
     good:  agent_streams_total{terminated="clean"}
     valid: agent_streams_total
@@ -426,12 +483,12 @@ slis:
     objective: 0.995
   # ── L2 延迟与经济性：TTFT 必须按输入长度分桶，各桶各目标 ──
   - name: ttft
-    good:  agent_ttft_seconds_bucket{le="2.5", isl_bucket="2k-16k"}
-    valid: agent_requests_total{isl_bucket="2k-16k", streaming="true"}
+    good:  agent_requests_ttft_slo_good_total{isl_bucket="2k-16k"}
+    valid: agent_requests_ttft_slo_valid_total{isl_bucket="2k-16k"}
     objective: 0.95
   - name: tpot                    # 只写 TTFT 不写 TPOT = 没有 SLO
-    good:  agent_requests_total{p95_tpot_ms_le="50"}
-    valid: agent_requests_total{streaming="true"}
+    good:  agent_requests_tpot_slo_good_total
+    valid: agent_requests_tpot_slo_valid_total
     objective: 0.95
   - name: cost_per_session        # 尾部会话烧 20× 是真实故障，必须进预算
     good:  agent_sessions_total{cost_usd_le="2.00"}
@@ -500,4 +557,6 @@ slis:
 
 ---
 
-**下一篇** → [02-observability.md](02-observability.md)
+**目录下一篇** → [02-observability.md](02-observability.md)
+
+**主学习链下一篇** → [03-resilience-patterns.md](03-resilience-patterns.md)（主线顺序为 `01 SLO → 03 韧性 → 02 可观测性 → 05 扩展 → 04 事故与演练`）。

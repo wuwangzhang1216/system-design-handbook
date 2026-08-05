@@ -1,37 +1,39 @@
 # 06 · 设计通知平台
 
-> 通知平台的 KPI 不是投递率（delivery rate），是**退订率（unsubscribe rate）**。一个 100% 送达但让用户关掉推送的系统，工程上完美，业务上归零。
-> 架构上只有两件事真正难：**扇出的速率必须由下游供应商的配额反压（backpressure）决定**，以及**交易类通知必须在物理层面与营销类隔离** —— 队列、worker、供应商子账号、发信 IP，四层全都要分开。
+> 通知平台没有一个适用于所有消息的 KPI：OTP/安全通知看时延与成功率，运营通知看任务完成，营销通知看转化，同时用退订/投诉率守住用户信任。只追投递率会把“成功送达的骚扰”误判成成功。
+> 架构上最关键的两件事是：**出站速率受下游供应商配额反压（backpressure）约束**，以及**交易类不能被营销类挤占资源**。隔离做到队列、worker、配额、账号或 IP 中哪几层，要按供应商与风险决定，不是一律复制四套系统。
 
 ---
 
 ## 读这道题之前
+
+> **阅读层级与时间/合规口径**：full-stack 读者先读入口契约、扇出、偏好、分档队列、状态与重试；供应商信誉和 AI 场景可第二遍读。价格、通道能力、发件规则和法规是截至 **2026-08** 的示例快照，落地前必须复核供应商文档、用户同意、合同与适用法律。
 
 **如果你是直接翻到这道题的**：这题的战场在扇出的速率控制上，正文默认你已经知道背压和重试放大是什么。第 1 题答不出，§4.2 那段 credit-based pull 你会看成一个写法偏好 —— 案例篇不再解释构件。
 
 **先确认你能回答这三个问题**
 
 1. 背压（backpressure）是什么？"worker 照常拉消息，被供应商 429 了就退避重试"，为什么反而会把下游打得更死？重试放大倍数怎么算？
-   答不出 → 先读 [01-fundamentals §6 背压](../00-foundations/01-fundamentals.md)、[`03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) §3
-2. 排队论：一个几百 worker 的池子，ρ 从 0.5 升到 0.9，**均值**排队涨多少倍？（陷阱：**不是** M/M/1 的 2×→10×，先问自己有几个服务台）那交易通路为什么还是要压到 ρ < 0.5？为什么"平均流量 926/s 就按 926/s 配容量"必然违反 p95 < 5 s？
+   答不出 → 先读 [01-fundamentals §6 背压](../00-foundations/01-fundamentals.md#6-背压backpressure没有它系统就会雪崩cascading-failure)、[`03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) §3
+2. 排队论：一个几百 worker 的池子，ρ 从 0.5 升到 0.9，**均值**排队涨多少倍？（陷阱：不能套 M/M/1，先确认服务台与 async 并发模型。）为什么本文仍从 ρ < 0.5 的保守预算起步？
    答不出 → 先读 [`02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §3
 3. 写扩散和读扩散各把成本放在写路径还是读路径？"订阅者超过 10 万就换一种"的判据从哪来？
-   答不出 → 先读 [03-tradeoff-framework §3 常见取舍的量化表](../00-foundations/03-tradeoff-framework.md)
+   答不出 → 先读 [03-tradeoff-framework §3 常见取舍的量化表](../00-foundations/03-tradeoff-framework.md#3-常见取舍的量化表)
 
 **这道题会用到的构件**
 
 | 构件 | 用在哪 | 详见 |
 |---|---|---|
-| 背压、重试放大、重试预算 | §4.2 先要令牌再拉消息、§4.7 重试量 > 原始量 10% 即熔断 | [01-fundamentals §6](../00-foundations/01-fundamentals.md)、[`03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) §3 |
-| 隔板（bulkhead）与负载卸载 | §4.5 队列 / worker / 供应商子账号 / IP 池四层全分开 | [`03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) §5、§6 |
-| 排队论与利用率上限 | §4.5 交易类 ρ < 0.5 是 SLO 的价格 | [`02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §3 |
-| 幂等键、at-least-once、DLQ | §4.3 三种"重复"三种解法、扇出块 `(campaign_id, chunk_idx)` | [01-fundamentals §5](../00-foundations/01-fundamentals.md)、[`03-messaging-and-streams.md`](../01-building-blocks/03-messaging-and-streams.md) §5 |
-| 写扩散 vs 读扩散的成本交点 | §4.2 3,000 万人的广播不该产生 3,000 万行收件箱 | [03-tradeoff-framework §3](../00-foundations/03-tradeoff-framework.md) |
+| 背压、重试放大、重试预算 | §4.2 先要令牌再拉消息、§4.7 重试量 > 原始量 10% 即熔断 | [01-fundamentals §6](../00-foundations/01-fundamentals.md#6-背压backpressure没有它系统就会雪崩cascading-failure)、[`03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) §3 |
+| 隔板（bulkhead）与负载卸载 | §4.5 给交易 lane 保留队列、并发和 provider 配额；邮件再考虑信誉域 | [`03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) §5、§6 |
+| 排队论与利用率预算 | §4.5 为什么本文从 ρ < 0.5 起步，以及何时应改 | [`02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §3 |
+| 幂等键、at-least-once、DLQ | §4.3 三种"重复"三种解法、扇出块 `(campaign_id, chunk_idx)` | [01-fundamentals §5](../00-foundations/01-fundamentals.md#5-幂等idempotency分布式系统的第一公民)、[`03-messaging-and-streams.md`](../01-building-blocks/03-messaging-and-streams.md) §5 |
+| 写扩散 vs 读扩散的成本交点 | §4.2 3,000 万人的广播不该产生 3,000 万行收件箱 | [03-tradeoff-framework §3](../00-foundations/03-tradeoff-framework.md#3-常见取舍的量化表) |
 
 **这道题的一句话本质**
 
-> **扇出速率不由你的 worker 数决定，由下游供应商的配额决定；而交易类和营销类必须在物理层面隔离。**
-> 前半句让"加 100 个 worker"在这题里变成最没用的一种扩容，后半句让"一个队列加优先级字段"变成错的。带着这句话往下读 —— 每见到一个组件就问一次："它是在给谁让路，还是在被谁挤掉？"
+> **扇出速率受下游配额约束；交易 lane 必须有营销无法耗尽的保留资源。**
+> 增加 worker 只有在内部处理是瓶颈时才有用；隔离可由独立 topic/worker 实现，也可由严格 reserved concurrency/quota 实现。每见到一个组件就问：“它保护的是哪类通知，保护了哪种资源？”
 
 ---
 
@@ -42,13 +44,13 @@
 | 1 | 谁调用这个平台？ | 内部 30+ 个服务 + 少量租户自定义 webhook | 决定要做**通知类型注册表（notification type registry）**（schema + 模板 + 默认偏好），而不是自由字符串 API |
 | 2 | 有哪些通道？ | push / in-app / email / SMS / webhook（v2 加 Slack、WhatsApp/RCS） | 决定通道抽象的最小公共契约（见 §4.1） |
 | 3 | 最大单次扇出（fan-out）？ | 一次营销广播（broadcast）**3,000 万**接收者，要求 30 分钟内发完 | **峰值由广播决定，不是由日常流量决定** —— 这是本题最重要的一句话 |
-| 4 | 交易类（transactional）和营销类（marketing）混跑吗？ | 不能混。OTP 永远不能被营销挤掉 | 决定隔离要做到供应商子账号与 IP 池级别（§4.5） |
+| 4 | 交易类（transactional）和营销类（marketing）混跑吗？ | 不能共享无保留的容量；OTP 不能被营销挤掉 | 决定至少隔离队列/并发/配额；邮件通常还需账号或 IP 信誉域隔离（§4.5） |
 | 5 | 投递保证（delivery guarantee）？ | 交易类 **at-least-once + 幂等（idempotency）**；营销类 at-most-once 可接受 | 决定去重存储的规模与 TTL |
-| 6 | 延迟 SLO？ | 交易类 p95 **< 5 s**；运营类 < 60 s；营销类 30 分钟窗口 | 三个数字 → 三条物理隔离的通路 |
+| 6 | 延迟目标与 SLO？ | 候选阈值：交易类 5 s、运营类 60 s、营销类 30 分钟；每类 SLO 再写成“至少 X% 有效通知在阈值内进入通道”，p95 只作诊断 | 三组阈值与目标比例 → 三条物理隔离的通路 |
 | 7 | 需要送达/已读回执吗？ | 需要，但接受**各通道能力不同** | 决定不能定义统一的 `delivered` 语义（§4.6） |
 | 8 | 用户偏好有多复杂？ | 三层（全局 / 类别 / 单对象）× 通道 + 时区静默时段（quiet hours）+ 频率上限（frequency cap） | 决定偏好求值（preference evaluation）必须能在扇出路径上做到 μs 级（§4.4） |
-| 9 | 本地化？ | 12 种语言，含 RTL 与 CJK | CJK 短信 70 字符就分段计费；模板长度必须在**发布时**做 lint |
-| 10 | 合规？ | GDPR + CAN-SPAM + TCPA（SMS 需要明确同意与退订字） | 决定 suppression list 是**一等公民**，且退订必须跨通道生效 |
+| 9 | 本地化？ | 12 种语言，含 RTL 与 CJK | UCS-2 单段常为 70 字符，拼接后常为每段 67；按实际编码在发布时 lint |
+| 10 | 合规？ | 示例涉及 GDPR / CAN-SPAM / TCPA | 决定 consent 与 suppression 是一等公民；退订作用域按类别、通道、合同与法律定义，不能武断地一键跨所有通道 |
 | 11 | 谁为通知付费？ | 平台自己承担，但要能按租户归因（attribution） | 决定计量打点（SMS 是成本黑洞，必须能追到租户） |
 | 12 | AI Agent 会用它吗？ | 会：长任务完成通知、人在回路（human-in-the-loop）确认请求 | 决定要有"抑制 push（用户正看着）"和"终态一致性"两条特殊逻辑（§4.9） |
 
@@ -61,10 +63,10 @@
 ```
 MAU 5,000 万        DAU 1,000 万        人均 8 条通知/天
 ──────────────────────────────────────────────────────
-日常量   = 8,000 万/天 = 926/s（平均），日内峰谷 3× ≈ 2,800/s
+日常量   = 8,000 万/天 = 926/s（平均），日内峰均比 3× ≈ 2,800/s
 广播峰值 = 3,000 万 / 1,800 s          ≈ 16,700/s
 ──────────────────────────────────────────────────────
-系统必须按 16,700/s 设计，日常流量只占 17%
+内部受众解析/入队要承受约 16,700/s；各通道实际发送速率还受 provider 配额约束
 ```
 
 > **这就是通知平台和普通业务系统最大的不同**：它的容量规划（capacity planning）由**一次运营动作**决定，而运营动作是人在后台点一个按钮触发的。所以「谁能触发多大的扇出」必须是一个有审批、有配额、有 dry-run 的产品能力，不是一个 API。
@@ -88,7 +90,7 @@ SMS 占总量 2%，占通道成本 94.5%
 
 **推论（必须写在白板上）**：
 1. **"每条通知 $0.00023"这个平均数是没有意义的数字。** 单位经济（unit economics）必须按通道分开算，否则任何优化决策都会走偏。
-2. **降本的唯一有效动作是把 SMS 换成 push/RCS/WhatsApp**，做一条降级链（fallback chain）：`push（有活跃 token）→ RCS/WhatsApp → SMS`。把 SMS 从 2% 压到 0.5%，每月省 $396k —— 这比把 email 供应商砍价 30% 的收益（$8.6k）高 46 倍。
+2. 本算例最大的成本杠杆是减少不必要的 SMS，并在用户同意、地区可用、紧急度和可达性允许时选更便宜通道。RCS/WhatsApp 并非所有地区都更便宜或可用，也不能因为 push 未读就自动把营销升级成 SMS。把 SMS 占比从 2% 降到 0.5% 的 $396k 只是按本表单价得到的敏感性分析。
 3. Push 免费不等于无成本：成本在 **token 生命周期管理**（无效 token 浪费配额、拉高失败率指标）和自建的连接/worker。
 
 ### 2.3 计算与存储
@@ -129,9 +131,9 @@ In-app 收件箱（写扩散）：2,000 万/天 × 30 天保留 = 6 亿行 × 30
                                           │ 去重 + 合并窗口 (digest) │  ← 延迟队列
                                           └────────────┬────────────┘
                                                        ▼
-              ┌──────────────── 分档队列（物理隔离，不是优先级字段）──────────────┐
+              ┌──────────── 分档队列 + 保留容量（可独立 topic 或严格资源分区）─────────┐
               │   transactional    │      operational      │     marketing      │
-              │   ρ < 0.5          │      ρ < 0.7          │     ρ 可到 0.95    │
+              │   ρ 初始预算 <0.5  │      ρ 初始预算 <0.7  │     可排队/暂停     │
               └────────┬───────────┴───────────┬───────────┴──────────┬─────────┘
                        ▼                       ▼                      ▼
               ┌────────────────────────────────────────────────────────────────┐
@@ -145,7 +147,7 @@ In-app 收件箱（写扩散）：2,000 万/天 × 30 天保留 = 6 亿行 × 30
                                    ▼
                     ┌──────────────────────────────┐
                     │ 状态事件流 → ClickHouse       │
-                    │ suppression list（跨通道）    │
+                    │ consent / suppression（按作用域）│
                     │ 信誉看板（bounce/complaint）  │
                     └──────────────────────────────┘
 ```
@@ -163,7 +165,7 @@ In-app 收件箱（写扩散）：2,000 万/天 × 30 天保留 = 6 亿行 × 30
 ```jsonc
 {
   "notification_id": "ntf_01J...",        // 平台生成，用于全链路追踪
-  "idempotency_key": "run_abc:completed", // 调用方提供，去重的唯一依据
+  "idempotency_key": "run_abc:completed", // 调用方稳定业务键；平台按租户/类型/收件人/通道作用域化
   "type": "agent.run.completed",          // 注册表里的类型，决定默认偏好与优先级档
   "priority": "operational",              // transactional | operational | marketing
   "recipient": {"user_id": "u_123"},
@@ -176,7 +178,7 @@ In-app 收件箱（写扩散）：2,000 万/天 × 30 天保留 = 6 亿行 × 30
 }
 ```
 
-**`expires_at` 是被低估的字段。** 供应商故障恢复后队列积压 40 万条，如果没有过期，用户会在同一秒收到 3 小时前的 200 条通知 —— 这是最快的退订触发器。所有非交易类通知都应该有 TTL（运营类 1 小时，营销类 4 小时）。
+`notification_id` 只追踪一次平台受理；去重身份应由调用方稳定业务操作键加平台确定的 `(tenant, type, recipient, channel)` 派生并持久化，网络重试必须复用。**每种通知都要有业务有效期**：OTP 可能几分钟就失效，运营/营销可能是小时级，安全告警也可能需要长期可见但停止旧通道重试。TTL 是类型注册表的策略，1 h / 4 h 只是示例，不能用“交易类”作为永不过期的理由。
 
 **各通道的能力与失效模式对比：**
 
@@ -186,15 +188,15 @@ In-app 收件箱（写扩散）：2,000 万/天 × 30 天保留 = 6 亿行 × 30
 | **Push (FCM)** | 同上 | 同上 | 有 message id；delivery 数据在 BigQuery 导出中有 | `collapse_key`、`ttl`、priority high/normal；topic 扇出由 Google 承担但**无法按用户偏好过滤** |
 | **Email** | 秒 – 分钟 | 中，强依赖发信信誉（sender reputation） | sent / delivered / bounce / complaint 全有 webhook；**open 已不可信**（见 §4.6） | 供应商速率配额；IP 池；SPF/DKIM/DMARC 必需 |
 | **SMS** | 秒 | 中高 | DLR 支持因国家/运营商而异，部分地区无 | 美国 A2P 10DLC 需注册并按 trust score 分档限速；成本是其他通道的 100–5,000 倍 |
-| **In-app** | 毫秒 | 完全可控 | sent / read 精确 | 读扩散或写扩散是个真实的选型（§4.2） |
-| **Webhook** | 100 ms – 30 s | **最低**，接收方可用性不可控 | HTTP 状态码 | 必须签名 + 重放窗口；连续失败要自动禁用 |
+| **In-app** | 毫秒级写入 | 平台可控，但客户端仍可能离线 | stored 精确；read 由客户端幂等上报 | 读扩散或写扩散是个真实的选型（§4.2） |
+| **Webhook** | 100 ms – 30 s | 接收方可用性不可控 | HTTP 2xx 只表示端点接受，不等于业务处理完成 | 必须签名 + 重放窗口；连续失败按策略暂停 |
 | **Slack / Teams** | 秒 | 高 | 有 message ts | 严格限流（`chat.postMessage` 约每频道 1 条/秒），**必须按频道排队**而不是全局并发 |
 
 **供应商故障转移（failover）的三条规则：**
 
-1. **同通道必须有第二家**，且**不能只在配置里有**。灾备供应商要接 1–5% 的常态流量，否则切过去才发现模板没同步、域名没验证、IP 没预热 —— 这是最常见的"有备份等于没备份"。
-2. **切换判据是错误率 + 延迟，不是"挂了"**。`error_rate > 5% 持续 60 s` 或 `p95 > 10 s 持续 120 s` 即熔断（circuit breaker）切换。等到完全 5xx 才切，已经积压了 10 分钟。
-3. **切换有代价，必须显式承认**：邮件切供应商 = 换发信 IP = 信誉重置，短期投递率会掉 5–15 个百分点。所以邮件的故障转移应该是**分级的**：先降速重试原供应商（多数故障是限流不是宕机），再切备用，且交易类优先切、营销类宁可延迟。
+1. **先看通道是否存在可替代供应商。** Email/SMS 常可双供应商；APNs/FCM 本身没有等价替代网络。高价值通道若采用备用供应商，要持续验证域名、模板、凭证、合规与可用容量；是否承接 1–5% 常态流量由成本和信誉策略决定。
+2. **切换判据同时看错误率、延迟、错误作用域与队列年龄。** 例如 `error_rate > 5%/60s`、`p95 > 10s/120s` 可作为初始阈值，最终由 SLO、多窗口告警和最小样本量确定，避免低流量误切。
+3. **切换有代价。** 邮件换 IP/域名可能损害信誉，模型与地区规则也可能不同；先尊重 `Retry-After`、限速并保护交易容量，再按预案逐级切换。投递率下降幅度与预热周期都应从自己的供应商数据测量。
 
 ### 4.2 扇出：一条事件 → 3,000 万用户
 
@@ -206,26 +208,26 @@ In-app 收件箱（写扩散）：2,000 万/天 × 30 天保留 = 6 亿行 × 30
 | 写放大 | O(N) —— 3,000 万写 | O(1) |
 | 读延迟 | O(1)，一次范围扫描 | O(订阅数)，要查多个源再归并排序 |
 | 个性化状态（已读/归档） | 天然支持 | **困难**，要单独存 per-user 的读位点 |
-| 适用 | 普通用户的 in-app 收件箱 | 超大受众（订阅者 > 10 万）、公告类 |
+| 适用 | 普通用户的 in-app 收件箱 | 超大受众/公告类；交点由写成本、读频率和个性化状态决定 |
 
-**判据：订阅者数 > 10 万走读扩散，其余写扩散。** 这就是社交产品的"名人问题"（celebrity problem）在通知场景的翻版。3,000 万人的营销广播不应该产生 3,000 万行收件箱记录 —— 它是一条事件加一次「所有人可见」的谓词。
+“10 万订阅者”只能作起始假设。计算 `N × 单次写成本` 与 `预期读者数 × 读时归并成本 + per-user 状态成本` 的交点，再压测。3,000 万人的全站公告通常适合一条事件 + 可见谓词，但个性化营销仍要在发送前逐人执行 consent、suppression、频控与地域规则。
 
 **第二层：分片扇出（sharded fan-out）的执行结构。**
 
 ```
 Broadcast(campaign_id, audience_query)
         │
-        ├─ 物化受众到不可变快照（audience_snapshot_id）   ← 关键：受众必须冻结
-        │  否则重试时受众已变，幂等无从谈起
+        ├─ 物化业务受众到不可变快照（audience_snapshot_id）
+        │  重试复用同一快照；退订/consent/suppression 在实际发送前再次强校验
         │
         ├─ 切块：3,000 万 / 1,000 = 30,000 个 chunk
         │  每个 chunk 一条队列消息 {campaign_id, snapshot_id, chunk_idx}
         │
-        └─ worker 并行消费；幂等键 = (campaign_id, chunk_idx)
-           chunk 内逐人的幂等键 = (campaign_id, user_id)
+        └─ worker 并行消费；块幂等键 = (campaign_id, snapshot_id, chunk_idx)
+           逐人逐通道键 = (campaign_id, snapshot_id, user_id, channel)
 ```
 
-**块大小 1,000 是个折中**：太小（100）→ 30 万条队列消息，元数据开销与调度抖动占主导；太大（10,000）→ 单块处理 30 s，重试代价高、进度粒度粗、单块失败影响面大。**目标是单块处理时间落在 1–5 s。**
+块大小 1,000 是本文起始值；目标是让单块在 visibility timeout 内稳定完成、重试代价和调度开销都可接受，例如 1–5 s。按 payload、偏好读取和 provider batch 上限压测，不把 1,000 写死。
 
 **第三层（最容易答错）：速率由下游配额反压决定。**
 
@@ -233,8 +235,8 @@ Broadcast(campaign_id, audience_query)
 错误：worker 从队列拉消息 → 调 provider → 被 429 → 退避 → 消息在内存里等
       结果：消息可见性超时 → 重投 → 一次投递变成三次 → 把 provider 打得更死
 
-正确：worker 先向全局令牌桶申请 N 个令牌 → 拿到才去拉 N 条消息 → 发送
-      拿不到令牌就不拉。队列深度成为唯一的背压信号，且是可观测的。
+正确：provider-specific worker 先取得有期限的发送 credit → 再拉不超过 credit 的消息
+      未用 credit 归还/过期；慢批次续期 visibility。监控队列年龄、深度、credit 饥饿与 in-flight。
 ```
 
 ```python
@@ -242,9 +244,12 @@ Broadcast(campaign_id, audience_query)
 while True:
     credits = rate_limiter.acquire(provider="ses", want=200, timeout=1.0)
     if credits == 0:
-        metrics.gauge("fanout.starved_by_quota", 1); continue
+        metrics.gauge("fanout.starved_by_quota", 1)
+        rate_limiter.wait_until_refill()       # 不 busy-loop
+        continue
     msgs = queue.poll(max=credits, visibility_timeout=30)
-    send_batch(msgs)   # 单条失败按 §4.7 分类处理，不整批重试
+    rate_limiter.return_unused(credits - len(msgs))
+    send_batch_with_visibility_heartbeat(msgs)  # 单条结算；不重试成功项
 ```
 
 > **面试金句**：
@@ -263,13 +268,13 @@ while True:
 **去重存储的选型**：19.2 亿键 × 32 天窗口（这个窗口值参考了 [OpenMeter](https://openmeter.io/) 计量去重的 32 天惯例）。单机 Redis 放不下 77 GB 且不能丢。方案：
 
 ```
-交易类（必须精确）：DynamoDB / Cassandra 条件写，TTL 32 天
+需要防重的高风险类型：DynamoDB / Cassandra 条件写，TTL 由最大重试/争议窗口决定（32 天只是示例）
                     PutItem with ConditionExpression: attribute_not_exists(pk)
                     成本可控因为交易类只占 15%
 运营类（可容忍极低误判）：分层布隆过滤器（每天一个 BF，查最近 32 个）
                     1 亿键 / 天，误判率 0.1% → 约 180 MB/天，32 天 5.8 GB 常驻
                     误判的后果 = 少发一条评论通知，可接受
-营销类：            按 campaign 的位图（user_id 稀疏位图），一次广播一份
+营销类：            按 campaign 的位图；先把 UUID 映射为稳定无碰撞的整数 ID，再用 Roaring 等稀疏位图
 ```
 
 **合并（digest）的触发规则** —— 这是决定退订率的地方：
@@ -280,13 +285,13 @@ while True:
   · 计数阈值：累计 ≥ 5 条立刻发（带"还有 N 条"）
   · 硬窗口：最长不超过用户设置的 digest 周期（实时 / 15 min / 每日 / 每周）
   · 交易类永不进合并
-实现：Redis ZSET 做延迟队列，score = 到期时间戳，1 s tick 扫描到期项
-      规模：活跃缓冲约 200 万，ZSET 分 256 片，单片 8,000 项，ZRANGEBYSCORE < 1 ms
+实现：可用 Redis ZSET 做索引，但内容/终态要有 durable source；到期项用原子 claim + lease + ACK，
+      worker 崩溃后可重领。120 s、5 条、256 片等都是产品/压测参数
 ```
 
-**跨通道去重（escalation 的反面）**：push 已送达且用户 5 分钟内已读 → **取消**排队中的 email 兜底。这需要 escalation 是一个可取消的延迟任务，而不是一开始就双发。做对这一条，邮件量能降 20–40%，同时用户感知的"重复轰炸"直接消失。
+**跨通道取消（escalation 的反面）**：若 push 已被用户确认读取，可取消尚未发送的 email 兜底。等待窗口（如 5 分钟）按通知 deadline 配置；任务要可取消且状态转换幂等。邮件量下降多少必须由各类型的读取率实测。
 
-**多设备**：同一用户 3 台设备，push **应该**全发（这是用户期望）。但已读要同步 —— 一台上读了，其他设备的角标（badge）要清。做法是发一条静默推送（`content-available` / FCM `data-only`）触发本地清理，注意这条静默推送本身受系统节流（throttling）限制，所以**它是尽力而为的，真正的真相仍然是 app 启动时拉一次未读数**。
+**多设备**：是全发、只发最近活跃设备，还是按设备偏好，由产品与通知风险决定。已读状态以服务端 `(user_id, notification_id)` 为准；其他设备可收到尽力而为的静默刷新，但最终在 app 启动/恢复时拉取服务端未读数，不能靠 background push 保证角标一致。
 
 ### 4.4 用户偏好与免打扰
 
@@ -309,8 +314,8 @@ while True:
 **优化路径（收益递增）：**
 
 ```
-① 紧凑编码 + 批量读：把每个用户的偏好压成固定 64 字节，一次 MGET 拉 1,000 个
-   struct UserNotifyPrefs {          // 64 B
+① 版本化紧凑编码 + 批量读：本题把常用偏好压成固定记录，一次 MGET 拉 1,000 个
+   struct UserNotifyPrefsV1 {        // 示例布局；扩类别/locale 前要有 schema version
      u64 allow_push_bitmap;          // 64 个类别的位图
      u64 allow_email_bitmap;
      u64 allow_sms_bitmap;
@@ -318,14 +323,15 @@ while True:
      u16 tz_id;                      // IANA 时区索引 —— 绝不存 UTC 偏移（DST 会错）
      u16 quiet_start_min, quiet_end_min;   // 本地时间的分钟数
      u8  digest_mode, locale_id;
-     u32 marketing_sent_this_week;   // 频率上限计数
      ...
    }
+   # 频率计数是并发写状态，放原子窗口计数器/ledger，不塞进容易陈旧的偏好快照
    → 每批 1,000 个 2 ms，3,000 万 / 1,000 × 2 ms = 60 s（可并行到 < 5 s）
 
-② 倒排索引：把「订阅关系 × 偏好」预交叉成 topic → 允许接收的 user_id 位图
+② 倒排索引：把「订阅关系 × 非敏感偏好」预交叉成 topic → 候选 user_id 位图
    扇出时直接拿到收件人列表，跳过逐人求值
-   代价：偏好变更要异步更新索引（秒级延迟可接受）；索引存储 ≈ 类别数 × MAU / 8 字节
+   代价：普通偏好可异步更新；但退订、consent 撤销与 suppression 必须进入强一致/低延迟 deny path，
+         并在 provider send 前最终检查，不能接受“位图晚几秒所以仍发送”
    → 3,000 万人的受众解析降到一次位图 AND，< 100 ms
 ```
 
@@ -333,27 +339,27 @@ while True:
 
 1. **存 IANA 时区 ID（`America/New_York`），不存 UTC 偏移。** 存偏移的系统会在每年两次 DST 切换时把所有人的静默时段错开一小时，且没人会立刻发现。
 2. **静默时段跨午夜**（22:00–08:00）是常态，区间判断要处理环绕：`start > end ? (t >= start || t < end) : (t >= start && t < end)`。这是通知系统里最常见的一个 off-by-one。
-3. **被静默时段挡住的通知要"延后"还是"丢弃"？** 判据：运营类延后到窗口结束（并入 digest），营销类**直接丢弃**（明早再发一条昨晚的营销，退订率立刻上升）。
+3. **被静默时段挡住后延后还是丢弃？** 由类型的有效期、用户设置和合规策略决定：可延后并入 digest，也可过期丢弃。不要仅按“运营/营销”写死。
 
-**强制通道（transactional override）**：OTP、安全告警、密码重置、账单失败 —— 不受偏好和静默时段约束。但这必须是**代码里的静态白名单（allowlist）+ 审计**，不能是调用方传的一个 `force: true` 布尔值。给出这个布尔值，六个月内所有营销通知都会带上它。
+**服务必需通知（transactional override）**：某些 OTP、安全告警或账户消息可绕过普通营销偏好/静默时段，但仍受通道 consent、地域法规和有效期约束。资格放在版本化类型注册表中，经安全/法务审批并审计；不能信调用方的 `force: true`。
 
-### 4.5 优先级与隔离：四层都要分开
+### 4.5 优先级与隔离：关键资源要有独立预算
 
-**"一个队列 + 优先级字段"是错的。** 原因：即使消费者优先取高优先级消息，它仍然会因为处理低优先级消息时被慢供应商阻塞而耗尽线程。**优先级只能防止排队，不能防止资源被占用。**
+只有优先级字段、没有 reserved concurrency/配额，确实不能隔离：低优先级 in-flight 请求仍会占满连接与 provider quota。实现可以是独立 topic/worker，也可以是经过证明的同队列 + 严格并发保留；核心是关键资源有不可被营销借光的预算。
 
 ```
                  transactional      operational        marketing
 队列              独立 topic         独立 topic         独立 topic
 worker 池         独立，固定容量      独立               独立，可被降级/暂停
-供应商账号        独立子账号/子密钥    共享 operational   独立
-发信 IP 池        专用（信誉最高）     专用               专用（投诉率高）
-目标利用率 ρ      < 0.5              < 0.7              可到 0.95
+供应商账号        高风险时独立子账号/配额；是否共享取决于 provider 的限额作用域
+发信 IP 池        邮件通常按信誉域隔离交易与营销；push/in-app 不存在同一概念
+初始利用率预算 ρ  < 0.5              < 0.7              可排队但须满足截止时间
 ```
 
 **为什么用 ρ 而不是"够用就行"** —— 但**先把模型选对**，这里最容易答错：
 
 ```
-交易通路：λ = 926/s，单条发送 S ≈ 200 ms
+假设从总流量中量出交易通路峰值 λ_t = 926/s，单条 provider 占用 S ≈ 200 ms
 ⇒ 提供负载 a = λS = 185 erlang
 ⇒ worker 数 c 的硬下界是 186（c=1 的吞吐上限只有 1/S = 5 req/s，比 λ 低 185 倍）
 ```
@@ -369,21 +375,20 @@ worker 池         独立，固定容量      独立               独立，可�
 | 0.95 | 195 | 0.37 | 1.038× |
 
 **如果只看均值排队，ρ 完全可以推到 0.95** —— M/M/1 的「0.5→2×、0.9→10×」在这里一个都不成立
-（`W = S/(1−ρ)` 只在**单服务台**成立：单主库、单分片、单连接、单线程锁。见 [`00/02 §3`](../00-foundations/02-capacity-estimation.md)）。
+（`W = S/(1−ρ)` 只在**单服务台**成立：单主库、单分片、单连接、单线程锁。见 [`00/02 §3`](../00-foundations/02-capacity-estimation.md#3-排队论queueing-theory为什么-80-利用率utilization是危险的)）。
 
 **那交易通路为什么还是要压到 ρ < 0.5？理由不是排队论，是这四条 —— 这才是要说给面试官听的：**
 
 | 理由 | 为什么排队模型看不见 |
 |---|---|
-| **日内峰谷 3×** | 926/s 是均值；晚高峰 2,800/s 时，按均值配的 ρ=0.5 直接变成 ρ=1.5，队列无界增长 |
+| **日内峰均比 3×** | 926/s 是均值；晚高峰 2,800/s 时，按均值配的 ρ=0.5 直接变成 ρ=1.5，队列无界增长 |
 | **广播扇出不是泊松到达** | 一次营销活动瞬间灌进几百万条。排队论假设的平稳到达在这里根本不成立，只有余量能挡 |
 | **供应商 429 会让 S 突然涨 10 倍** | ρ = λS/c 里 S 不是常数。上游一限流，S 从 200 ms 变 2 s，ρ 当场 ×10 —— 这是最常见的雪崩起点 |
-| **SLO 写在 p95 上，不是均值上** | 上表全是均值。ρ=0.9 时均值只涨 0.4%，但 9% 的请求要排队，p95 会被这一段吃掉 |
+| **用户目标在尾部，容量表却只算了均值** | 上表全是均值。ρ=0.9 时均值只涨 0.4%，但 9% 的请求要排队，p95 会被这一段吃掉。可燃尽 SLO 应写成“至少 X% 有效通知在 Y 秒内进入通道”，p95 用来诊断分布 |
 
-**结论那句话不变，理由要换**：交易类 SLO 是 p95 < 5 s。**ρ 压到 0.5 买的不是"少排队"，是"峰值、突发、和供应商抖动同时发生时仍然不排队"。**
-这份余量就是 SLO 的价格 —— 这句话要能直接对着 CFO 讲。
+本题先用 `ρ < 0.5` 给交易通路留峰值、突发和 provider 抖动余量；它不是排队论推导出的通用常数。真实容量要用交易类自身的峰值到达过程、服务时间分布、async 并发模型和故障场景压测，再以 p95 与队列年龄验证。
 
-**发信 IP 池分离是邮件领域的硬规则**：营销邮件的投诉率天然比交易邮件高一个数量级。共用 IP，营销的投诉会拖垮交易邮件的送达率（deliverability） —— 而 OTP 发不出去是直接的收入损失。同理，Twilio/SES 的**账号级配额是共享的**，营销跑满配额会让 OTP 排队。必须用不同的子账号 / configuration set。
+在邮件量足以使用独立 IP、且交易与营销风险明显不同的场景，通常应隔离信誉域/IP 池；共享 IP 时营销投诉会连带交易送达。账号级配额若共享，也要用独立子账号、configuration set 或 provider-side reservation 落实容量隔板。小规模使用共享 IP 池的团队则应优先遵循 ESP 的信誉建议，不能盲目自建冷 IP。
 
 ### 4.6 投递保证与状态跟踪
 
@@ -402,15 +407,15 @@ created ──▶ suppressed        （在 suppression list / 偏好拒绝 / 静
 | 状态 | Push | Email | SMS | In-app | Webhook |
 |---|---|---|---|---|---|
 | `sent`（交给供应商） | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `delivered` | FCM 部分有；APNs 无普遍回执 | ✅ webhook | DLR 视国家/运营商 | ✅（写库即达） | HTTP 2xx |
+| `delivered` | FCM 部分有；APNs 无普遍回执 | 通常只证明远端 MTA 接受，不保证进 inbox/被人看到 | DLR 视国家/运营商 | 更准确叫 `stored`；设备是否看到另算 | HTTP 2xx 只叫 `endpoint_accepted` |
 | `opened` | 靠 app 上报 | ⚠️ **不可信** | ❌ | ✅ | ❌ |
 | `clicked` | 靠 app 上报 | ✅ 链接跳转 | ✅ 短链 | ✅ | ❌ |
 
 ⚠️ **邮件 open rate 已经不是一个可用指标。** [Apple Mail Privacy Protection](https://support.apple.com/en-us/102279)（iOS 15 起，2021）会代理预取所有远程图片，包括追踪像素（tracking pixel） —— Apple Mail 用户的 open 会被无条件记成"已打开"。在 Apple Mail 占比高的受众上，open rate 系统性虚高。**决策要基于 click 和后续转化，不要基于 open。** 把 open rate 写进 OKR 的团队会做出系统性错误的内容决策。
 
-**结论：API 上应该暴露两个字段** —— 一个跨通道的粗粒度 `status`，和一个 `channel_status`（原样透传供应商的状态与错误码）。任何试图把它们统一成一个枚举的设计，都会在排障时把工程师逼疯。
+API 可暴露粗粒度平台状态（queued/sent/terminal）和带 provider 原码的 `channel_status`；对 `delivered`、`read` 等能力用 nullable/unsupported 表达，不能把“未知”当 false，也不能把 provider 原始错误未经脱敏直接暴露给所有租户。
 
-**状态事件的存储**：3.2 亿事件/天，写入 ClickHouse（列存，`ORDER BY (tenant_id, notification_id, ts)`），提供三类查询：单条通知的全链路（排障）、按租户/类型的漏斗（产品）、按供应商/IP 的信誉指标（运维）。**不要放在 OLTP 库里** —— 这是本书 [01-storage-engines](../01-building-blocks/01-storage-engines.md) 里 OLTP/OLAP 分工的教科书场景。
+**状态存储要分当前态与事件分析**：调用方查询/取消所需的当前状态放可按 `notification_id` 点查的 OLTP/KV，并以版本/CAS 处理乱序 webhook；完整状态事件异步进 ClickHouse 做链路分析、漏斗与信誉指标。不要让 ClickHouse 承担强一致的取消/当前态 API，也不要把每天数亿事件全塞进主业务 OLTP。
 
 ### 4.7 退避（backoff）、供应商配额、bounce 与信誉
 
@@ -420,17 +425,17 @@ created ──▶ suppressed        （在 suppression list / 偏好拒绝 / 静
 |---|---|---|
 | **永久失败** | APNs 410 Unregistered、FCM UNREGISTERED、email hard bounce、手机号无效 | **不重试**，立即从 token 表 / 收件人表移除，写入 suppression list |
 | **限流（rate limiting）** | 429、`Retry-After` | 按 `Retry-After` 退避，**并自适应降低该 provider 的全局令牌桶（token bucket）速率**（AIMD：乘性减 0.7×，加性增 +5%/30 s） |
-| **临时失败** | 5xx、超时、soft bounce | 指数退避 + 抖动（jitter）；交易类总预算 **15 min / 5 次**，运营类 **1 h**，营销类 **不重试** |
+| **临时失败** | 5xx、超时、soft bounce | 指数退避 + 抖动；按类型的有效期与误发/漏发成本设总预算。15 min/5 次、1 h、营销不重试只是示例 |
 | **内容拒绝** | 模板变量缺失、内容被过滤 | 不重试，告警到模板 owner |
 
-**重试预算（不是无限重试）**：全局重试请求数不得超过原始请求数的 **10%**，超过即熔断整条通路。没有这条约束，供应商抖动会被重试放大成自制的 DDoS —— 这是 [05-reliability/03-resilience-patterns.md](../05-reliability/03-resilience-patterns.md) 里"重试放大"（retry amplification）在通知场景的具体形态。
+**重试预算（不是无限重试）**：按 provider/通道/优先级限制额外重试流量与并发；“不超过原始请求 10%”可作初始值，结合 deadline、成功率和容量调整。超过预算先停止低优先级重试/开路，不一定熔断仍可成功的交易新流量。
 
 **Bounce 与信誉管理（邮件专属，但影响的是整个公司的收入）：**
 
 ```
-hard bounce（地址不存在）      → 立即永久 suppression，绝不再发
-soft bounce（邮箱满/临时拒收）  → 7 天内累计 3 次 → 临时 suppression 30 天
-complaint（用户点了"垃圾邮件"）  → 立即永久 suppression + 跨通道退订该类别
+hard bounce（地址不存在）      → 立即抑制该地址/通道；只有重新验证或合法 re-opt-in 才恢复
+soft bounce（邮箱满/临时拒收）  → 按 ESP 建议和历史窗口临时抑制（次数/天数为策略参数）
+complaint（用户点了"垃圾邮件"）  → 立即停止相应邮件类别/营销范围；不要擅自取消仍有合法依据的安全通道
 ```
 
 **必须盯的阈值（[AWS SES 信誉指标](https://docs.aws.amazon.com/ses/latest/dg/reputationdashboard-bounce-complaint-rates.html)）：**
@@ -444,9 +449,9 @@ complaint（用户点了"垃圾邮件"）  → 立即永久 suppression + 跨通
 
 > **不清理 bounce 的代价是可量化的**：送达率从 98% 掉到 70%，等于你的邮件通道容量凭空少了 29%，而账单一分没少。而且信誉是**慢变量** —— 掉下去要 4–8 周才能修复，这期间你的 OTP 邮件也在受影响。
 
-**IP 预热（IP warm-up）**：新 IP 从 50 封/天起步，每天约翻倍，到 10 万封/天需要 **4–6 周**。这意味着**故障转移到未预热的备用供应商，实际可用容量只有几千封/天** —— 所以灾备供应商必须常态承接 1–5% 流量保持 IP 温度。这是 §4.1 规则 1 的量化理由。
+**IP 预热（IP warm-up）**：发送曲线取决于 ESP、域名/IP 历史、名单质量和目标邮箱厂商；“50 封起步、每日翻倍、4–6 周”只能是某种示例计划。备用邮件路径必须有经验证的可用容量；可用小比例常态流量、定期演练或供应商托管共享信誉实现，不能假定冷 IP 瞬间承接全量。
 
-**Push token 生命周期**：APNs 410 / FCM UNREGISTERED 必须立刻删 token。不删的后果不只是浪费：无效 token 拉高失败率指标，掩盖真实故障；且 token 表无限膨胀（一个用户五年换 6 台设备）。**规则：token 表按 `(user_id, device_id)` 唯一，登出即删，180 天无活动即删。**
+**Push token 生命周期**：收到明确的 APNs/FCM 无效反馈后停用对应 token；token 可能轮换，一个 device 也可能有多 app/account binding。登出时解除当前用户绑定，不要误删仍属于其他账户/应用的设备 token。无活动清理窗口（如 180 天）由产品活跃周期与重新注册能力决定，并保留最后验证时间和 provider feedback。
 
 ### 4.8 模板与本地化
 
@@ -467,7 +472,7 @@ template/
 
 1. **变量契约**：模板引用的每个变量都必须在 `schema.json` 里声明；调用方的 payload 按 schema 校验。缺变量的通知会渲染成 `你好，`，这类事故在投递时才发现就已经发出去 30 万条了。
 2. **长度 lint**：
-   - SMS：GSM-7 编码 **160 字符**一段；**UCS-2（含任意中日韩字符）只有 70 字符**一段，超出按段计费。中文短信写到 71 个字，成本立刻翻倍且没人会注意到。
+   - SMS：单段 GSM-7 常为 160 字符、UCS-2 常为 70 字符；拼接短信因 UDH 开销通常降到每段 153 / 67 字符，国家、编码与供应商还会变化。发布 lint 应用实际编码计算 segments 与价格，中文从 70 到 71 字常会变两段。
    - Push：iOS 通知横幅约显示 2 行，超出截断；title 建议 ≤ 30 字符，body ≤ 100。
 3. **渲染沙箱**：模板引擎必须禁用任意表达式求值与文件访问（SSTI）。租户自定义模板尤其危险 —— 这和 [04-ai-agent-systems/07-agent-security.md](../04-ai-agent-systems/07-agent-security.md) 里对不可信输入的处理是同一类问题。
 4. **本地化回退链（locale fallback chain）**：`zh-HK → zh-Hant → zh → en`。缺失的 locale 必须回退而不是渲染出模板变量名。复数与性别用 ICU MessageFormat，日期/货币/数字按 locale 格式化（"2026/7/30" vs "30/07/2026" 会被用户当成 bug 报上来）。
@@ -485,14 +490,14 @@ template/
 **陷阱一：终态一致性。**
 流式里最后一句是"正在创建 PR"，实际结果是失败。用户先看到流，后收到通知，两者矛盾 —— 而用户会相信先看到的那个。
 
-> **规则：通知内容必须由终态的持久化记录生成，绝不能由流的最后一帧生成。**
-> 流是 UI 的燃料，不是真相。真相在 `runs` 表的终态行里，通知渲染时读那一行。
+> **规则：终态写入与 notification outbox 事件放在同一事务；通知由带版本的终态事实生成，不能取流的最后一帧。**
+> worker 可按事件携带的 immutable snapshot/version 渲染，或条件读取同一终态版本；不能先发事件再赌 `runs` 行已经可见。
 
 **陷阱二：顺序倒置（out-of-order delivery）。**
-push 走 APNs 约 100 ms 就到手机，而 SSE 的最后一帧可能被中间缓冲拖到 2 s。用户手机先响、页面后更新，两个界面短暂不一致。解法：所有面向同一个 run 的消息都带 `(run_id, seq)`，客户端按 seq 单调更新，小于当前 seq 的一律丢弃。
+各通道无全局顺序保证。消息带 `(run_id, state_version)`，客户端只用更高版本更新 UI；收到 push 后最好按 run id 拉当前权威状态，而不是把 push payload 当完整状态。`seq` 只能在同一 run 的单调分配器内比较。
 
 **陷阱三：用户正看着你还发 push。**
-判据：该用户在这个 run 的页面上有活跃 presence（< 30 s 心跳，见 [05-realtime-collaboration.md](05-realtime-collaboration.md)）→ **抑制（suppress）push，只更新 in-app**。这一条能把 Agent 平台的 push 量砍掉 40–60%，且直接改善的是用户对"这个产品很吵"的观感。
+对非紧急状态，可在该 run 页面有新鲜 presence 时抑制 push、只更新 in-app；action-required、安全或用户明确要求的通知可能仍需发送。30 s 与“减少 40–60%”是待用真实行为数据验证的起始假设。
 
 **人在回路（HITL）确认通知：延迟直接换算成钱。**
 
@@ -507,7 +512,7 @@ Agent 跑到一半需要人批准一个不可逆动作（[01-ai-coding-agent-pla
                                                               ↑ 差 55 倍
 ```
 
-真正的杠杆不是沙箱单价，是**人的注意力窗口（attention window）**：通知晚到 5 分钟，人已经在开会了，一个本该 2 分钟完成的确认变成 2 小时。所以 HITL 确认必须走 **transactional 档**（p95 < 5 s），并且要**同时判断销毁沙箱还是保活** —— 判据就是通知延迟的 p95 加上人的中位响应时间。这两个数字的乘积超过 10 分钟，就应该销毁沙箱并在确认后重建（冷启动约 150 ms + 仓库物化，见该篇 §4.1）。
+真正的杠杆是人的注意力窗口，但“晚 5 分钟就变 2 小时”必须由本产品数据验证。HITL 应走不受营销挤占的高优先级通路；沙箱保活决策比较 `预计等待时间 = 通知延迟 + 人的响应时间分布` 与 `重建时间/成本 + 丢失的临时状态价值`。这里应比较**和/期望成本**，不是把两个时间相乘；10 分钟、150 ms 都只是算例参数。
 
 **Agent 作为收件人：webhook 通道的特殊要求。**
 
@@ -523,13 +528,13 @@ Webhook 通道的三件必需品：HMAC-SHA256 签名（签 `timestamp + body`�
 
 | 反模式 | 为什么错 | 正确做法 |
 |---|---|---|
-| **一个队列 + 优先级字段** | 优先级只防排队，不防资源被占用；一个慢供应商就能拖垮所有档 | 队列 / worker / 供应商账号 / IP 池四层物理隔离（physical isolation） |
+| **只有优先级、没有资源保留** | 低优先级 in-flight 仍会占满连接/provider quota | 独立 lane + reserved concurrency/quota；账号/IP 是否分离按通道风险决定 |
 | **交易与营销共用发信 IP** | 营销的投诉率会毁掉交易邮件的送达率，且要 4–8 周才能修复 | 专用 IP 池 + 独立子账号 + 独立配额 |
 | **调用方传 `force: true` 绕过偏好** | 六个月内所有营销通知都会带上它 | 强制通道是代码里的静态白名单 + 审计 |
-| **无限重试** | 供应商抖动被重试放大成自制 DDoS | 重试预算 ≤ 原始请求的 10%，超过熔断；永久失败不重试 |
+| **无限重试** | 供应商抖动被重试放大 | 按通道/档位设重试预算与 deadline；10% 是示例，永久失败不重试 |
 | **不处理 bounce** | 送达率 98% → 70%，容量凭空少 29%，账单不变 | hard bounce 立即永久 suppression；投诉率盯 0.1% 线 |
 | **把 open rate 当核心指标** | Apple MPP 自 2021 起预取追踪像素，open 系统性虚高 | 用 click 与后续转化 |
-| **通知没有 `expires_at`** | 供应商恢复后一次性投递 3 小时前的 200 条 —— 最快的退订触发器 | 非交易类一律带 TTL（运营 1 h / 营销 4 h） |
+| **通知没有类型化 `expires_at`** | 恢复后投递过期 OTP/旧状态或积压营销 | 每种类型定义有效期；运营 1 h / 营销 4 h 只是示例 |
 | **逐人查库求偏好** | 3,000 万人 × 1 ms = 8.3 小时 | 64 字节紧凑编码 + 批量读；超大受众用倒排位图（inverted bitmap index） |
 | **存 UTC 偏移而不是 IANA 时区** | 每年两次 DST 把所有人的静默时段错开一小时，且无人立刻发现 | 存 `America/New_York` 这样的时区 ID |
 | **广播受众实时查询** | 重试时受众已变，幂等无从谈起 | 受众物化成不可变快照，chunk 幂等键绑快照 ID |
@@ -545,15 +550,15 @@ Webhook 通道的三件必需品：HMAC-SHA256 签名（签 `timestamp + body`�
 | 失败 | 症状 | 立即动作 | 结构性对策 |
 |---|---|---|---|
 | **供应商限流风暴** | 429 占比飙升，队列深度线性增长 | AIMD 降速（×0.7），暂停营销档保交易档 | credit-based pull（先取令牌再拉消息）；提前申请配额并按季度复核 |
-| **供应商宕机** | 5xx / 超时，p95 > 10 s | 熔断切备用；交易类优先切，营销类延迟 | 备用供应商常态承接 1–5% 保持 IP 温度与模板同步 |
-| **积压后的雪崩投递（thundering herd）** | 恢复瞬间用户收到 200 条 3 小时前的通知 | 紧急启用全局 TTL 过滤 + 每用户投递速率上限 | 所有非交易类带 `expires_at`；每用户滑动窗口硬上限（如 10 条/小时） |
+| **供应商宕机** | 5xx / 超时、队列年龄过 SLO | 可替代通道按预案切换；无替代的 APNs/FCM 限速排队/过期 | 持续验证备用容量；常态比例不是固定 1–5% |
+| **积压后的雪崩投递（thundering herd）** | 恢复后短时间涌入大量旧通知 | 按类型 TTL/有效期过滤 + per-user 速率上限 | 所有类型有 `expires_at`；频控值（如 10 条/小时）按类别与用户偏好配置 |
 | **信誉崩塌** | 送达率一周内从 98% → 75% | 停营销、清 suppression list、拉 Postmaster 数据定位来源 | bounce/complaint 实时看板 + 阈值告警（0.1% / 5%）；营销与交易 IP 分离 |
 | **偏好求值成瓶颈** | 广播 30 分钟窗口做不到，卡在收件人解析 | 降级到"只按类别位图过滤"，跳过单对象订阅 | 倒排位图索引；偏好变更异步更新 |
-| **去重存储不可用** | 幂等失效，用户收到重复 | 交易类**停发**（宁可不发也不能重复发 OTP），运营类继续（可容忍） | 去重存储与主通路同可用性等级；分档降级策略预先写死 |
-| **一次误操作广播** | 一个人在后台给全量 5,000 万发了测试消息 | Kill switch：按 campaign_id 停止并撤回未发出的 chunk | 受众 > 100 万必须二人审批 + dry-run 预览 + 分批放量（staged rollout，1% → 10% → 100%） |
+| **去重存储不可用** | 重复风险上升 | 按类型的漏发/重发成本执行预案：OTP 可用短期本地幂等/同 code 重送，扣款提醒可能停发；不能一律“交易类宁可不发” | 高可用幂等存储 + 调用方稳定 key + provider id；每类 fail-open/close 预先演练 |
+| **一次误操作广播** | 测试消息进入大受众 | Kill switch 停止未发送 chunk；已交 provider 的通常撤不回 | 审批阈值按预计人数、成本、敏感度和历史基线计算；dry-run + 带观测门的分阶段放量，1/10/100% 仅示例 |
 | **模板变量缺失** | 用户收到"你好，" | 停该模板；已发出的无法撤回 | schema 校验在**发布时**，不是投递时；CI 里跑全 locale 渲染 |
-| **Push token 表膨胀** | 失败率虚高，掩盖真实故障 | 批量清理 410/UNREGISTERED | 登出即删；180 天无活动即删 |
-| **HITL 确认通知延迟** | Agent 大批卡在 `input_required`，沙箱空转 | 该类通知强制走交易档 | 通知 p95 + 人的中位响应时间 > 10 min ⇒ 销毁沙箱并在确认后重建 |
+| **Push token 表膨胀** | 失败率虚高，掩盖真实故障 | 停用 provider 明确判无效的 token | 登出解绑当前账户；按活动/反馈策略清理，180 天只是示例 |
+| **HITL 确认通知延迟** | Agent 大批卡在 `input_required`，沙箱空转 | 进入受保护的 action-required lane | 比较等待成本分布与重建成本/状态价值；10 min 不是通用切点 |
 
 ---
 
@@ -566,7 +571,7 @@ Webhook 通道的三件必需品：HMAC-SHA256 签名（签 `timestamp + body`�
 ```
 
 **v0（能上线的最小系统）**
-- 单一队列（但 topic 已经分成 3 档 —— **这是唯一不能省的前置设计**，后补要改所有调用方）。
+- 可共用一个 broker/集群，但从 schema 起就有三种逻辑 lane，并为交易 lane 保留并发/配额；规模增长后可拆 topic/worker。
 - 通知类型注册表 + 模板文件 + schema 校验，从第一天就进 CI。
 - 偏好只做「全局 + 类别 × 通道」两层；静默时段存 IANA 时区。
 - 幂等键 + Redis 去重（TTL 7 天）；bounce webhook 落库 + suppression list。
@@ -576,7 +581,7 @@ Webhook 通道的三件必需品：HMAC-SHA256 签名（签 `timestamp + body`�
 **v1（做成一门平台）**
 - 分片扇出 + 受众快照 + credit-based pull（§4.2）；三档物理隔离（§4.5）。
 - 偏好紧凑编码 + 批量求值；digest 合并窗口 + 跨通道 escalation 取消（§4.3）。
-- 第二供应商常态承接 1–5%；IP 池分离；信誉看板与阈值告警（§4.7）。
+- 对可替代的高价值通道验证第二供应商；是否常态承接 1–5% 按成本/信誉决定。邮件按风险隔离信誉域。
 - 状态事件进 ClickHouse，提供全链路排障与租户漏斗。
 - 广播审批流 + dry-run + 分批放量 + kill switch。
 - **升级触发信号**：广播窗口做不到（受限于供应商配额）；单租户占用 > 20% 通道容量；出现数据驻留要求。
@@ -588,7 +593,7 @@ Webhook 通道的三件必需品：HMAC-SHA256 签名（签 `timestamp + body`�
 - AI 场景一等公民：presence 抑制、终态一致性、HITL 交易档、webhook/A2A 收件人（§4.9）。
 - **升级触发信号**：SMS 月成本 > $500k；退订率月环比连续 3 个月上升；合规要求按区域隔离通知内容。
 
-> **一个跨版本都成立的判据**：如果你的仪表盘第一行不是「**按类别的退订率**」而是「投递成功率」，你优化的方向从一开始就是错的。投递率是工程指标，退订率才是这个系统的业务生命线 —— 它一旦上去，就再也降不回来。
+> 仪表盘第一屏应按通知类别同时展示用户结果与工程健康：交易类看截止时间内成功率/任务完成，营销看转化并以退订/投诉作 guardrail，运营看完成率与打扰指标；下方再分解 provider 接受率、延迟和错误。退订率很重要，但不是 OTP、安全告警和 webhook 的唯一业务目标。
 
 ---
 
@@ -609,4 +614,6 @@ Webhook 通道的三件必需品：HMAC-SHA256 签名（签 `timestamp + body`�
 
 ---
 
-**下一篇** → [07-classic-canon.md](07-classic-canon.md)：10 道最高频经典题的压缩打法。
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**案例顺读下一篇** → [07-classic-canon.md](07-classic-canon.md)：10 道最高频经典题的压缩打法。

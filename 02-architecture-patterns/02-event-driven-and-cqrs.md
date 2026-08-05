@@ -18,10 +18,10 @@
 
 | 概念 | 一句话 | 详见 |
 |---|---|---|
-| 事务与隔离级别 | 一组操作要么全做要么全不做；隔离性 I 是可调的旋钮，不是开关 | [00-concepts §7](../00-foundations/00-concepts.md) |
-| 最终一致 | 写完之后别处不一定立刻读到新值，只承诺"停止写入后最终收敛" | [00-concepts §6](../00-foundations/00-concepts.md) |
-| 幂等 | 同一操作执行多次，效果和执行一次相同 | [00-concepts §12](../00-foundations/00-concepts.md) |
-| 幂等键 | 客户端生成、服务端拿它去重的请求标识，让重试不产生第二次副作用 | [01-fundamentals §5](../00-foundations/01-fundamentals.md) |
+| 事务与隔离级别 | 一组操作要么全做要么全不做；隔离性 I 是可调的旋钮，不是开关 | [00-concepts §7](../00-foundations/00-concepts.md#7-事务与隔离级别) |
+| 最终一致 | 写完之后别处不一定立刻读到新值，只承诺"停止写入后最终收敛" | [00-concepts §6](../00-foundations/00-concepts.md#6-什么是一致性--一个词两种完全不同的意思) |
+| 幂等 | 同一操作执行多次，效果和执行一次相同 | [00-concepts §12](../00-foundations/00-concepts.md#12-本章术语速查) |
+| 幂等键 | 标识同一个逻辑操作、由服务端去重的稳定键；可由客户端或可信上游生成并跨重试复用 | [01-fundamentals §5](../00-foundations/01-fundamentals.md#5-幂等idempotency分布式系统的第一公民) |
 | 投递语义与 Outbox | 消息只保证"至少送到一次"；写库和发消息不是原子的（双写问题），Outbox 是标准解法 | [01-building-blocks/03](../01-building-blocks/03-messaging-and-streams.md) |
 | 服务边界 | 数据所有权，以及编排 vs 编舞的基本区别 | [02/01](01-microservices-vs-modular-monolith.md) |
 
@@ -82,12 +82,12 @@
 ### 为什么不是 2PC
 
 - **协调者（coordinator）故障时参与者（participant）持锁阻塞**：数据库行锁持有从毫秒变成分钟，连锁放大。
-- **锁持有时长 = 整条链路时长**：3 个服务 × p99 200 ms → 锁 600 ms+，吞吐塌陷（throughput collapse）。
+- **锁持有时长 = 整条链路时长**：网络、排队与最慢参与者会把锁时间拉长，吞吐和可用性受影响；具体幅度需按调用分布测量，不能把各服务 p99 直接相加。
 - **跨组织 / 跨异构存储不可用**：你无法让 Stripe 参与你的 2PC；Postgres + Kafka + S3 也没有共同的 XA。
 
 **Saga 的定义**（[Garcia-Molina & Salem, 1987](https://www.cs.cornell.edu/andru/cs711/2002fa/reading/sagas.pdf)）：把一个长事务（long-running transaction）拆成 N 个本地事务 T1…Tn，每个 Ti 配一个补偿（compensating transaction）Ci，失败时按 **逆序（reverse order）** 执行 Ci…C1。
 
-**Saga 提供的是 ACD，不是 ACID —— 缺的是 I（隔离）。** 这不是实现瑕疵，是定义本身。中间状态对外可见。
+**每个 Saga 步骤的本地事务可以有 ACID；Saga 整体不是一个全局 ACID 事务。** 在补偿完成前，它不提供全局原子回滚，也通常缺少全局隔离，中间状态会对外可见。补偿是在业务层抵消效果，不会抹掉历史。
 
 ### 编排 vs 编舞
 
@@ -98,11 +98,11 @@
 | 调试"卡在哪一步" | 查一张表 | 拼 N 个服务的日志 |
 | 循环依赖 | 不可能 | **可能且难发现**（A→B→C→A 的事件环） |
 | 耦合点 | 编排器知道所有参与者 | 每个服务只知道自己的上下游 |
-| 可维护跳数 | 10+ | **> 3 跳后不可维护** |
+| 可维护性 | 流程集中，但编排器可能变复杂 | 流程分散；复杂度随参与者、分支、补偿和事件环增长 |
 
 **判据**：有补偿逻辑、有明确终态、需要 SLA 的流程 → 编排。纯通知（发邮件、写审计、更新搜索索引）→ 编舞。
 
-⚠️ 编排器**不是**单点（single point of failure）：它是无状态的执行器 + 一张状态表。真正的单点是那张表，和你的主库同级。
+编排器可以做成可替换 worker + 高可用状态库，但这不会自动发生：多 worker 需要可靠 claim/lease/fencing，状态库需要复制、备份和恢复。缺少这些条件时，worker 或状态库都可能成为单点。
 
 ### 完整订单 Saga 状态机（含补偿路径）
 
@@ -140,10 +140,10 @@
 | 段 | 步骤性质 | 规则 |
 |---|---|---|
 | **Compensatable** | 有对应的语义补偿 | 排在最前。失败 → 逆序补偿 |
-| **Pivot** | 提交后 saga 必然向前完成 | **有且只有一个**。它是"不可回头点" |
-| **Retriable** | 无补偿，但保证最终成功 | 排在 pivot 之后，只允许重试 |
+| **Pivot** | 提交后流程意图改为只向前完成 | 经典三段式里是不可回头点；“向前完成”仍需可重试操作、人工出口和业务决议，不是物理保证 |
+| **Retriable** | 没有语义补偿、设计为安全重试 | 排在 pivot 之后；超过自动重试预算后保持 unresolved 并升级处理 |
 
-**设计规则：把不可补偿的操作尽量往后排，并让 pivot 尽可能靠后。** 如果你的流程里有两个互相独立的不可补偿操作（扣款 + 调用一次 $2 的 LLM 批处理），你就有两个 pivot —— 这时必须引入**预留（reservation）**（下面）把其中一个变成可补偿的。
+**设计规则：把不可补偿的操作尽量往后排，并尽量形成一个清晰的 pivot。** 若流程有多个独立不可逆效果，就不再是干净的单 pivot 结构：优先用预留/授权把其中一些变成可取消；做不到时，必须显式定义每种部分完成状态、人工决议和用户承诺，而不是假装全局回滚存在。
 
 **上面那张 ASCII 图画的是主干路径；下面这张沿用同一套状态名，补的是「可达性」：每个正向态失败后精确落到哪里，以及 `NEEDS_HUMAN` 的出边通向何处。**
 
@@ -184,8 +184,8 @@ stateDiagram-v2
 **四条硬规则：**
 
 1. **补偿必须幂等（idempotent）**。补偿消息一定会重复投递（at-least-once：消息系统只保证"至少送到一次"，超时重发会让同一条消息被消费两次以上，见 [`01-building-blocks/03`](../01-building-blocks/03-messaging-and-streams.md)），所以要用 `WHERE state = 'HELD'` 这种条件更新（conditional update），而不是相对增量。
-2. **补偿必须能重试到成功，不允许"补偿失败"这个终态**。补偿失败只能进 `NEEDS_HUMAN` 队列 + 告警，绝不能静默丢弃 —— 那是钱漏出去的地方。
-3. **补偿要能处理"还没执行就来补偿"**（正向请求超时但实际成功/失败未知）。用同一个幂等键（idempotency key）写一条 tombstone（墓碑记录：一行"这件事已经作废"的标记，让后到的正向请求查到它就直接被拒），让后到的正向请求被拒绝。
+2. **补偿失败不能被当作“已经补完”的成功终态**。系统要保持明确的 unresolved / `NEEDS_HUMAN` 状态、告警与 owner；业务可能最终选择接受损失、人工完成正向流程或执行替代补偿，但每一种都要形成审计决议，不能假设技术重试必然成功。
+3. **正向结果未知时不能直接发补偿。** 超时可能代表请求没到、仍在执行或已成功但响应丢失。优先用正向 action 的稳定幂等键查询/重试；下游没有幂等与查询能力时进入 `UNKNOWN` 对账。只有确认正向成功后才补偿，确认未执行后才安全重试/结束。forward 与 compensation 必须使用不同 action key。
 4. **补偿要留痕**：补偿本身是一个领域事件（`InventoryReleased`），不是一次 UPDATE。
 
 **状态机说明「能到哪」，这张时序图说明「按什么顺序发出去、每次带什么幂等键」—— 补偿的逆序和补偿自身的重试，只有摊在时间轴上才看得出来。场景取 pivot 那一步失败（T3 Capture 被拒），因为只有它会同时触发两条补偿。**
@@ -226,12 +226,12 @@ sequenceDiagram
 
 | 场景 | Try | Confirm | Cancel | 关键参数 |
 |---|---|---|---|---|
-| 库存 | 写 `reservation(HELD, expires_at)` | `HELD → CONSUMED` | `HELD → RELEASED` | TTL = saga p99 × 3，典型 5–15 分钟 |
-| 支付 | Authorization（信用卡授权） | Capture | Void | 授权有效期典型 7 天，逾期自动失效 |
-| 邮件 | 写入 `outbox_email(scheduled_at = now+120s)` | 到点发送 | 删除记录 | **120 秒延迟就能把"发邮件"变成可补偿** |
-| LLM 批任务 | 只做 `count_tokens` 预估 + 扣预算配额 | 提交 batch job | 退还配额 | Batch 半价，但 24h 周转，几乎必须预留 |
+| 库存 | 写 `reservation(HELD, expires_at)` | `HELD → CONSUMED` | `HELD → RELEASED` | 过期时间覆盖业务决策 deadline、最大重试/对账窗口和时钟/清理余量 |
+| 支付 | Authorization（信用卡授权） | Capture | Void | 有效期和可撤销语义由支付渠道当前契约决定 |
+| 邮件 | 写入延迟 outbox | 到约定发送点发送 | 发送前取消记录 | 延迟来自业务可接受的通知 deadline，不是固定 120 秒；发送后只能发更正/撤回请求，不能真正回滚 |
+| 外部批任务 | 预检输入 + 预留预算/配额 | 提交不可撤销任务 | 提交前释放预留 | 价格、周转与取消语义按具体提供商核对 |
 
-⚠️ **预留必须有超时清理器**，否则预留泄漏（reservation leak）会把库存"锁死"。清理器本身是一个扫表任务：`WHERE state='HELD' AND expires_at < now()`，每 30 秒跑一次。
+⚠️ **预留必须有超时清理与对账**，否则 reservation leak 会把资源锁死。扫描频率从可用容量与释放 SLO 倒推；清理也要用条件更新与版本，避免和 Confirm/Cancel 并发覆盖。
 
 ### 隔离性缺失的三种异常与对策
 
@@ -243,9 +243,9 @@ sequenceDiagram
 
 ---
 
-## 3. Outbox + Saga 编排器：可抄的实现
+## 3. Outbox + Saga 编排器：协议骨架
 
-Outbox 本身在 [`01-building-blocks/03`](../01-building-blocks/03-messaging-and-streams.md) 讲过。这里是它和 Saga 状态机拼在一起的样子 —— **注意：saga 状态推进和事件发出必须在同一个本地事务里**，否则你只是把双写问题（dual-write problem）从业务层挪到了编排层。
+Outbox 本身在 [`01-building-blocks/03`](../01-building-blocks/03-messaging-and-streams.md) 讲过。下面是帮助审查正确性的**伪代码骨架，不是可直接运行的 SDK**。它要同时满足：短事务 claim、网络调用在事务外、租约可接管、旧 worker 的完成被 fencing、每个 action 使用稳定幂等键，以及 saga 状态推进和 outbox 事件在同一本地事务提交。
 
 ```sql
 -- 编排器的唯一真相源
@@ -253,91 +253,166 @@ CREATE TABLE saga_instance (
   saga_id       uuid PRIMARY KEY,
   saga_type     text        NOT NULL,       -- 'order_fulfillment@v3'
   business_key  text        NOT NULL,       -- 订单号 → 业务级幂等
-  state         text        NOT NULL,       -- RUNNING | COMPENSATING | DONE | NEEDS_HUMAN
+  state         text        NOT NULL,       -- RUNNING | COMPENSATING | UNKNOWN | DONE | COMPENSATED | NEEDS_HUMAN
   step_cursor   int         NOT NULL DEFAULT 0,
   ctx           jsonb       NOT NULL,       -- 各步骤产出的上下文
   attempt       int         NOT NULL DEFAULT 0,
   next_run_at   timestamptz NOT NULL DEFAULT now(),
+  lease_owner   text,
+  lease_until   timestamptz,
+  lease_epoch   bigint      NOT NULL DEFAULT 0, -- 每次接管 +1，作为 fencing token
   updated_at    timestamptz NOT NULL DEFAULT now(),
   UNIQUE (saga_type, business_key)          -- 同一订单只会有一个 saga
 );
 
 CREATE TABLE saga_step (                    -- step_id 如 'T2.AuthorizePayment'
-  saga_id uuid, step_id text, status text,  -- SUCCEEDED | FAILED | COMPENSATED
-  idem_key text NOT NULL, result jsonb,     -- idem_key = 下发给下游的幂等键
-  PRIMARY KEY (saga_id, step_id));
+  saga_id uuid, step_id text,
+  action text CHECK (action IN ('forward','compensate')),
+  status text,                              -- SUCCEEDED | REJECTED | UNKNOWN
+  idem_key text NOT NULL, result jsonb,
+  lease_epoch bigint NOT NULL,
+  PRIMARY KEY (saga_id, step_id, action));  -- forward 与 compensate 绝不能共用一行/key
 
-CREATE INDEX ON saga_instance (next_run_at) -- 调度索引：只扫待执行的
-  WHERE state IN ('RUNNING','COMPENSATING');
+CREATE INDEX ON saga_instance (next_run_at, lease_until)
+  WHERE state IN ('RUNNING','COMPENSATING','UNKNOWN');
 ```
 
 ```python
-IDEM = lambda saga_id, step_id: sha256(f"{saga_id}:{step_id}").hexdigest()
-#      ↑ 幂等键必须由 (saga_id, step_id) 派生，不能用 uuid4()。
-#        "客户端每次重试生成新 UUID" 是幂等失效的头号原因。
+def action_key(saga_id, step_id, action):
+    # 只要“同一逻辑 action 跨重试稳定”即可。可以确定性派生，也可以在首次创建时
+    # 生成随机 UUID 并持久化；错误是每次 retry 都生成新键。
+    return sha256(f"{saga_id}:{step_id}:{action}").hexdigest()
 
-def tick(saga_id):
-    # 1) 取行级锁，防止多个 worker 同时推进同一个 saga
+def claim_next(worker_id, lease_interval):
+    # 数据库时钟决定 lease；短事务结束后才做网络调用。
     with db.tx() as tx:
-        s = tx.query("SELECT * FROM saga_instance WHERE saga_id=%s FOR UPDATE SKIP LOCKED", saga_id)
-        if not s or s.state not in ("RUNNING", "COMPENSATING"):
-            return
-        step = PLAN[s.saga_type][s.step_cursor]
+        return tx.query_one("""
+          WITH candidate AS (
+            SELECT saga_id
+            FROM saga_instance
+            WHERE state IN ('RUNNING','COMPENSATING','UNKNOWN')
+              AND next_run_at <= now()
+              AND (lease_until IS NULL OR lease_until < now())
+            ORDER BY next_run_at
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+          )
+          UPDATE saga_instance s
+          SET lease_owner = %(worker)s,
+              lease_until = now() + %(lease)s,
+              lease_epoch = lease_epoch + 1,
+              updated_at = now()
+          FROM candidate c
+          WHERE s.saga_id = c.saga_id
+          RETURNING s.*
+        """, worker=worker_id, lease=lease_interval)
 
-    # 2) 副作用在事务之外执行（绝不在持有 DB 事务时做网络调用）
-    direction = "forward" if s.state == "RUNNING" else "compensate"
+def tick(worker_id):
+    s = claim_next(worker_id, lease_for_current_step())
+    if not s:
+        return
+
+    # RUNNING 的 cursor 指向下一个正向步骤；COMPENSATING 指向下一个要撤销的步骤。
+    action = (s.ctx["unknown_action"] if s.state == "UNKNOWN" else
+              "forward" if s.state == "RUNNING" else "compensate")
+    step = PLAN[s.saga_type][s.step_cursor]
+    idem_key = action_key(s.saga_id, step.id, action)
+
+    # 网络在事务外。lease_epoch 只有在下游也原子保存并拒绝较小 epoch 时才形成端到端 fencing；
+    # 否则至少要求下游按 idem_key 返回第一次 action 的结果。
     try:
-        result = step.invoke(direction, s.ctx, idem_key=IDEM(saga_id, step.id))
-        ok = True
-    except TransientError:
-        ok, result = None, None            # 稍后重试
-    except BusinessError as e:
-        ok, result = False, e.payload      # 业务性失败 → 触发补偿
+        if s.state == "UNKNOWN":
+            outcome = step.lookup_by_idempotency_key(idem_key)  # 只查询，不重做副作用
+        else:
+            outcome = step.invoke(action, s.ctx,
+                                  idem_key=idem_key,
+                                  fence=s.lease_epoch)
+        # 每条路径都返回同一结构 Outcome(kind, result)。
+        # 业务终态 kind: SUCCEEDED | BUSINESS_REJECTED | KNOWN_NOT_EXECUTED
+    except AmbiguousTimeout:
+        if step.supports_idempotency:
+            outcome = Outcome(kind="RETRY_SAME_KEY", result={})
+        elif step.supports_lookup:
+            outcome = Outcome(kind="UNKNOWN_RECONCILE", result={})
+        else:
+            outcome = Outcome(kind="UNKNOWN_NEEDS_HUMAN", result={})
+    except TransientBeforeSend:
+        outcome = Outcome(kind="RETRY_SAME_KEY", result={})
 
-    # 3) 状态推进 + 事件发出：同一事务，原子
+    # 旧 worker 即使暂停后恢复，也只能在 owner+epoch 仍匹配时提交结果。
     with db.tx() as tx:
-        if ok is None:                                        # 瞬时失败：退避
-            backoff = min(2 ** s.attempt, 300) * jitter()     # 上限 300s
-            tx.exec("UPDATE saga_instance SET attempt=attempt+1, "
-                    "next_run_at=now()+%s*interval '1s', updated_at=now() "
-                    "WHERE saga_id=%s", backoff, saga_id)
-            if s.attempt + 1 >= step.max_attempts:
-                escalate(tx, saga_id, step)                   # RUNNING→COMPENSATING
-                                                              # 或 →NEEDS_HUMAN（retriable 段）
+        current = tx.query_one("""
+          SELECT * FROM saga_instance
+          WHERE saga_id=%s AND lease_owner=%s AND lease_epoch=%s
+          FOR UPDATE
+        """, s.saga_id, worker_id, s.lease_epoch)
+        if not current:
+            return  # lease 已被接管；丢弃迟到结果
+
+        if outcome.kind in ("RETRY_SAME_KEY", "UNKNOWN_RECONCILE"):
+            delay = random.uniform(0, min(step.retry_cap,
+                                         step.retry_base * 2 ** current.attempt))
+            # UNKNOWN_RECONCILE 由对账 handler 运行，不再次调用原副作用。
+            schedule_retry_or_reconcile(tx, current, outcome, delay)
+            release_lease_with_fence(tx, current, worker_id, s.lease_epoch)
             return
 
-        tx.exec("INSERT INTO saga_step(saga_id,step_id,status,idem_key,result) "
-                "VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                saga_id, step.id, "SUCCEEDED" if ok else "FAILED",
-                IDEM(saga_id, step.id), result)
+        if outcome.kind == "UNKNOWN_NEEDS_HUMAN":
+            next_state, next_cursor = "NEEDS_HUMAN", current.step_cursor
+        elif action == "forward" and outcome.kind == "SUCCEEDED":
+            next_cursor = current.step_cursor + 1
+            next_state = "DONE" if next_cursor == len(PLAN[current.saga_type]) else "RUNNING"
+        elif action == "forward":
+            # 只有“已知未执行/业务拒绝”才能进入补偿；pivot 后失败则保持 unresolved。
+            next_cursor = current.step_cursor - 1
+            next_state = ("FAILED_CLEAN" if next_cursor < 0 else
+                          "NEEDS_HUMAN" if step.is_after_pivot else "COMPENSATING")
+        elif outcome.kind == "SUCCEEDED":
+            next_cursor = current.step_cursor - 1
+            next_state = "COMPENSATED" if next_cursor < 0 else "COMPENSATING"
+        else:
+            # 补偿业务失败不能把 cursor 减一后假装完成。
+            next_cursor, next_state = current.step_cursor, "NEEDS_HUMAN"
 
-        forward = (s.state == "RUNNING" and ok)
-        nxt, st = (s.step_cursor + 1, "RUNNING") if forward \
-             else (s.step_cursor - 1, "COMPENSATING")         # 失败或补偿中 → 逆序
-        if nxt < 0: st = "COMPENSATED"
-        if nxt >= len(PLAN[s.saga_type]): st = "DONE"
+        tx.exec("""
+          INSERT INTO saga_step(saga_id,step_id,action,status,idem_key,result,lease_epoch)
+          VALUES (%s,%s,%s,%s,%s,%s,%s)
+          ON CONFLICT (saga_id,step_id,action) DO UPDATE
+            SET status=excluded.status, result=excluded.result,
+                lease_epoch=excluded.lease_epoch
+        """, current.saga_id, step.id, action, outcome.kind,
+             idem_key, json(outcome.result), s.lease_epoch)
 
-        tx.exec("UPDATE saga_instance SET step_cursor=%s, state=%s, attempt=0, "
-                "ctx=ctx||%s, next_run_at=now(), updated_at=now() WHERE saga_id=%s",
-                nxt, st, json(result or {}), saga_id)
+        changed = tx.exec("""
+          UPDATE saga_instance
+          SET step_cursor=%s, state=%s, attempt=0, ctx=ctx||%s,
+              next_run_at=now(), lease_owner=NULL, lease_until=NULL, updated_at=now()
+          WHERE saga_id=%s AND lease_owner=%s AND lease_epoch=%s
+        """, next_cursor, next_state, json(outcome.result or {}),
+             current.saga_id, worker_id, s.lease_epoch)
+        assert changed == 1
 
-        # ★ 关键：领域事件写进 outbox，与状态推进同一事务
+        # 状态推进与事件发布意图同一本地事务；Relay 仍是 at-least-once。
         tx.exec("INSERT INTO outbox(id,aggregate_id,event_type,payload) VALUES (%s,%s,%s,%s)",
-                ulid(), s.business_key, f"saga.{step.id}.{st}", json(result or {}))
+                new_event_id(), current.business_key,
+                f"saga.{step.id}.{action}.{next_state}", json(outcome.result or {}))
 ```
+
+长步骤要用 `WHERE lease_owner=? AND lease_epoch=?` 心跳续租；续租失败就停止产生新工作。**租约过期不代表旧 worker 已死**，所以最终状态更新必须带 fencing 条件，外部副作用还必须有稳定幂等键或让下游验证 epoch。`UNKNOWN` 对账也要有 owner、deadline 和无法自动判定时的人工出口。
 
 **卡住的 Saga 检测（必须有，不是可选）：**
 
 ```sql
 SELECT saga_id, saga_type, state, step_cursor, now() - updated_at AS stuck_for
 FROM saga_instance
-WHERE state IN ('RUNNING','COMPENSATING')
-  AND updated_at < now() - interval '15 minutes'
+WHERE state IN ('RUNNING','COMPENSATING','UNKNOWN','NEEDS_HUMAN')
+  AND updated_at < now() - $workflow_stuck_budget
 ORDER BY updated_at;
--- 告警阈值：任何 saga 卡超过 p99 时长的 10 倍
+-- 阈值来自该 workflow 的 completion/compensation SLO 和业务 deadline；
+-- UNKNOWN、NEEDS_HUMAN、租约连续接管次数应单独告警。
 ```
 
-**撞墙条件（scaling wall）**：单表轮询编排器在 **~2,000 saga/s** 或 saga_instance 表超过千万活跃行时开始退化（`next_run_at` 索引膨胀、`FOR UPDATE SKIP LOCKED` 竞争）。信号是 tick 延迟 p99 上升而 CPU 不高。到这里换分区表 + 按 `hash(saga_id)` 分片 worker，或换成 durable execution 引擎（持久化执行：引擎把每一步的输入和输出都记进日志，进程崩溃后照日志重放到崩溃点继续往下跑，重放过程中已经做过的外部调用不会再做第二次）—— [Temporal](https://temporal.io/)、[Restate](https://restate.dev/)、DBOS。
+**撞墙信号**：claim 查询/锁等待和 tick 排队 p99 上升、活跃行/索引膨胀、清理跟不上或单库恢复时间越过目标。阈值取决于行宽、索引、事务争用、硬件和批量，必须压测；需要时按 `hash(saga_id)` 分区表与 worker，或评估 durable execution 引擎。即使引擎能重放历史，外部副作用仍需理解它提供的幂等/活动语义，不能从“durable”直接推导端到端只执行一次。
 
 ---
 
@@ -411,8 +486,8 @@ ORDER BY updated_at;
 | 级别 | 形态 | 复杂度 | 何时用 |
 |---|---|---|---|
 | L0 | 同一个模型读写 | 0 | 默认 |
-| L1 | 同库，读写用不同的对象/查询（读走只读副本） | 低 | **80% 的"我们要 CQRS"其实只需要这个** |
-| L2 | 读模型在另一个存储（ES / ClickHouse / 物化视图 materialized view），异步投影 | 中 | 读写负载特征差异 10× 以上；读需要完全不同的索引形态 |
+| L1 | 同库，读写用不同的对象/查询（也可读只读副本） | 低 | 只需代码模型分离、索引或查询优化时 |
+| L2 | 读模型在另一个存储（ES / ClickHouse / 物化视图 materialized view），异步投影 | 中 | 读需要不同索引/存储形态，且收益经负载或查询计划证明 |
 | L3 | L2 + 事件溯源 | 高 | 需要时间旅行（time travel）、需要重建任意历史读模型 |
 
 **CQRS ≠ 事件溯源。** 可以只做 CQRS 不做 ES（从 CDC 建读模型 —— change data capture，变更数据捕获：订阅数据库自己的变更日志，把每一行的增删改实时变成一条事件流，见 [`01-building-blocks/03`](../01-building-blocks/03-messaging-and-streams.md)），也可以只做 ES 不做 CQRS。混为一谈是这个话题最常见的误解。
@@ -441,7 +516,7 @@ ORDER BY updated_at;
 |---|---|---|---|
 | **乐观 UI（optimistic UI）** | 前端本地先渲染写入结果 | 前端要维护"待确认"状态与回滚 | 单条记录的创建/编辑，**首选** |
 | **命令返回结果** | POST 直接返回投影后的完整对象，前端拿它填充 | 命令侧要能算出读侧形状 | 单对象场景，与乐观 UI 组合最好 |
-| **粘性读主（sticky read from primary）** | 写后 N 秒内，该用户的读走写侧/主库 | 主库承担读流量；需要会话粘性（session affinity：同一个用户的后续请求在一段时间内固定落到同一个节点/同一个库） | N = 投影 p99 × 3，典型 2–5 秒 |
+| **写后读权威侧** | 在业务陈旧预算内，该会话的相关读走写侧/主库 | 主库承担读流量；必须由写标记/令牌路由，单纯粘到同一应用实例不够 | 窗口来自投影 lag 分布与用户体验预算；不能固定取 p99×3 |
 | **版本水位（consistency token）** | 写返回一个 token，读带上，投影未追上就等 | 最正确，但把异步变回半同步 | 强需求场景（金额、权限变更） |
 | **同步投影关键路径** | 关键的那 1 个读模型在写事务内同步更新 | 放弃了 CQRS 的一半好处 | 只对"必须立刻可见"的那一张视图用 |
 
@@ -453,13 +528,11 @@ POST /orders                       →  201 Created
 
 GET /orders?after=orders_view:918273
    投影器当前 offset ≥ 918273  → 正常返回
-   否则                        → 最多等待 200 ms（轮询/notify）
-                                 超时仍未追上 → 200 + X-Stale: true，前端显示"同步中"
+   否则                        → 最多等待本接口分配的 consistency budget
+                                 超时仍未追上 → 明确返回 stale/同步中语义
 ```
 
-**参数**：等待上限 **200–500 ms**。超过这个数，你只是把异步系统改造成了一个更慢的同步系统 —— 那不如一开始就别做 L2。
-
-**目标线**：`projection_lag` p99 < 500 ms；> 2 s 时用户可感知；> 30 s 应该触发页面级降级（graceful degradation）提示，而不是让用户看到不存在的数据。
+等待上限由端到端接口 SLO、写后立即读取的业务价值和投影容量决定。分别监控 projection lag 的分布、等待超时率和返回 stale 的比例；越过用户可见的新鲜度目标时触发页面级降级，而不是套固定毫秒数。
 
 ---
 
@@ -467,8 +540,8 @@ GET /orders?after=orders_view:918273
 
 | 情况 | 为什么不要 |
 |---|---|
-| 只是想要审计日志 | **写一张 append-only 审计表就够了**，成本是 ES 的 1/50。ES 的价值是"从事件重建任意状态"，审计不需要这个 |
-| 只是想要读写分离的性能 | 只读副本（read replica，L1）能解决 90% 的问题，且零一致性成本 |
+| 只是想要审计日志 | 通常先评估 append-only 审计表；ES 的价值是从事件重建状态，成本差异要按本系统估算 |
+| 只是想要读扩展或查询优化 | 先评估索引、缓存、物化视图或只读副本；副本仍有复制延迟，并非“零一致性成本” |
 | 领域本身是 CRUD | 用户资料、配置项、字典表。没有有意义的"状态变迁史"，事件流只是 UPDATE 的复述 |
 | 团队没做过 | ES 的错误无法回滚 —— 事件建模错了（粒度太粗/太细）之后，历史事件永远错着 |
 | 有强 GDPR 删除义务且没做过 crypto-shredding | 上线后再补，是全量重加密 |
@@ -478,9 +551,9 @@ GET /orders?after=orders_view:918273
 
 1. **全系统事件溯源。** ES 是**局部**技术，用在那 1–2 个真正有复杂状态机的聚合上（订单、账户余额、工单）。给"用户偏好设置"做 ES 是纯亏损。
 2. **为每个 CRUD 操作发领域事件。** `UserProfileFieldUpdated` 不是领域事件，是 UPDATE 的转述。事件应该对应**业务上有名字的事情**（`OrderCancelled`、`SubscriptionDowngraded`）。如果你的事件名里有 "Updated"/"Changed"，先停下来想想。
-3. **CQRS 但没有重建能力。** 投影器上线三个月后必然有 bug 导致读模型脏。没有一键重建，你只能手写修数据 SQL —— 而写侧还在持续产生新事件。
+3. **CQRS 但没有重建能力。** 投影器迟早可能因 bug、schema 变更或漏事件让读模型变脏。没有可验证的重建流程，只能冒险手写修数据。
 
-**CQRS 税（CQRS tax）的量化**：每个额外的读模型 ≈ 一个消费者进程 + checkpoint 管理 + 重建工具 + 滞后监控 + schema 版本 ≈ **0.1–0.2 个工程师/年**的持续成本（对照 [`01-microservices`](01-microservices-vs-modular-monolith.md) 里"每个服务 0.2–0.5 人年"）。5 个读模型 = 一个人的一半时间。
+**CQRS 税**：每个额外读模型都需要消费者、checkpoint、重建工具、滞后监控、schema 演进与 owner。用团队真实的 on-call、部署与修复数据估算持续成本，不存在通用的人年换算。
 
 ---
 
@@ -505,7 +578,7 @@ cmd:PlaceOrder (corr=req_a1b2)                         ← 重建出来的因果
       └─ SearchIndexUpdated    (caus=OrderCreated)     ← 编舞分支，与主流程无关
 ```
 
-发现事件环（event cycle，A→B→C→A）就是在这棵树上找重复的 `event_type` 路径。生产上把"同一 correlation_id 内事件数 > 100"设成告警，那基本就是环。
+发现事件环（event cycle，A→B→C→A）可以从因果图中寻找重复路径。告警应结合流程定义的最大分支/事件预算、速率和深度；合法批处理也可能有很多事件，不能把固定 100 当成环的证明。
 
 ### 重放工具：三种重放，风险完全不同
 
@@ -520,41 +593,41 @@ cmd:PlaceOrder (corr=req_a1b2)                         ← 重建出来的因果
 
 ### 指标（缺一不可）
 
-| 指标 | 健康值 | 异常含义 |
+| 指标 | 如何设目标 | 异常含义 |
 |---|---|---|
-| `saga_completion_rate` | > 99.5% | 下降 = 某个下游在批量失败 |
-| `saga_compensation_rate` | < 1%（业务相关） | 突增 = 上游校验失效或下游容量不足 |
+| `saga_completion_rate` | 按流程成功 SLO 与业务拒绝口径 | 下降可能是下游故障或业务输入变化 |
+| `saga_compensation_rate` | 建立按 saga 类型/原因的基线 | 突增可能是上游校验失效或下游容量不足 |
 | `saga_duration` p99 | 按流程定 SLO | 上升先于失败出现，是最好的先行指标（leading indicator） |
 | `saga_stuck_count` | 0 | > 0 必须有人看，这里是钱漏出去的地方 |
-| `projection_lag_seconds` p99 | < 0.5 s | > 2 s 用户可感 |
-| `dlq_depth` | 0 | 见 [`01-building-blocks/03`](../01-building-blocks/03-messaging-and-streams.md) |
+| `projection_lag_seconds` p99 | 按读模型新鲜度 SLO | 越过预算会破坏 UX/一致性承诺 |
+| `dlq_depth` | 按积压年龄、数量和处理 SLO | 见 [`01-building-blocks/03`](../01-building-blocks/03-messaging-and-streams.md) |
 | `event_ordering_violations` | 0 | 同聚合版本号回退 = 分区键错了 |
 
-### Agent 系统：每个 Agent 循环都是一个 Saga
+### 专项选读：Agent 工作流与 Saga
 
-这是 2025–2026 最有价值的迁移：**Agent 的多步工具调用在结构上就是 saga，而且它的补偿问题更糟**——
+部分 Agent 的多步工具调用可以用 Saga/持久工作流建模，但纯读取、可重算的推理循环不必强行套 Saga。关键是识别有状态与外部副作用的步骤：
 
 - 工具调用的副作用（写文件、发 PR、调 API、花掉 token）**大多不可补偿**，而且 Agent 会**自己决定**调用顺序，你无法像订单流程那样静态地把 pivot 排到最后。
 - **对策**：不可逆动作的清单必须**设计期静态定义**，运行时不能交给模型自判；这类动作统一走人在回路（human-in-the-loop）审批。按 Five Eyes 五国联合指南 [《Careful Adoption of Agentic AI Services》](https://www.cisa.gov/resources-tools/resources/careful-adoption-agentic-ai-services)（2026-05）的口径，这是**必需控制项**而非可选增强。
-- **幂等键规范化为 `(workflow_id, step_id)`**：与上面 Saga 的 `IDEM(saga_id, step_id)` 完全同构。Agent 重试/恢复时不会重复扣款。
+- **幂等键作用域至少覆盖 `(workflow_id, step_id, action)`**，并记录请求指纹与保留窗口；forward 和 compensate 不能共用 key。它降低重复副作用风险，但仍要处理下游不支持幂等和结果未知的情况。
 - ⚠️ **checkpoint ≠ durable execution**（这一点存在明确争议）：一派认为配了 checkpointer 就能任意点 pause/resume 即为 durable；另一派（如 Diagrid）认为状态快照恢复缺少确定性重放（deterministic replay）与精确一次副作用（exactly-once side effects），不足以支撑生产工作流。**分歧的根源是对 "durable" 的定义不同**：状态快照恢复 vs 执行历史重放。工程判据很简单：**你的恢复路径会不会重复执行外部副作用？** 会 → 你需要的是 journal + replay 或幂等键，不是 checkpoint。
 
 ---
 
 ## 这一章的三句话
 
-1. **Saga 不是"分布式事务的替代品"，它是明确放弃了隔离性（I）的补偿流程。** 中间状态一定会被别人看到，所以"订单已付款但还没发货时页面显示什么"是产品必须先回答的问题，不是等出事再解释的技术细节。
-2. **一个 Saga 里只能有一个回不了头的步骤，而且它必须尽可能靠后。** 做不到就用预留（TCC）把不可补偿的操作变成可补偿的 —— 把"发邮件"延迟 120 秒入队，就足以让它重新变得可撤销。
-3. **事件溯源和 CQRS 是两个独立决策，大多数团队两个都不该选。** 只想要审计就写一张 append-only 审计表，只想要读写分离就上只读副本，代价是它们的 1/50；ES 的真正价值只有一个 —— 从事件重建任意时刻的任意状态。
+1. **Saga 整体不是一个全局 ACID 事务。** 本地步骤可有 ACID，但全局原子回滚与隔离通常不存在；中间状态、未知结果、补偿失败与人工决议都是产品状态。
+2. **尽量把不可逆步骤后移并形成清晰 pivot；有多个不可逆效果时显式建模部分完成。** TCC/预留能在渠道语义允许时扩大可取消窗口，过期与通知延迟必须来自业务 deadline，而不是固定秒数。
+3. **事件溯源和 CQRS 是两个独立决策。** 只需要审计、读扩展或不同查询形状时，先比较更简单的审计表、索引/缓存/副本/物化视图；只有需要以事件为真相源和可验证重建时才承担 ES 的成本。
 
 ---
 
 ## 面试官会追问
 
-1. Saga 和 2PC 的区别是什么？Saga 牺牲了 ACID 的哪一个字母，会产生哪三种异常？
+1. Saga 和 2PC 的区别是什么？为什么 Saga 整体既缺少全局隔离，也没有数据库式全局原子回滚？
 2. 你的订单流程里"发货"这一步没法补偿，怎么设计步骤顺序？pivot 是什么？
-3. 补偿事务失败了怎么办？（→ 不允许"补偿失败"这个终态，只能进人工队列）
-4. 幂等键从哪来？为什么不能用 `uuid4()`？
+3. 补偿事务失败了怎么办？如何保持 unresolved 状态并形成可审计的业务决议？
+4. 幂等键的作用域是什么？随机 UUID 在什么条件下完全有效，什么情况下会失效？
 5. 事件溯源系统里，用户要求删除个人数据，怎么做？crypto-shredding 之后还有哪些地方留着明文？
 6. 5 亿条事件的读模型要重建，需要多久？这个数字影响你的什么决策？
 7. 用户保存后跳转，看不到自己刚写的数据，你有几种解法？各自代价是什么？
@@ -564,4 +637,6 @@ cmd:PlaceOrder (corr=req_a1b2)                         ← 重建出来的因果
 
 ---
 
-**下一篇** → [03-multi-tenancy.md](03-multi-tenancy.md)
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**目录顺读下一篇** → [04-api-design-and-versioning.md](04-api-design-and-versioning.md)：把工作流的幂等、并发与异步状态落实为 API 契约。

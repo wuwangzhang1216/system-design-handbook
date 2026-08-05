@@ -21,12 +21,12 @@
 
 | 概念 | 一句话 | 详见 |
 |---|---|---|
-| ML 系统的失败方式 | 它坏掉时返回 200 OK：错误率不变、延迟不变，只有分数偏了 | [08/01 §4](01-ml-system-overview.md) |
-| 制品与不可变发布 | 构建产物一旦生成就不再改字节，"部署"只是把指针指向某个已存在的产物 | [03/05 §1](../03-saas-platform/05-release-engineering.md) |
-| 渐进式交付 | 先切 1% 流量、盯指标、再逐档放大，出问题只烧掉这一档的用户 | [03/05 §3](../03-saas-platform/05-release-engineering.md) |
+| ML 系统的失败方式 | 它坏掉时返回 200 OK：错误率不变、延迟不变，只有分数偏了 | [08/01 §4](01-ml-system-overview.md#4-ml-系统特有的失败模式清单) |
+| 制品与不可变发布 | 构建产物一旦生成就不再改字节，"部署"只是把指针指向某个已存在的产物 | [03/05 §1](../03-saas-platform/05-release-engineering.md#1-部署--发布) |
+| 渐进式交付 | 先切 1% 流量、盯指标、再逐档放大，出问题只烧掉这一档的用户 | [03/05 §3](../03-saas-platform/05-release-engineering.md#3-渐进式交付progressive-delivery) |
 | 对象存储的语义 | 对象整体覆盖写、没有真目录、单对象读带宽要靠并发范围读堆出来 | [06/17](../06-case-studies/17-object-storage.md) |
 | 读放大 | 为了拿到真正需要的那些字节，实际从设备/网络上读了多少倍 | [01/01](../01-building-blocks/01-storage-engines.md) |
-| 冷启动 | 进程刚起来时缓存和显存都是空的，这段时间的延迟和稳态完全是两条曲线 | [01/02 §2](../01-building-blocks/02-caching.md) |
+| 冷启动 | 进程刚起来时缓存和显存都是空的，这段时间的延迟和稳态完全是两条曲线 | [01/02 §2](../01-building-blocks/02-caching.md#2-缓存模式) |
 
 **这一章要回答的问题**
 
@@ -138,17 +138,17 @@ Registry 只有一个作用：**把"字节"和"关于字节的事实"分开存�
 作业一结束、产生它们的上下文就没了。所以正确做法不是"上线前补一份 model card"，
 而是**训练作业在退出前自己把这些字段写出来，写不出来就让作业失败**。
 
-**法规把它变成了硬约束。** EU AI Act 的 [Annex XI](https://artificialintelligenceact.eu/annex/11/)
-（通用目的模型提供者的技术文档清单）要求记录架构与参数量、训练数据的类型/来源/清洗过滤方法/数据点数量、
+**对落入适用范围的通用目的 AI 模型（GPAI）提供者，法规会把部分字段变成硬约束。** EU AI Act 的 [Annex XI](https://artificialintelligenceact.eu/annex/11/)
+要求记录架构与参数量、训练数据的类型/来源/清洗过滤方法/数据点数量、
 **训练算力（如 FLOPs）、训练时长、已知或估算的能耗**。时间线：GPAI 义务 **2025-08-02** 起适用，
 **2026-08-02** 起委员会可直接索要文档并执法，存量模型 **2027-08-02** 前合规；
-罚则上限 **€15M 或全球营业额 3%**（Art. 101，[实施时间表](https://artificialintelligenceact.eu/implementation-timeline/)）。
+罚则上限 **€15M 或全球营业额 3%**（Art. 101，[实施时间表](https://artificialintelligenceact.eu/implementation-timeline/)）。传统内部模型、下游部署者与开源例外的义务不同；实际适用范围、时间和文档要求应由法务按角色与模型类别确认。
 
 **工具现状（2026 年中）**：MLflow 3（[2025-06-11](https://mlflow.org/releases/3)）把 `LoggedModel`
 升为一等实体，可跨 experiment 检索，UI 有独立 Lineage tab。但**它强制的元数据只有
 tags / aliases / description / lineage，上表里的 `dataset_ref`、`git_commit`、`container_digest`
 都要你自己塞进 tag 或 param** —— 装了 MLflow 不等于有了血缘。开放标准侧 `OpenLineage` + `Marquez`
-是唯一有采纳度的采集标准，截至 2026 年中**未找到厂商中立的"模型血缘"标准 GA**。
+是当前较有生态采纳度的采集规范之一。截至 2026 年中，本文**未确认一个所有厂商共同采用、且专门覆盖模型血缘全语义的 GA 标准**；这只是检索快照，不表示其它元数据/血缘标准不存在，也不应成为锁定实现的理由。
 
 ---
 
@@ -196,8 +196,7 @@ Uber 在 2025-10-30 的[部署安全](https://www.uber.com/us/en/blog/raising-th
 
 ### 4.1 三个必须先算的量
 
-**大小的经验公式：≈ 10 字节/参数**（BF16 权重 2 B + Adam 优化器状态 FP32 约 8 B，
-来源 [AWS Storage Blog, 2025-06-16](https://aws.amazon.com/blogs/storage/architecting-scalable-checkpoint-storage-for-large-scale-ml-training-on-aws/)）。
+**先声明 checkpoint 包含什么。** 下表采用一个简化口径：BF16 权重 2 B/参数 + Adam 两个 FP32 moment 8 B/参数，合计约 10 B/参数（来源 [AWS Storage Blog, 2025-06-16](https://aws.amazon.com/blogs/storage/architecting-scalable-checkpoint-storage-for-large-scale-ml-training-on-aws/)）。若还保存 FP32 master weights、梯度、EMA、数据加载器或未分片副本，可能达到 12–20+ B/参数；纯推理权重则可能只有 0.5–4 B/参数。
 
 | 模型规模 | 权重(BF16) | 优化器状态 | **单副本 checkpoint** |
 |---|---|---|---|
@@ -217,7 +216,7 @@ Meta 训 Llama 3 405B 在 16,384×H100 上 **54 天遭遇 419 次非预期中断
 ⚠️ **这里有一处公开数据打架**：Epoch AI 的**估算模型**给出 checkpoint 开销占训练时间 **12–43%**；
 二手转述的 Llama 3.1 405B 口径却是"最优间隔 4 分钟、单次 **2.5 秒**、总开销 **2.1%**"
 （arXiv [2605.17821](https://arxiv.org/html/2605.17821)，**未在 Meta 一手文档核实**）。差两个数量级，
-合理推测后者已是异步 + 分片 + 本地暂存的结果。**做容量按 12–43% 口径，做优化目标按 2.1% 口径。**
+合理推测后者已是异步 + 分片 + 本地暂存的结果。两者的系统边界不同，不能一个拿来做容量、另一个拿来当统一目标。容量规划应使用自己测得的 checkpoint 大小、前后台写带宽、阻塞时间和故障率，并给最坏场景留余量。
 
 ### 4.2 分层写、异步写、以及恢复时的读放大
 
@@ -314,7 +313,7 @@ PyTorch **2.6 起默认 `weights_only=True`** 并使用受限 unpickler
 (b) **可 mmap 零拷贝、可按张量偏移并发读**。量级上，15 GB 权重用默认 HF loader 要
 **~48 s（0.32 GB/s，瓶颈是单线程读不是磁盘）**，换成按偏移并发读能压到 **~5–14 s（~2 GiB/s）**
 （[NVIDIA, 2025-09-16](https://developer.nvidia.com/blog/reducing-cold-start-latency-for-llm-inference-with-nvidia-runai-model-streamer)；
-九项冷启动拆解见 [08/03 §2](03-model-loading-and-warmup.md)）。
+九项冷启动拆解见 [08/03 §2](03-model-loading-and-warmup.md#2-冷启动的九项拆解每一项到底多少秒)）。
 **pickle 布局做不到这件事** —— 它的字节流必须顺序解释，没有"跳到第 k 个张量"这个操作。
 
 ⚠️ **safetensors 只封住了反序列化这一条边。** 权重仍可被投毒 / 植入后门，
@@ -340,7 +339,7 @@ PyTorch **2.6 起默认 `weights_only=True`** 并使用受限 unpickler
 **TorchScript 的坑是 `trace` 会把 Python 控制流固化**：`if seq_len > 512:` 在 trace 那次走了哪条分支，
 导出的图就永远走那条 —— 不报错，只在长序列上给出错误结果。
 **`torch.compile` 则不支持图序列化**，每次进程启动都要重编译，直接计入冷启动预算
-（39 s → 带缓存 10 s，见 [08/03 §2](03-model-loading-and-warmup.md)）。TensorRT engine 可持久化，
+（39 s → 带缓存 10 s，见 [08/03 §2](03-model-loading-and-warmup.md#2-冷启动的九项拆解每一项到底多少秒)）。TensorRT engine 可持久化，
 但**绑定 GPU 型号 + TensorRT 版本 + 输入形状集合**，换卡型必须重建 ⇒ 它属于 `runtime`，不属于 `weights`。
 
 ---
@@ -411,15 +410,15 @@ stateDiagram-v2
 | 转换 | 证据 | 批准者 | 失败回到 |
 |---|---|---|---|
 | `Registered → Validated` | 全量离线指标 + **slice 指标**（分人群/分地区，防"大盘涨、子群塌"）+ `metric_sigma` | 自动 | 停在 Registered |
-| `Validated → Shadow` | manifest 四项齐全；`container_digest` 可拉取；预热覆盖将要捕获的 batch size 集合（漏掉的形状线上第一次出现时走 eager 慢路径，见 [08/03 §3](03-model-loading-and-warmup.md)） | 自动 | Validated |
+| `Validated → Shadow` | manifest 四项齐全；`container_digest` 可拉取；预热覆盖将要捕获的 batch size 集合（漏掉的形状线上第一次出现时走 eager 慢路径，见 [08/03 §3](03-model-loading-and-warmup.md#3-预热跑什么跑多少次怎么算跑完了)） | 自动 | Validated |
 | `Shadow → Canary` | **在线/离线特征一致性**（把线上实际喂给模型的特征值与离线回填值逐条比对，不一致率必须收敛到接近 0，见 [08/06](06-feature-and-data.md)）+ 预测分布/校准无显著漂移 | 模型 owner | Validated |
 | `Canary → Production` | **按样本量推进，不按时间推进**；guardrail 未破 | owner + 一个非本人 reviewer | Deprecated（回滚） |
 | `Production → Deprecated` | 新版本已 100% | 自动 | — |
 | `Deprecated → Archived` | 超过保留期下界（§5 公式） | 自动，但需可审计 | — |
 
-**"按样本量不按时间"是这张表里最容易被抄错的一条。** 模型金丝雀的起步流量是 **1–5%**
-（不是服务发布常用的 25%），阶梯 `1% → 5% → 10% → 25% → 50% → 100%`，
-每一档的推进条件是**该档累积到足够样本量**（[GrowthBook, 2026-05-29](https://www.growthbook.io/insights/canary-releases-ai-models-what-changes-vs-traditional-software)）。
+**"按验证证据而非只按时间"是这张表里最容易被抄错的一条。** `1–5%` 起步、
+`1% → 5% → 10% → 25% → 50% → 100%` 是高流量模型的示例模板，不是固定阶梯；起点与档位由爆炸半径、ring、最小样本、标签延迟和回滚速度共同决定。
+每一档的推进条件是服务/数据门通过且该档累积到足够统计信息（[GrowthBook, 2026-05-29](https://www.growthbook.io/insights/canary-releases-ai-models-what-changes-vs-traditional-software)）。
 反例很好记：低流量产品用 1% 流量跑 48 小时可能只有 **~200 次交互** ——
 按时间推进等于在完全没有统计分辨率的情况下放到 100%。**按时间推进不是统计方法，只是一张排班表。**
 
@@ -445,7 +444,7 @@ stateDiagram-v2
 | 团队只有 1 个模型、月更一次，先上一套 registry 平台 | 运维成本 > 收益，且没人填字段 | **一个 S3 前缀 + 一张 Postgres 表**就够；等到"第 3 个模型"或"第 2 个团队"再升级 |
 | 为了"完整血缘"一次性改所有训练脚本 | 推不动，最后一个字段都没落地 | 先**强制 5 个字段**（`git_commit`、`dataset_ref`、`container_digest`、`hyperparams`、`metrics`），CI 里缺一个就让作业失败 |
 | 把 bit-wise 可复现（L2）当默认目标 | 训练慢 10–30%，换来的信息比"多跑 3 个种子报 σ"少 | 默认 L1；L2 只在取证/诉讼场景开 |
-| 把 registry 放进推理的关键读路径 | registry 的可用性成为推理的可用性上限 | 启动时解析一次 alias，之后进程内持有 digest；registry 挂掉不影响在线 |
+| 把 registry 放进每次推理的关键读路径 | registry 的可用性成为推理的可用性上限 | 发布控制面先把 alias 解析成不可变 digest 写入 rollout manifest；实例启动读 manifest 并校验 digest，避免 alias 切换期间新旧 Pod 随启动时刻混装 |
 | 用 MLflow 的 `Production` stage 当发布控制面 | **自 2.9.0 已弃用** | alias（`@champion`）+ tag |
 | 权重存进 Git / Git LFS | 仓库膨胀到不可 clone；LFS 配额与带宽费；没有并发范围读 | 对象存储 + 内容摘要，Git 里只放 manifest |
 | >100 卡规模还用同步 checkpoint | 一次 3 分钟停顿 = 200 GPU-hours，一天 48 次 = 9,600 GPU-hours | `dcp.async_save()` + process-based stager + plan caching |
@@ -481,4 +480,6 @@ stateDiagram-v2
 
 ---
 
-**下一篇** → [03-model-loading-and-warmup.md](03-model-loading-and-warmup.md)
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**ML Systems 专章顺读下一篇** → [03-model-loading-and-warmup.md](03-model-loading-and-warmup.md)

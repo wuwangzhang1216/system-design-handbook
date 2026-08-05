@@ -24,12 +24,12 @@ GPU 账单跟着涨到每月二十几万美元。财务来问的那天你才把�
 
 **先确认你能回答这三个问题**
 
-1. 利用率 80% 时的排队延迟是空载的多少倍？为什么这题里 GPU 只按 65% 利用率折算卡数？
-   答不出 → 先读 [`02-capacity-estimation.md` §3 排队论](../00-foundations/02-capacity-estimation.md)
+1. 在 M/M/1 近似里，利用率 80% 时平均响应时间是服务时间的 5 倍、纯排队约 4 倍；为什么这题只按 65% 目标利用率折算卡数？
+   答不出 → 先读 [`02-capacity-estimation.md` §3 排队论](../00-foundations/02-capacity-estimation.md#3-排队论queueing-theory为什么-80-利用率utilization是危险的)
 2. 一次请求串行打 3 个模型，每个 p99 都是 100 ms，端到端 p99 是多少？（不是 300 ms，也不是 100 ms）
-   答不出 → 先读 [00-concepts §3 p50/p90/p99](../00-foundations/00-concepts.md)、[00/01 §7 尾延迟放大](../00-foundations/01-fundamentals.md)
+   答不出 → 先读 [00-concepts §3 p50/p90/p99](../00-foundations/00-concepts.md#3-为什么平均值是骗人的p50--p90--p99)、[00/01 §7 尾延迟放大](../00-foundations/01-fundamentals.md#7-尾延迟放大tail-latency-amplification)
 3. 一个进程内常驻 20 GB 权重 + 一份编译缓存的服务，算有状态还是无状态？随便杀掉一台会发生什么？
-   答不出 → 先读 [00-concepts §9 有状态 vs 无状态](../00-foundations/00-concepts.md)
+   答不出 → 先读 [00-concepts §9 有状态 vs 无状态](../00-foundations/00-concepts.md#9-有状态-vs-无状态)
 
 **这道题会用到的构件**
 
@@ -41,6 +41,7 @@ GPU 账单跟着涨到每月二十几万美元。财务来问的那天你才把�
 | 准入控制、负载卸载、静态稳定性 | §4.4 排队而不是弹性；§5 镜像仓库挂了怎么办 | [`03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) §6、§10 |
 | KV cache、连续批处理、PD 分离（LLM 专用） | §4.3 为什么 LLM 的批处理是另一个世界，**本题不重复** | [`01-llm-serving-infra.md`](../04-ai-agent-systems/01-llm-serving-infra.md) §2、§3 |
 | SLI/SLO 与错误预算 | §2.2 延迟预算分解；§4.2 冷 / 热两条 SLO | [`01-slo-and-error-budget.md`](../05-reliability/01-slo-and-error-budget.md) §1、§3 |
+| ML serving 主线 | 本题的模型加载、动态批、性能优化与部署 | [`08/01`](../08-ml-systems/01-ml-system-overview.md) → [`08/03`](../08-ml-systems/03-model-loading-and-warmup.md) → [`08/04`](../08-ml-systems/04-online-inference.md) → [`08/05`](../08-ml-systems/05-inference-optimization.md) → [`08/09`](../08-ml-systems/09-model-deployment.md)；本题属于进阶综合题 |
 
 **本题新引入的术语**
 
@@ -92,7 +93,7 @@ GPU 账单跟着涨到每月二十几万美元。财务来问的那天你才把�
 | 1 | ★ **负载里 LLM 占多大比例？** | "先不考虑 LLM，主要是排序、CV、embedding" | LLM 是 iteration-level 调度 + KV cache 显存模型，和本题的 request-level 批处理是两套栈（见 [`04/01`](../04-ai-agent-systems/01-llm-serving-infra.md)）。混在一个池里两边都做不好 |
 | 2 | ★ **模型产物来自谁？跨信任边界吗？** | "公司内部多个团队，半可信" | 决定 GPU 共享方案：跨信任域只剩整卡或 MIG，同信任域才能用 MPS（§4.2） |
 | 3 | 模型数量与规模分布？长尾有多长？ | 300 个在线模型，最大 20 GB | 长尾形状直接决定卡数，见 §2.1 的 21× |
-| 4 | 延迟 SLO 是一条还是两条？ | "热模型 p99 80 ms，长尾可以放宽" | **只写一条 SLO 就没法做卸载池。**冷/热两条 SLO 是 §4.2 的前提 |
+| 4 | 延迟目标是一条还是两条？ | "热模型 p99 候选阈值 80 ms，长尾可以放宽" | **只写一条目标就没法做卸载池。**冷/热分别定义阈值，再把可燃尽 SLO 写成各自的阈值达标事件比例；这是 §4.2 的前提 |
 | 5 | 一次请求打几个模型、每个模型一次前向几个样本？ | 排序一次 300 个候选 | 这是本题的负载单位问题，见 §2.2 |
 | 6 | 平台管不管**预测质量**，还是只管可用性和延迟？ | "先管可用性，质量给业务团队" | 决定要不要建第二套监控。运维指标对质量退化完全失明（§4.5） |
 | 7 | 谁付这笔 GPU 账？要按团队分摊吗？ | "要，年底要出账" | 计量字段必须**第一天就埋**，事后补不回来（§4.6） |
@@ -158,23 +159,26 @@ CV 审核：              3,000 QPS × 1 张图           =     3,000 sample/s�
 排序：      1,200,000 ÷ 180,000 = 6.7 → ÷0.65（排队论目标利用率）= 10.3 → 11 卡
 CV：            3,000 ÷    900  = 3.3 → ÷0.65                    =  5.1 →  6 卡
 embedding：     8,000 ÷  1,800  = 4.4 → ÷0.65                    =  6.8 →  7 卡
-长尾：      共存后（§4.2 推导）                                          12 卡
-纯服务算力                                                             36 卡
-跨 AZ 冗余 ×1.6（接受单 AZ 故障时降级到 70% 容量，而不是买 2× 保 100%）  58 卡
+Tier A/B 在线核心（排序+CV+embedding）                                  24 卡
+核心池冗余/故障余量 ×1.6（场景假设，需按故障目标压测）                  39 卡
+长尾共存池                                                             12 卡
+  （3 卡 × 热/冷两池 × 2 AZ；这里已经包含跨 AZ，不能再乘 1.6）
+生产服务基数                                                             51 卡
 金丝雀池 6（§4.5 的显存账：v1+v2+激活 = 48 GB，一张卡放不下两个版本）    +6 卡
 预热池 8（§4.4 的公式：Tier A 突发 +50% ⇒ +6，另留 2 个覆盖故障替换）    +8 卡
   影子只镜像 Tier A 的 10% 流量（11 卡 × 10% ≈ 1.1 卡），与金丝雀池共用，不再单列
-合计 ≈ 72 张 L40S 级
+合计 ≈ 65 张 L40S 级
 
-成本：72 × $1.4/卡·小时 × 730 h = $73.6k/月（2026 量级，长约常有 40–60% 折扣，随时变动）
-      加控制面 / 对象存储 / 特征取数 / 可观测 ≈ $90k/月
-      月样本量 = 121 万/s × 峰谷 0.35 × 2.6e6 s = 1.1e12  ⇒ $0.08 / 百万样本
+成本：65 × $1.4/卡·小时 × 730 h = $66.4k/月（2026 场景价格，长约与地区会变）
+      控制面 / 对象存储 / 特征取数 / 可观测需按各自账单另加，不能用固定比例代替
+      月样本量 = 121 万/s × 平均/峰值负载因子 0.35 × 2.6e6 s = 1.1e12
+                ⇒ $66.4k ÷ 110 万个“百万样本” ≈ $0.060 / 百万样本
 GPU 时间利用率的诚实算法：
-      峰谷 0.35 × 目标利用率 0.65 = 23%（只看 36 张服务卡）
-      再摊到全部 72 张卡（含冗余 / 金丝雀 / 预热池）= 11%
+      平均/峰值负载因子 0.35 × 目标利用率 0.65 = 23%（按原始 36 卡工作负载等价口径）
+      再摊到全部 65 张卡（含冗余 / 金丝雀 / 预热池）≈ 13%
 ```
 
-**推论 3**：**11% 不是你做错了，是在线推理平台的物理形态。**冗余、金丝雀、预热池都不是浪费，是可用性和发布安全的价格。把利用率从 11% 拉到 30–40% 的唯一现实手段是**把离线 / 近线批量打分调度到低谷时段**（它没有延迟 SLO，可以被随时抢占）—— 不是"再压一压在线容量"。任何以"GPU 利用率只有 15%，砍掉一半机器"为出发点的重构，都会在下一次流量尖峰时把 p99 打穿。
+**推论 3**：本场景约 **13%** 的 GPU 时间利用率不必然说明容量算错；它包含冗余、金丝雀和预热池。提高利用率的一种高价值手段是把可抢占的离线/近线批量打分调度到低谷，但也可通过更细的池化、MIG/同信任域共卡和需求整形改善；任何削容量方案都要重放尖峰与故障场景验证 p99/goodput。
 
 ---
 
@@ -239,7 +243,7 @@ GPU 时间利用率的诚实算法：
 | B. 对象存储 + 单线程 loader | **47.99 s**（0.32 GB/s，瓶颈是**单线程读**不是磁盘，[NVIDIA 2025-09-16](https://developer.nvidia.com/blog/reducing-cold-start-latency-for-llm-inference-with-nvidia-runai-model-streamer)） | 简单，但白白浪费 8× 带宽 | 冷启动预算 < 60 s 时 |
 | C. **对象存储 + 并发流式加载**（本文） | **4.88 s**（S3、32 并发；`15 ÷ 4.88 ≈ 3.1 GB/s`，同上来源）；同等数据从对象存储拉取约 **10 s** vs registry 350 s | 需要 safetensors 布局；要自己管本地缓存淘汰 | 本地 NVMe 写满：250 模型 × 300 MB × 3 版本 ≈ 225 GB |
 
-**格式是准入门禁不是建议**：只接受 safetensors，**拒绝一切 pickle 系产物**。两个真实理由：(a) 反序列化过程不执行代码（纯 header + 张量字节）；(b) 可 mmap 零拷贝，正是方案 C 并发加载的前提。背景是 **CVE-2025-32434**：PyTorch ≤ 2.5.1 的 `torch.load()` **即使设了 `weights_only=True` 仍可远程代码执行**（CVSS v4 9.3）—— 此前被广泛推荐的"安全加载不可信模型"做法已被证伪；PyTorch 2.6 起该参数默认为 `True`，平台的版本下限就钉在 ≥ 2.6。⚠️ safetensors **只封住了反序列化边界**，不保证权重本身没被投毒或植入后门。
+**格式是准入门禁不是建议**：PyTorch 张量权重优先接受 safetensors，拒绝不可信 pickle。ONNX、TensorRT engine、XGBoost 等模型需各自的格式白名单、签名/摘要、版本兼容校验，并在隔离构建节点转换；不能把“只接受 safetensors”扩展成所有模型类型的统一规则。safetensors 支持 mmap 且反序列化不执行代码，但只封住这一边界，不保证权重没有后门。
 
 **alias 指针层是硬性的**：MLflow 的 Model Stages（None/Staging/Production/Archived）**自 2.9.0 起已弃用**，官方迁移到 **alias（如 `@champion`）+ tag**（[MLflow 3, 2025-06-11](https://mlflow.org/releases/3)）。服务代码里硬编码版本号的平台，回滚要走一次发布 —— 而回滚必须是秒级的指针重指。
 
@@ -249,13 +253,13 @@ GPU 时间利用率的诚实算法：
 
 **三条物理事实，本节全部结论都从它们推出来**：①**显存不能超售** —— GPU 没有 CPU 那种 swap / overcommit 语义，申请不到就是 OOM，没有"慢一点但能跑"这个中间态；②**每个进程一份 CUDA context，0.5–1 GB** —— 20 个独立进程等于在还没装权重之前就没了 10–20 GB；③**加载与卸载是秒级到分钟级的** —— 所以"按需换入换出"是一个有延迟代价的操作，必须写进 SLO。
 
-**共享方式对比**（机制细节见 [`04/01 §11`](../04-ai-agent-systems/01-llm-serving-infra.md)）：
+**共享方式对比**（机制细节见 [`04/01 §11`](../04-ai-agent-systems/01-llm-serving-infra.md#11-gpu-多租户与调度)）：
 
 | 方式 | 显存隔离 | 故障隔离 | 本题用在哪 | 致命限制 |
 |---|---|---|---|---|
 | 整卡独占 | ✅ | ✅ | Tier A 排序模型 | 长尾用它 = 250 卡 = $255k/月 |
 | **MIG**（硬件把一张卡切成几张小卡） | ✅ 硬件级 | ✅ | 跨租户唯一的**分卡**方案 | ⚠️ **不是所有新卡都有**：A100 / A30 / H100 / H200 一线支持，而**本文用的 L40S（Ada 架构）不支持 MIG**（[NVIDIA L40S 产品页](https://www.nvidia.com/en-us/data-center/l40s/)）—— 所以在本文的卡型上，跨租户只能整卡独占。profile **静态**，改配要重启；碎片浪费 10–30% |
-| **MPS**（多进程共享一个 CUDA context） | ❌ | ❌ | 同租户内的可信负载 | device plugin 下**显存按 replica 数均分**，超了 OOM；**一个进程执行 kernel 时异常退出会拖垮同卡其他进程** |
+| **MPS**（MPS server 复用 GPU 调度，多 client 各有 CUDA context；Volta+ 有独立 GPU 地址空间） | 有限，非硬分区 | 有限，故障可能影响同卡部分 client | 同信任域负载 | 不提供 MIG/整卡级强隔离；显存、带宽和故障域仍共享，必须设配额并做故障演练 |
 | time-slicing（驱动按时间片轮转） | ❌ | ❌ | 开发环境 | 抖动大；老卡唯一选择 |
 | **同进程多模型**（本文的 Tier C） | ❌（同一进程内） | ❌ | 长尾共存池 | 一个模型 OOM 拖垮同池全部模型 → 必须做 per-model 显存配额 |
 
@@ -288,7 +292,7 @@ thrash 判据：淘汰率 × 加载耗时 > 池 GPU 时间的 10% ⇒ 池已经�
 `evictions/min` 与冷命中率同时上升，说明工作集超过了池容量。**此时加卡是对的，加 batch、调 LRU 参数都是错的。**
 
 > **面试金句**
-> "CPU 可以超售，GPU 不行 —— 没有 swap，没有 overcommit，申请不到就是 OOM。所以在 GPU 上，你唯一能超售的资源是时间：按需换入换出。代价直接写进 SLO —— 热命中 30 毫秒、冷命中 2 秒、冷命中率不许超过 2%。只写一条 p99 的平台做不了共存，因为它没法承认'有些请求就是会慢七十倍'。"
+> "CPU 可以超售，GPU 不行 —— 没有 swap，没有 overcommit，申请不到就是 OOM。所以在 GPU 上，你能复用的主要资源是时间：按需换入换出。代价要写进分层 SLO —— 例如分别统计热命中在 30ms 内、冷命中在 2s 内的好事件比例，并限制冷命中占比。只写一条 p99 的平台做不了共存，因为它没法承认'有些请求就是会慢七十倍'。"
 > "You can overcommit CPU. You cannot overcommit GPU memory — there's no swap, no overcommit, you just OOM. So the only thing you can oversubscribe on a GPU is time: swap models in and out on demand. And you pay for that in the SLO, explicitly — thirty milliseconds warm, two seconds cold, cold-miss rate under two percent. A platform with a single p99 number can never do model co-location, because it has no way to admit that some requests are just going to be seventy times slower."
 
 ---
@@ -302,14 +306,15 @@ thrash 判据：淘汰率 × 加载耗时 > 池 GPU 时间的 10% ⇒ 池已经�
 | 组批粒度 | 组批后锁定到整批推理结束 | **每个 decode step 之后重新组批**，某条序列结束立刻让出槽位 |
 | 该调什么 | `max_batch_size` → 再沿延迟预算爬 `max_queue_delay_microseconds` | `max_num_batched_tokens`、`max_num_seqs` |
 | 头阻塞 | 同批最长的样本拖死所有人 | **decode 维度上被调度粒度消除**，但超长 prefill 仍会堵住整个 step（靠 chunked prefill 缓解），KV cache 打满时也会重现 |
-| 本书在哪讲 | **本节** | [`04/01 §3`](../04-ai-agent-systems/01-llm-serving-infra.md) |
+| 本书在哪讲 | **本节** | [`04/01 §3`](../04-ai-agent-systems/01-llm-serving-infra.md#3-分页连续批处理chunked-prefill) |
 
 **推论：在 LLM 前面再加一层"凑批等待"是纯延迟浪费**，收益早被 iteration-level 调度拿走了。**Triton 官方的调法只有一句**：先定 `max_batch_size`，再"逐步增大 delay 直到超出延迟预算，观察吞吐的变化"（[batcher.md](https://github.com/triton-inference-server/server/blob/main/docs/user_guide/batcher.md)）。另外 `preferred_batch_size` **大多数模型不该设置** —— 官方原话，它只对多 optimization profile 的 TensorRT 模型有意义。
 
 **拐点公式**（本书按排队推导，**未找到公开的定量曲线**）：
 
 ```
-吞吐随 delay 上升先陡后平，拐点 ≈ 平均到达间隔 × (max_batch_size − 1)
+最老请求攒满 B 条的期望等待 ≈ (B−1)/λ；满批内平均等待约一半。
+实际吞吐/延迟 knee 还取决于前向时间、到达突发和调度器，必须压测
 delay 的合理上界 ≈ p99 延迟预算 − 单批推理时间 − 网络开销
 QPS 已经打满时 delay 应设 0：请求本来就排着队，等待只剩纯惩罚
 
@@ -347,7 +352,7 @@ CUDA graph capture          30–60 s             5–10 s    裁剪 cudagraph_c
 seekable-tar 按需读让镜像那一段和进程启动重叠发生，所以"~10 s"是重叠后的净增量，不是一段独占的时间。
 **报数字时把口径说出来，比报一个更漂亮的数字更能拿分。**
 
-**换更快的 GPU 救不了。**实测 22 个模型（0.5B–16B），vLLM 冷启动 **predominantly CPU-bound**；唯一对 GPU 代际敏感的阶段是 CUDA graph capture，H100 也只比 L40S 快 **1.2×**（[arXiv 2606.07362, MLSys 2026](https://arxiv.org/abs/2606.07362)）。torch.compile 的编译产物**可以跨机拷贝或烤进镜像**，39 s → 10 s，这是全表投入产出比最高且零风险的一项（[route179, 2026-06-30](https://route179.dev/2026/06/30/optimizing-vllm-cold-start-with-model-streaming-and-compile-caching/)）。
+**在引用的 vLLM 基准里，换更快 GPU 不是首选。** 实测 22 个模型（0.5B–16B）冷启动 predominantly CPU-bound；CUDA graph capture 对 GPU 代际更敏感，H100 比 L40S 快约 1.2×（[arXiv 2606.07362](https://arxiv.org/abs/2606.07362)）。torch.compile 产物可缓存，引用案例 39 s → 10 s；缓存键必须包含框架/驱动/GPU/图/shape 并做数值 smoke test，不是零风险。
 
 **优化顺序是硬的：镜像 > 权重 I/O 并行 > 编译缓存 > capture size 裁剪。**倒过来做（先去调 capture）能省 20 秒，而镜像那一项摆着 8 分钟。**现在算扩容这笔账**：
 
@@ -407,9 +412,9 @@ stateDiagram-v2
 
 > 📖 **读图要点**：`Registered` 到 `Canary` **没有直达边** —— 任何版本都必须先过 `Shadow`，这是平台强制的，不是流程建议。另一处：`Champion → RolledBack` 的触发词是 "manual"，而 `Canary → RolledBack` 是自动的；这条不对称正是上面那个事实的图上形态（质量指标还不能自动决策）。还有：`Archived` 没有回到 `Champion` 的边，归档意味着产物可能已被 GC，回滚窗口关闭 —— 所以保留期是一个必须算出来的数，不是一个默认值。
 
-**金丝雀必须 validation-gated 而不是 time-gated。**照搬服务的"25% 起步 + 每小时推进"是错的：模型的阶梯是 **1% → 5% → 10% → 25% → 50% → 100%**，每一步的推进条件是**样本量够了**（[GrowthBook, 2026-05-29](https://www.growthbook.io/insights/canary-releases-ai-models-what-changes-vs-traditional-software)）。反例很具体：低流量产品放 1% 流量跑 48 小时，可能只有约 **200 次交互** —— 你什么都没测出来，却已经等了两天。按时间推进不是统计方法，是排班表。
+**金丝雀应 validation-gated，而不能只按时间推进。** `1% → 5% → 10% → 25% → 50% → 100%` 是本文高流量场景的示例阶梯，不是“模型的固定阶梯”；起点和每档大小要由爆炸半径、最小样本、租户/设备 ring、回滚速度与成本共同决定。推进门要同时覆盖服务健康、数据完整性和足够统计信息；低流量场景若 1% 跑 48 小时只有约 200 次交互，这一档并没有验证质量（[GrowthBook, 2026-05-29](https://www.growthbook.io/insights/canary-releases-ai-models-what-changes-vs-traditional-software)）。
 
-**影子先行。**Uber 的 shadow 覆盖 **>75% 的关键在线用例**（计划 2025 H2 到 100%）。成本是确定的：**被镜像那部分流量要付 2× 推理算力**，外加双份特征拉取与日志写入 —— 所以镜像比例是一个成本旋钮，本文只镜像 Tier A 的 10%（≈1.1 卡，§2.3）。但要清楚它证明了什么 —— **只证明"不会崩、分布没歪"，给不出任何业务指标结论**。
+**按风险决定是否影子先行。** Uber 2025-10-30 的公开材料称其当时 shadow 覆盖 **>75% 的关键在线用例**；这是单一厂商快照，不是覆盖目标。增量成本约为 `镜像比例 × 候选路径成本`，并受特征复用、日志采样、异步资源池和候选模型大小影响；只有 100% 镜像且两条路径成本相近、完全独立时，总成本才接近 2×。本文把 Tier A 的 10%（≈1.1 卡，§2.3）作为场景起点。影子能验证运行与分布风险，但给不出业务效果结论；涉及副作用、隐私或昂贵下游调用时可改用录制回放、合成流量或更小镜像率。
 
 **warmup 必须是就绪探针的一部分。**Triton 的 `ModelWarmup` 在配置里声明一组预热请求，**全部实例执行成功才标记 READY**；而且 **warmup 必须覆盖将要 capture 的 batch size 集合**，否则线上遇到未捕获的形状会走 eager 慢路径。不这么做的后果很具体：金丝雀的第一批用户吃到 30–60 s 的 capture 尾延迟，被误判成"新模型变慢了"，一个好模型就这样被回滚掉。
 
@@ -503,7 +508,7 @@ v3  分栈与硬隔离：非 LLM 池保持本文形态，LLM 走 vLLM/SGLang + K
     跨租户改 MIG 硬隔离（**注意这一步要连卡型一起换** —— L40S 没有 MIG）；跨区域部署。
 ```
 
-⚠️ **v1 起就要过一遍法务与维护状态**：Seldon Core 自 2024-01-22 改为 BSL 1.1，**生产使用需商业许可**（[licensing FAQ](https://www.seldon.io/licensing-faqs/)）；TorchServe（归档 2025-08-07）与 TGI（归档 2026-03-21）均已只读，不能再写进新架构 —— 存量迁移应列为**安全债**而非优化项。
+⚠️ **v1 起就要过一遍许可证与维护状态**：Seldon Core 1 的官方许可证页标明 BSL 1.1；默认授权非生产使用，另有受限的非营利教育机构生产授权，其他不符合附加授权的生产或商业使用需要另购许可（[Seldon Core 1 License](https://docs.seldon.ai/seldon-core-1/getting-started/license)）。TorchServe（归档 2025-08-07）与 TGI（归档 2026-03-21）均已只读，不能再写进新架构 —— 存量迁移应列为**安全债**而非优化项。
 
 ---
 
@@ -515,7 +520,7 @@ v3  分栈与硬隔离：非 LLM 池保持本文形态，LLM 走 vLLM/SGLang + K
 | 「用 HPA 按 GPU / CPU 利用率自动扩缩容」 | 满载的推理实例 CPU 接近 idle，HPA 永远不扩，直到请求开始超时；而且**扩容 90 s–8 min，尖峰 30 s** —— 慢一个数量级 | "按**队列深度**扩（KEDA `running + waiting*10`，target 25）。真正扛尖峰的是排队 + 准入控制 + 预热池，扩容只是事后补偿。" |
 | 「把 `max_queue_delay` 调大来提吞吐」 | 只在未饱和区成立；QPS 打满时纯粹是延迟惩罚。而且对 LLM 根本不该调这个参数 | "沿延迟预算爬到拐点 ≈ 到达间隔 × (max_batch_size−1)，本例 14 ms。再大：吞吐 +3%、p99 +40 ms。排序模型天然带 300 个候选，对它开动态批处理是负收益。" |
 | 「回滚就是把版本指针指回上一版」 | 会命中**特征时间旅行**：旧模型去消费训练时不存在的"未来"特征，静默劣化不报错 | "版本是不可分割四元组：权重 + 特征管道 + 依赖锁 + 配置。**只回滚一半比不回滚更糟。**" |
-| 「模型发布跟服务发布一样，25% 金丝雀跑一小时」 | 模型坏掉时 HTTP 全 200、延迟不变；按时间推进不是统计方法。低流量场景 1% 跑 48 小时可能只有 200 次交互 | "先 shadow 再 canary，阶梯 1%→5%→10%→25%→50%，**每步按样本量推进**；同时监控分数分布、校准度、预测熵，不只看错误率。" |
+| 「模型发布跟服务发布一样，25% 金丝雀跑一小时」 | 模型坏掉时 HTTP 仍可能全 200、延迟不变；只按时间推进没有质量分辨率。低流量场景 1% 跑 48 小时可能只有 200 次交互 | "按风险选择影子/回放，再做 validation-gated canary。阶梯由爆炸半径、ring 与样本量决定；每步同时过服务、数据和质量门，校准度还要等标签成熟。" |
 | 「用 MPS 把多个租户塞一张卡省钱」 | 显存按 replica 数均分（超了 OOM），且**一个进程执行 kernel 时异常退出会拖垮同卡其他进程** | "跨信任域只有整卡或 MIG。MPS 只用在同租户内的可信负载上。" |
 
 ---
@@ -559,4 +564,6 @@ v3  分栈与硬隔离：非 LLM 池保持本文形态，LLM 走 vLLM/SGLang + K
 
 ---
 
-**下一篇** → [19-feature-store.md](19-feature-store.md)：训练和线上用的是同一份特征定义，为什么算出来的值不一样。
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**案例顺读下一篇** → [19-feature-store.md](19-feature-store.md)：训练和线上用的是同一份特征定义，为什么算出来的值不一样。

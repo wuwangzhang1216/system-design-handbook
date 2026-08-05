@@ -15,17 +15,17 @@
 **先确认你能回答这三个问题**
 
 1. "先 `GET` 判断有没有超，再 `INCR` 扣减"，两个网关同时执行会发生什么？"原子"具体指哪一步不可分割？
-   答不出 → 先读 [`00-foundations/00-concepts.md` §7](../00-foundations/00-concepts.md)
+   答不出 → 先读 [`00-foundations/00-concepts.md` §7](../00-foundations/00-concepts.md#7-事务与隔离级别)
 2. 下游从 0.8 ms 变慢到 80 ms（注意：没有挂），为什么比它直接挂掉更危险？用 Little's Law 把这条链说一遍。
-   答不出 → 先读 [`00-foundations/00-concepts.md` §2](../00-foundations/00-concepts.md)
+   答不出 → 先读 [`00-foundations/00-concepts.md` §2](../00-foundations/00-concepts.md#2-延迟吞吐并发--三个最常被混淆的词)
 3. `429` 和 `503` 在客户端 SDK、CDN 眼里有什么不同？`Retry-After` 是谁在告诉谁什么？
-   答不出 → 先读 [`02-architecture-patterns/04-api-design-and-versioning.md` §6](../02-architecture-patterns/04-api-design-and-versioning.md)
+   答不出 → 先读 [`02-architecture-patterns/04-api-design-and-versioning.md` §6](../02-architecture-patterns/04-api-design-and-versioning.md#6-限流rate-limiting响应头与客户端契约)
 
 **这道题会用到的构件**
 
 | 构件 | 用在哪 | 详见 |
 |---|---|---|
-| Little's Law、峰谷比、排队论、成本建模 | §2 全部：内存装得下、ops/s 装不下、跨 AZ 账单 | [`00-foundations/02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §2 §3 §6 |
+| Little's Law、峰均比、排队论、成本建模 | §2 全部：内存装得下、ops/s 装不下、跨 AZ 账单 | [`00-foundations/02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §2 §3 §6 |
 | 限流的 HTTP 契约（429 / `Retry-After` / `RateLimit`） | §4.6 响应契约，本题唯一的单向门 | [`02-architecture-patterns/04-api-design-and-versioning.md`](../02-architecture-patterns/04-api-design-and-versioning.md) §6 |
 | 租约（lease）、单调时钟、为什么不用分布式锁 | §4.2 本地租约 + 周期同步；§3 惰性补充为什么用单调时钟 | [`01-building-blocks/05-consensus-and-coordination.md`](../01-building-blocks/05-consensus-and-coordination.md) §4 §5 |
 | 超时预算、熔断半开、信号量隔板、负载卸载、优雅降级 | §4.4 Redis 挂了 / 变慢了的分档降级状态机 | [`05-reliability/03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) §2 §4 §5 §6 §7 |
@@ -48,7 +48,7 @@
 | `13:00–19:00` **分布式版** | 集中式 Redis + Lua 原子判定 + hash tag；**主动说出 hash tag 的代价**并预告会回来讲 | 画完立刻提名 3 个深挖点让面试官选 —— 交出选择权，同时展示你知道哪个最难 |
 | `19:00–27:00` **深挖 A** | 五种算法（用你自己算的 ops/s 否决滑动窗口日志）+ 集中式 vs 本地租约的判据公式 | `q = limit × T / N`。**给公式，不给"看情况"** |
 | `27:00–33:00` **深挖 B** | 热点租户（含 key splitting 的碎片化损失公式）+ Redis 故障的分档降级 | 区分"挂了"和"变慢了"；拒绝 `fail-open` 这个标准答案，给**有界**降级 |
-| `33:00–37:00` **深挖 C** | 多维度组合与优先级 + 响应契约（429 / `Retry-After` / `RateLimit`） | "响应头是这个系统唯一真正的单向门（one-way door：一旦发出去被客户端解析，就再也改不回来的决定；见 [`03-tradeoff-framework` §3](../00-foundations/03-tradeoff-framework.md)）" —— 面试官很少听到这句 |
+| `33:00–37:00` **深挖 C** | 多维度组合与优先级 + 响应契约（429 / `Retry-After` / `RateLimit`） | "响应头是这个系统唯一真正的单向门（one-way door：一旦发出去被客户端解析，就再也改不回来的决定；见 [`03-tradeoff-framework` §3](../00-foundations/03-tradeoff-framework.md#3-常见取舍的量化表)）" —— 面试官很少听到这句 |
 | `37:00–43:00` **收敛** | 30 秒回顾 + v0/v1/v2 + 撞墙表 + 单向门 | **自己启动收敛**。没有收敛的设计题，评分上等同于没做完 |
 | `43:00–45:00` **反问** | 见文末 | 问可运维性与组织边界，不问 WLB —— 这 2 分钟仍在被评分 |
 
@@ -87,10 +87,10 @@
 ```
 ① 流量
    300 亿次/天 ÷ 86,400 s = 347,222 ≈ 34.7 万 QPS 均值
-   峰谷比 3×（美洲工作时段驼峰 + 夜间批处理）→ 104 万 ≈ 100 万 QPS 峰值
+   峰均比 3×（美洲工作时段驼峰 + 夜间批处理）→ 104 万 ≈ 100 万 QPS 峰值
    ÷ 200 个网关实例 = 每实例 5,000 QPS 峰值 = 平均每 200 µs 一个请求
 ```
-> **解读**：单实例 200 µs 一个请求，意味着限流判定如果花 1 ms，一个实例只能处理 1,000 QPS —— **判定必须是微秒级或者异步化**，这一条在画图之前就已经排除了一大类方案。
+> **解读**：200 µs 是平均到达间隔，不是“整台实例必须串行做完一次请求”的时间预算。若一次判定平均耗时 1 ms，按 Little's Law，5,000 QPS 大约有 5 个判定同时在途，并给请求关键路径增加约 1 ms；真正的约束是连接池/线程或事件循环并发、下游容量和尾延迟。微秒级本地判断仍然更便宜，但不能由到达间隔直接推出 1,000 QPS 吞吐上限。
 
 ```
 ② 键基数（cardinality）
@@ -266,16 +266,16 @@ if b.tokens >= cost { b.tokens -= cost; ALLOW } else { DENY }
 **超发上界（可推导，不是拍的）**：分配器每周期只发 `L·T` 个令牌 ⇒ 长期速率 = L，由构造保证。误差来自时序：节点可以把第 k 周期没花完的租约和第 k+1 周期的一起花。
 ⇒ **瞬时最坏 2L，持续时间 ≤ T = 200 ms。** 这个数字写进设计文档，让业务方决定它可不可接受。
 
-**误拒来自量化误差**。令 `q = L·T / N`（每节点每周期分到的令牌数），到达近似泊松（Poisson：随机独立到达时，每个窗口内的计数会围绕均值波动，标准差 = √均值），则相对抖动 `≈ 1/√q`：
+**误拒来自量化与分配误差**。令 `q = L·T / N`（每节点每周期的平均令牌数）。若到达近似泊松，相对标准差约为 `1/√q`；它只是波动尺度，**不是误拒概率**。误拒率还取决于租约分配、节点负载不均、提前续借和请求成本分布，必须用实际流量回放或尾概率计算验证：
 
 ```
-q < 1       多数节点连一个整令牌都拿不到      → 必然误拒，禁止本地
-1 ≤ q < 10  抖动 ≥ 32%，误拒率不可忽略        → 不建议
-q ≥ 10      抖动 ≤ 32%，配合"提前续借"可接受  → 本文采用的开启阈值
-q ≥ 100     抖动 ≤ 10%，与集中式几乎无差别    → 本地明显更优
+q < 1       离散分配占主导                     → 通常不适合本地租约
+1 ≤ q < 10  相对波动尺度较大                   → 需要动态借用，否则误拒风险高
+q ≥ 10      可进入压测候选                     → 本文场景先从这里验证
+q ≥ 100     相对波动尺度较小                   → 仍不能替代误拒率与热点实测
 ```
 
-**开启本地模式所需的最小限额** `L_min = 10·N / T`：
+**以 `q=10` 作为进入压测的启发式门槛**，对应 `L_candidate = 10·N / T`。它不是正确性阈值：
 
 | T ＼ N | 50 节点 | 200 节点 | 1,000 节点 |
 |---|---|---|---|
@@ -297,7 +297,7 @@ q ≥ 100     抖动 ≤ 10%，与集中式几乎无差别    → 本地明显�
 
 **分片丢失**：`cluster-require-full-coverage no` —— 一行配置，把爆炸半径（blast radius）从"整个 keyspace 下线"变成"1/20 的租户降级"。
 
-**故障转移期**：Redis Cluster 的自动故障转移需要 `cluster-node-timeout`（默认 15 s）加选举，实际 15–30 s。**限流器等不了 15 秒** ⇒ 熔断器（circuit breaker：错误率超阈值就直接短路、不再发请求，每隔一段时间放一个探针试探恢复；见 [`03-resilience-patterns` §4](../05-reliability/03-resilience-patterns.md)）必须在 1 s 内打开并进降级路径，而不是等集群自愈。这两个时间尺度差一个数量级，是很多人第一次踩到才发现的。
+**故障转移期**：Redis Cluster 的自动故障转移需要 `cluster-node-timeout`（默认 15 s）加选举，实际 15–30 s。**限流器等不了 15 秒** ⇒ 熔断器（circuit breaker：错误率超阈值就直接短路、不再发请求，每隔一段时间放一个探针试探恢复；见 [`03-resilience-patterns` §4](../05-reliability/03-resilience-patterns.md#4-熔断器circuit-breaker阈值粒度半开half-open)）必须在 1 s 内打开并进降级路径，而不是等集群自愈。这两个时间尺度差一个数量级，是很多人第一次踩到才发现的。
 
 **持久化**：AOF `everysec`，让重启的节点不是空的；**绝不用 `appendfsync always`** —— 给半衰期 60 s 的数据付每请求的耐久成本是净亏。
 
@@ -478,7 +478,7 @@ RateLimit-Reset: 7
 | 租约（lease）语义、单调时钟、为什么用租约而不是分布式锁 | [`01-building-blocks/05-consensus-and-coordination.md`](../01-building-blocks/05-consensus-and-coordination.md) |
 | 本地 L1 缓存、TTL 抖动、惊群、单飞 | [`01-building-blocks/02-caching.md`](../01-building-blocks/02-caching.md) |
 | L4/L7、会话粘性、AZ 感知路由、边缘限流的位置 | [`01-building-blocks/04-networking-and-edge.md`](../01-building-blocks/04-networking-and-edge.md) |
-| 峰谷比、Little's Law、成本建模 | [`00-foundations/02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) |
+| 峰均比、Little's Law、成本建模 | [`00-foundations/02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) |
 | 超时预算、熔断半开、信号量隔板、负载卸载、优雅降级 | [`05-reliability/03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) |
 | 把"误拒率"定义成 SLI、多窗口多燃尽率告警 | [`05-reliability/01-slo-and-error-budget.md`](../05-reliability/01-slo-and-error-budget.md) |
 | 噪音邻居、隔板、whale 租户的处置 | [`02-architecture-patterns/03-multi-tenancy.md`](../02-architecture-patterns/03-multi-tenancy.md) |
@@ -518,4 +518,6 @@ RateLimit-Reset: 7
 
 ---
 
-**下一篇** → [10-news-feed.md](10-news-feed.md)
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**案例顺读下一篇** → [10-news-feed.md](10-news-feed.md)

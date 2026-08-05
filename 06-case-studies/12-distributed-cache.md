@@ -12,11 +12,11 @@
 **先确认你能回答这三个问题**
 
 1. cache-aside 的两条铁律：更新数据时该删缓存还是写缓存？该先写库还是先删缓存？写反了各会留下什么？
-   答不出 → 先读 [`01-building-blocks/02-caching.md` §2](../01-building-blocks/02-caching.md)
+   答不出 → 先读 [`01-building-blocks/02-caching.md` §2](../01-building-blocks/02-caching.md#2-缓存模式)
 2. 缓存穿透、缓存击穿（stampede）、缓存雪崩分别由什么触发？空值缓存和 TTL 抖动各治的是哪一个？
-   答不出 → 先读 [`01-building-blocks/02-caching.md` §3](../01-building-blocks/02-caching.md)
-3. 利用率越过 80% 之后排队延迟为什么是指数上升的？用 Little's Law 从"安全 1.2 万 QPS、点查 p99 20 ms"算一个并发上限出来。
-   答不出 → 先读 [`00-foundations/02-capacity-estimation.md` §3](../00-foundations/02-capacity-estimation.md)
+   答不出 → 先读 [`01-building-blocks/02-caching.md` §3](../01-building-blocks/02-caching.md#3-三大经典故障穿透击穿雪崩)
+3. 利用率上升时排队延迟为什么会非线性恶化？Little's Law 为什么必须用平均停留时间，而不能用 p99？速率上限和并发上限分别保护什么？
+   答不出 → 先读 [`00-foundations/02-capacity-estimation.md` §3](../00-foundations/02-capacity-estimation.md#3-排队论queueing-theory为什么-80-利用率utilization是危险的)
 
 **这道题会用到的构件**
 
@@ -41,7 +41,7 @@
 |---|---|---|
 | **0:00–0:04** | 快速过 8 个澄清问题，重点锁死两件事：**缓存里的东西能不能丢**、**数据库平时承担多少流量、上限是多少** | 面试官在第 3 分钟就能判断你会不会问"缓存挂了怎么办"。不问这两个，后面全是空中楼阁 |
 | **0:04–0:09** | 估算：外部 QPS → 扇出（fan-out）→ 峰值 → miss QPS → **从数据库容量倒推目标命中率** → 分片数 / 内存 / 带宽 / 连接数 | 倒推命中率是全场第一个区分点。只报"100 万 QPS"而没有推论，等于没估 |
-| **0:09–0:19** | 高层设计：先画**最简单能工作的版本**（cache-aside：应用自己先查缓存、未命中再查库并回填，缓存完全不参与写路径 + 一致性哈希 + TTL），再明说"接下来我加三件事"：L1、单一失效来源、回源闸门 | 分层展开 > 一次画完。面试官要看你知道哪些是必需、哪些是加固 |
+| **0:09–0:19** | 高层设计：先画**最简单能工作的版本**（cache-aside：应用自己先查缓存、未命中再查库并回填，缓存完全不参与写路径 + 一致性哈希 + TTL），再明说"接下来我加三件事"：L1、以 CDC 为唯一权威的失效链路（应用 DEL 只加速）、回源闸门 | 分层展开 > 一次画完。面试官要看你知道哪些是必需、哪些是加固 |
 | **0:19–0:22** | 主动提名深挖点："我想挖回源限流、扩缩容迁移、热 key。第一个是这题最难的，我从它开始。" | **提名权拿到手 = 你控制了后 20 分钟的话题**。等着被问，节奏就是面试官的 |
 | **0:22–0:31** | 深挖一：缓存全挂 → 信号量（semaphore）容量推导 → 600 个实例上怎么落地 → 降级阶梯 → 恢复曲线 | **这一段决定这道题的分数。** 给不出信号量容量的具体数字，其余全对也只在 hire 边缘 |
 | **0:31–0:37** | 深挖二 + 三：扩缩容的 miss QPS 与分批上限；热 key 的 833× 与它的陈旧代价 | 每个深挖都要落到一个数字 + 一句代价，否则是在复述教科书 |
@@ -78,7 +78,7 @@
 ```
 外部请求（页面 + API）13 亿次/天 ÷ 86,400 = 15,000 QPS 均值
 × 每请求平均展开 20 次缓存读（商品 / 用户 / 权限 / 配置 / 计数 …）= 30 万 QPS 均值
-× 峰谷比（peak-to-average ratio）3.5 = 105 万 QPS 峰值，记作 100 万
+× 峰均比（peak-to-average ratio）3.5 = 105 万 QPS 峰值，记作 100 万
 写（失效）：读写比 100:1 ⇒ 1 万 QPS 的 DEL
 ```
 
@@ -145,17 +145,17 @@ key 总数 3 亿；24 h 活跃工作集 40% = 1.2 亿 key；value 中位 2 KB、
  写: App ─▶ ① 先写 DB ─▶ ② 再 DEL key      （删，不是 SET；顺序不能反）
 ```
 
-两条规则来自 [`../01-building-blocks/02-caching.md` §2](../01-building-blocks/02-caching.md)：**更新时删缓存而不是写缓存**（写缓存在并发下会产生永久脏值，删是幂等的）；**先写 DB 再删缓存**（反过来会在窗口里被读请求回填旧值）。这个版本在 5 万 QPS 以下能跑很多年，在 100 万 QPS 下会死于三件事：扩容时全量失效、单个热 key 打爆分片、缓存挂掉时数据库瞬间崩溃。下面三个加固分别对应。
+两条规则来自 [`../01-building-blocks/02-caching.md` §2](../01-building-blocks/02-caching.md#2-缓存模式)：**更新时删缓存而不是写缓存**（写缓存在并发下会产生永久脏值，删是幂等的）；**先写 DB 再删缓存**（反过来会在窗口里被读请求回填旧值）。这个版本在 5 万 QPS 以下能跑很多年，在 100 万 QPS 下会死于三件事：扩容时全量失效、单个热 key 打爆分片、缓存挂掉时数据库瞬间崩溃。下面三个加固分别对应。
 
 ### 3.2 加固后的完整版
 
 ```
-        ┌─────────── 唯一失效来源 ───────────┐
-        │ DB binlog/WAL ─▶ CDC ─▶ Invalidator │──▶ DEL（幂等·可重试）─┐
-        └─────────────────────────────────────┘                       │
-          CDC = change data capture：直接从数据库的                    │
-          binlog/WAL 里读出"哪一行变了"的变更流，                      │
-          不需要业务代码配合，也不会漏掉任何一次提交                    │
+ 写请求 ─▶ DB commit ─┬─▶ App best-effort DEL（低延迟快路径；失败不影响提交）─┐
+                      └─▶ binlog/WAL ─▶ CDC ─▶ Invalidator             │
+                            （唯一权威、可重放、失败不提交 offset）─▶ DEL ─┤
+          两条路径都只在 DB 提交后做同一个幂等 DEL，绝不向缓存 SET 新值；     │
+          CDC = change data capture：每次已提交变更都有可重放记录，           │
+          Invalidator 负责重试、拓扑刷新和收敛                              │
  Client ──▶ ┌──────────────────────────────────────────────────┐      │
             │ App 实例 ×600                                     │      │
             │  L1: Caffeine / W-TinyLFU，仅热榜 key，TTL 1–3 s   │      │
@@ -186,7 +186,7 @@ key 总数 3 亿；24 h 活跃工作集 40% = 1.2 亿 key；value 中位 2 KB、
                                  ▼   Primary DB + 4 replicas（上限 2 万 QPS）
 ```
 
-**四条不可动摇的边界**：① **失效只能有一个来源** —— 应用侧 DEL 与 CDC 并存时两条路径的时序打架必然产生长期脏值，选 CDC 作为唯一权威来源，应用侧 DEL 只是"加速"，失败可忽略；② **所有 key 必须有 TTL 上限**（本文 300 s + 抖动），TTL 不是失效手段而是**兜底手段**，把任何一次失效丢失的影响封顶在 5 分钟；③ **缓存和"不能丢的东西"分实例** —— 分布式锁、会话、去重窗口不能与缓存混住，淘汰策略无法同时满足"可淘汰"和"不能丢"；④ **回源限流是全局的，不是每分片的** —— 单分片故障就会把 5.6 万 QPS 推给数据库，按分片切分的信号量挡不住。
+**四条不可动摇的边界**：① **只能有一个权威失效来源，不等于只能发出一条 DEL** —— 权威事实是 DB 的已提交变更，CDC Invalidator 对它负责到底；应用在提交后发同一个 DEL 只是缩短 read-your-writes 窗口。两条路径都只删不写，所以**相对于彼此**重复与乱序安全，不会把旧值主动写回；应用快路径失败可以不影响用户响应，但要打点，CDC 失败则必须保留事件并重试，不能推进 offset。并发 miss 在 DEL 后回填旧值的经典竞态仍由后到的 CDC DEL、版本校验或 TTL 收敛；② **所有 key 必须有 TTL 上限**（本文 300 s + 抖动），TTL 不是失效手段而是**兜底手段**，把任何一次失效丢失的影响封顶在 5 分钟；③ **缓存和"不能丢的东西"分实例** —— 分布式锁、会话、去重窗口不能与缓存混住，淘汰策略无法同时满足"可淘汰"和"不能丢"；④ **回源限流是全局的，不是每分片的** —— 单分片故障就会把 5.6 万 QPS 推给数据库，按分片切分的信号量挡不住。
 
 ---
 
@@ -267,29 +267,29 @@ key 总数 3 亿；24 h 活跃工作集 40% = 1.2 亿 key；value 中位 2 KB、
 | 层 | 解决什么 | 挡住多少 | 代价 |
 |---|---|---|---|
 | ① **single-flight**（进程内同 key 合并：同一 key 的并发 miss 只放一个真去回源，其余等它的结果） | 同一个 key 的并发 miss | 热 key 场景可达 1000×，均匀分布场景 ≈ 1× | 只在单进程内合并；600 个进程各合并一次 |
-| ② **全局并发上限**（信号量） | **所有 key 的总并发回源** | 把 100 万 QPS 压到数据库能吃下的数字 | 超出的请求排队或被拒 |
+| ② **全局速率 + 并发上限** | **所有 key 的总回源** | 速率限制长期 QPS，并发限制在途工作 | 超出的请求限时等待或被拒 |
 | ③ **降级阶梯** | 拿不到许可时返回什么 | — | 必须提前定义，不能临场决定 |
 
 **只做 ① 不做 ②，是这道题最常见的"看起来做了"**：单飞只在 key 分布极度倾斜时有效，而缓存全挂时 miss 的是**全部 key**，1.2 亿个不同的 key 无从合并。
 
-**信号量容量怎么算 —— 面试官在等的就是这个数字**：
+**两个旋钮要分开算：速率限制保护吞吐，并发限制保护在途资源。** Little's Law 使用平均停留时间，不能拿 p99 代入：
 
 ```
-Little's Law: 并发 = QPS × 延迟；数据库点查 p50 = 3 ms、p99 = 20 ms、安全 QPS = 1.2 万
-  稳态   12,000 × 0.003 = 36 个并发
-  压力下 延迟退化到 p99 ⇒ 12,000 × 0.020 = 240 个并发
-⇒ 全局上限取 200（留 20% 余量：超过 200 后延迟继续恶化，会形成正反馈）
+负载测试得到：安全回源速率 = 12,000 QPS；该负载下平均点查停留时间 = 12 ms，p99 = 20 ms
+  平均在途 L = 12,000 × 0.012 = 144
+⇒ 速率桶先限制 12,000/s；连接池/并发上限从约 180 起压测（给正常方差留余量）
+⇒ 最终值必须以“在 SLO 内的实测 goodput”为准；p99 只用于尾延迟预算，不用于 Little's Law
 ```
 
-#### 200 个许可，600 个应用实例，怎么分？（真正的深水区）
+#### 全局许可，600 个应用实例，怎么分？（真正的深水区）
 
 | 方案 | 全局实际上限 | 精度 | 代价 |
 |---|---|---|---|
-| 应用内本地信号量，容量 = ⌈200/600⌉ = 1 | **600**（是目标的 3 倍） | 差 | 实例数一变就失准；实例数 > 目标并发时彻底失效 |
-| 前置一层薄"读取服务"（20 个实例 × 10 许可） | 200 | 精确 | 多一跳、多一个要运维的服务、它自己也会挂 |
-| **连接池即信号量**：pgbouncer/ProxySQL 20 个 × `pool_size=10` | **200** | 精确 | 超出的在代理侧排队 → 必须配 `query_wait_timeout=50ms`，超时即降级 |
+| 应用内本地信号量，每实例至少 1 | **至少 600** | 差 | 实例数一变就失准；实例数大于目标并发时彻底失效 |
+| 前置一层薄"读取服务" | 可集中控制 | 较精确 | 多一跳、多一个要运维的服务、它自己也会挂 |
+| **共享数据库代理 + 全局 rate limiter** | 连接池限制在途数，令牌桶限制 12k/s | 精确到配置边界 | 排队必须有很短 deadline，超时即降级 |
 
-**选连接池。** 理由是它已经在那里了 —— 把数据库连接池的大小调成"你愿意给数据库的并发上限"，比在应用里再造一个分布式信号量可靠一个数量级，而且它天然是全局的、跨服务的、连绕过缓存的直连查询也一并管住。**唯一必须补的是排队超时**：没有 `query_wait_timeout` 的连接池不是限流器，是一个无界队列（unbounded queue），它只是把 OOM 推迟到最糟糕的时刻。
+**本题选共享代理 + 全局 rate limiter。** 连接池限制“同时有多少查询”，令牌桶限制“每秒最多多少查询”，两者缺一不可。排队必须受剩余 deadline 约束；没有等待上限的连接池会退化成无界队列。
 
 **降级阶梯：先牺牲新鲜度，再牺牲丰富度，最后才牺牲可用性。**
 
@@ -305,17 +305,16 @@ Little's Law: 并发 = QPS × 延迟；数据库点查 p50 = 3 ms、p99 = 20 ms�
 **恢复曲线要算出来并演练。** 缓存全挂后不能直接放 100 万 QPS 进来 —— 缓存是空的，信号量会拒掉 99.98% 的请求。**关键在于：被限流的回源速率同时也是缓存的填充速率。**
 
 ```
-填充速率 = 200 并发 / 3 ms = 66,600 key/s ⇒ 1.2 亿 key 全填满要 1,800 s = 30 分钟
-但你不需要填满。按 Zipf(α≈0.9)，前 1% 的 key 覆盖约 60% 的请求：
-   120 万 key ÷ 6.66 万/s = 18 s     ⇒ 30 秒内命中率回到 ~60%
-   5 分钟填入 2,000 万 key（工作集 17%）⇒ ~95%；30 分钟 ⇒ 99%
-配合准入控制按比例放行（1% → 10% → 50% → 100%，每档等 miss QPS 稳定再进）
-⇒ **这条曲线必须在演练里跑过。没跑过的恢复流程等于没有。**
+回源速率硬上限 = 12,000 key/s（并发变小不能突破它）
+  120 万个头部 key 的理论下界 ≈ 100 s；真实时间还受重复 miss、写入和热点分布影响
+  5 分钟最多填入 360 万个不同 key；能恢复多少命中率不能只由 Zipf 参数拍出
+⇒ 用生产访问日志回放得到“时间 → 命中率 → miss QPS”曲线，再按 1% → 10% → 50% → 100% 放量
+⇒ 每档只有在 miss QPS、数据库 p99 和连接池等待都稳定时才进入下一档
 ```
 
 > **面试金句**
-> "缓存系统最重要的设计不在缓存里，在**未命中路径上**。100 万 QPS、99% 命中率，缓存全挂时数据库要接 50 倍于它上限的流量 —— 几秒内死掉，而死掉之后缓存永远填不满，这是一个不会自愈的故障。所以回源必须有一个能说出数字的并发上限：我用 Little's Law 从数据库的 p99 和安全 QPS 算出 200，并且把它落在连接池上，而不是应用里的信号量 —— 600 个应用实例分不了 200 个许可。宁可拒绝 90% 的请求：**活着的数据库能把缓存重新喂满，死掉的不能。**"
-> "The most important part of a distributed cache isn't in the cache — it's on the miss path. At a million QPS with a ninety-nine percent hit rate, losing the cache sends the database fifty times its hard limit. It dies in seconds, and once it's dead the cache can never refill, so that failure doesn't self-heal. So the origin path needs a concurrency cap I can put an actual number on: Little's Law over the database's p99 and its safe QPS gives me two hundred. And I enforce it in the connection pool, not with a semaphore inside the app — six hundred app instances can't meaningfully split two hundred permits. I'd rather shed ninety percent of the traffic: a live database can refill the cache, a dead one can't."
+> "缓存系统最重要的设计不在缓存里，在未命中路径上。缓存全挂时，我同时限制回源速率和并发：速率来自数据库在 SLO 内的实测 goodput，并发用平均停留时间套 Little's Law 后再压测；p99 不能直接代入。两者落在共享代理/限流层，而不是 600 个应用各自猜一个许可数。宁可负载卸载：活着的数据库能把缓存重新喂满，死掉的不能。"
+> "The most important part of a distributed cache is the miss path. When the cache disappears, I cap both origin rate and concurrency. The rate comes from measured goodput while the database still meets its SLO; concurrency starts from Little's Law using mean residence time, never p99, and is then load-tested. I enforce both at a shared proxy or admission layer rather than letting six hundred app instances guess local permits. A live database can refill the cache; a dead one cannot."
 
 ---
 
@@ -363,7 +362,7 @@ LFU / W-TinyLFU：这些 key 的历史频率是 1，准入策略拒绝它们进�
 
 **不能容忍这个陈旧时**（库存、余额、风控开关）只剩两条路：key 打散（salt the key）`k#0..k#9` —— 单分片压力 ÷ 10，代价是写放大 10× 且 10 份之间**没有原子性**，只适用于读极多写极少的 key；或推 CDN / 边缘 —— 源站 QPS 归零，但只适用于可公开缓存的内容，失效要靠 surrogate key purge。
 
-**热 key 的过期瞬间是另一个问题**（cache stampede）：50 万 QPS 的 key 物理过期，同一毫秒 50 万个请求同时回源。解法**不是分布式锁** —— 600 个实例抢一把锁本身就是新热点，而且锁超时 + GC 暂停会引入 fencing token 一整类问题（见 [`../01-building-blocks/05-consensus-and-coordination.md` §3](../01-building-blocks/05-consensus-and-coordination.md)）。正解是**热 key 不设物理 TTL**：逻辑过期时间写进 value，读到逻辑过期就 serve stale 并异步触发一次 single-flight 刷新 —— 50 万并发回源变成 1 次回源 + 50 万次返回旧值，且**永远有值可返回**。
+**热 key 的过期瞬间是另一个问题**（cache stampede）。本题让热 key 不做物理删除：读到逻辑过期就 serve stale，并在每个进程内 single-flight 刷新。600 个进程最坏仍可能各发一次回源，而不是全局只有一次；若这 600 次也超出 origin 预算，再用全局速率限制、请求合并服务或带 fencing 的刷新协调。这样把 50 万并发压到有界数量，同时保留旧值可返回。
 
 **大 key 伤的不是自己，是同分片的所有人。** 一个 10 MB 的 value：传输在 1 Gbps 上占 80 ms；主线程单线程执行命令，这次 GET 的序列化与写 socket 期间同分片所有命令排队 ⇒ **全分片 p99 从 1 ms 跳到 30–80 ms**；`DEL` 一个大 hash 是 O(N) 阻塞，必须用 `UNLINK`；复制时一次性灌满缓冲区，可能触发从节点全量重同步。治理按有效性排序：① 客户端 SET 时硬限 value ≤ 100 KB，超限**直接拒绝并打点**（不靠人自觉）② 按 field / 分页拆 key ③ 只缓存指针（字节放对象存储 + CDN，缓存里只放 URL 与 ETag）④ zstd 压缩（文本 3–5×，CPU 花在客户端 —— 这是特性不是缺陷）。
 
@@ -377,13 +376,13 @@ LFU / W-TinyLFU：这些 key 的历史频率是 1，准入策略拒绝它们进�
 
 ---
 
-### 深挖六 · 故障转移与持久化：丢一个 SET 和丢一个 DEL 不是一回事
+### 深挖六 · 故障转移与持久化：应用 DEL 是快路径，CDC 才负责收敛
 
 #### 异步复制对缓存来说几乎没有代价 —— 除了一种情况
 
 Redis / Valkey 默认异步复制，故障转移（failover）的数据丢失窗口 = 复制延迟（同 AZ < 1 ms，跨 AZ 1–3 ms）。对缓存来说丢几毫秒的写完全无所谓：**丢的是缓存值，回源能重建**。
 
-**但如果丢的是一条 DEL，代价是一条不会自己消失的脏数据。** 这个不对称性是本节的全部内容。下面这张图要让你看见的是：一次已经被确认成功的失效，如何在几秒后被拓扑变更悄悄撤销 —— 这是"顺序"表达不了的，因为问题不在谁先谁后，而在**一个已返回成功的操作被后来的事件抹掉，且没有任何一方收到通知**。
+**但如果丢的是一条 DEL，代价是一条不会自己消失的脏数据。** 这个不对称性是本节的全部内容。下面这张图要让你看见的是：应用快路径一次已经返回成功的失效，如何被拓扑变更悄悄撤销；然后为什么系统仍能靠未完成的 CDC 事件收敛。正确性从来不能押在那次 best-effort DEL 的 `OK` 上。
 
 ```mermaid
 sequenceDiagram
@@ -393,8 +392,11 @@ sequenceDiagram
     participant Rep as Replica
     participant Bus as ClusterBus
     participant DB
+    participant Inv as CDC Invalidator
     App->>DB: update row to v2
     DB-->>App: committed
+    DB-->>Inv: durable WAL change for key
+    Note over Inv: keep event uncommitted until invalidation converges
     App->>Old: DEL key
     Old-->>App: OK
     Note over Old,Rep: replication is async, the DEL is still in the output buffer
@@ -403,18 +405,16 @@ sequenceDiagram
     Bus->>Rep: promote to primary
     Note over Rep: this replica never applied the DEL, so it still holds v1
     App->>Rep: GET key
-    Rep-->>App: v1, stale, and it will live until the TTL
-    alt invalidation is retried against the refreshed topology
-        App->>Rep: DEL key
-        Rep-->>App: OK, converged
-    else the invalidation error was swallowed
-        Note over App,Rep: stale until TTL, with no signal anywhere in the system
-    end
+    Rep-->>App: v1, transiently stale
+    Inv->>Bus: refresh topology after retryable failure or epoch change
+    Inv->>Rep: DEL key from retained CDC event
+    Rep-->>Inv: OK
+    Inv->>Inv: commit source offset, converged
 ```
 
-> 📖 **读图要点**：看第 4 步和第 9 步 —— 第 4 步 `Old` 已经返回 `OK`，应用有充分理由认为失效完成了；第 9 步同一个 key 又把被删的旧值交了回来。中间没有任何一步向应用报错。再看 `else` 分支：它里面**一条箭头都没有**，只有一条 Note。没有重试就没有回到 `Rep` 的边，也就没有收敛路径 —— 这个分支的终点是"脏到 TTL 为止，且全系统无信号"。**这也是 §3.2 铁律 2（所有 key 强制 TTL 上限）唯一的存在理由。**
+> 📖 **读图要点**：`Old` 返回 `OK` 后，未复制的 DEL 仍会在 failover 中消失，所以应用 DEL 只能优化新鲜度。真正的收敛边是最后三步：CDC 事件还没有被当作完成，Invalidator 刷新拓扑后对新主重放同一个幂等 DEL。实现还应在缓存拓扑 epoch 变化时重放至少覆盖复制丢失窗口的一小段最近失效；否则“Invalidator 已收到 OK、随后 DEL 又随旧主丢失”仍可能漏掉。TTL 上限与 DB/缓存抽样 drift 检查继续兜住极端的 ack-but-lost、日志损坏或实现 bug。
 
-**三条推论**：① **失效必须幂等且可重试**，失败要落"待失效队列"重投，绝不能吞掉错误；② **CDC 是兜底的第二次失效** —— 应用侧 DEL 失败时 binlog 那条记录仍会走 CDC 再删一次，这是保留 CDC 的真正原因；③ **所有 key 强制 TTL 上限**，把任何一次失效丢失的影响封顶在 5 分钟。
+**三条推论**：① 应用侧 DEL 是 best-effort 快路径：只允许在 DB 提交后执行，失败只影响短期新鲜度，不承担持久重试；② CDC 不是“碰巧再删一次”的兜底，而是**唯一权威失效消费者**：事件可重放，Invalidator 负责重试到当前拓扑、在拓扑 epoch 变化后回放安全窗口，并对 lag/失败告警；③ **所有 key 强制 TTL 上限**，把任何一次失效仍然丢失的影响封顶在 5 分钟。
 
 **故障转移窗口有多长，这段时间发生什么**：
 
@@ -427,7 +427,7 @@ sequenceDiagram
 这 5–17 秒里：
   读：连不上旧主 → 快速失败 → 走 miss；该分片 1/18 流量 = 5.6 万 QPS 全部回源
       = 安全预算的 4.7 倍 ⇒ **单分片故障就足以打死数据库** ⇒ 信号量必须全局
-  写：DEL 打到旧主失败 → 必须重试到新拓扑，见上图
+  写：应用 DEL 打到旧主失败 → 用户提交仍可返回；CDC 事件不提交 offset，Invalidator 刷新拓扑后重试到新主
 ```
 
 **持久化要不要开：用机器数量回答。**
@@ -460,7 +460,7 @@ sequenceDiagram
 | 6 | 扩缩容迁移 | 5.3% key 变冷 → miss 6.2 万 QPS（5.2× 预算） | 迁移期 miss QPS、migrating slot 数 | 双读（新节点 miss 回查旧属主）；否则分批 ≤ 0.2%/批 |
 | 7 | 拓扑不一致（一半新环一半旧环） | 命中率腰斩 + 同一 key 在两节点并存 → 脏读 | 各客户端上报的 `topology_version` 分布 | 拓扑带单调版本号，客户端拒绝版本回退；切换期双查窗口 |
 | 8 | 扫描污染（夜间批处理） | 次日早高峰 miss 3.7 万 QPS（3× 预算），**每天准时发生** | 凌晨 `evicted_keys` 尖峰 + 次日 08:00 命中率跌落 | `allkeys-lfu` / W-TinyLFU 准入；批处理绕过缓存走独立连接 |
-| 9 | **失效丢失**（failover 期间 DEL 未复制） | 脏数据存活到 TTL，且全系统无信号 | 缓存与 DB 抽样比对的 drift 率（每 5 min 抽 1,000 个 key） | 失效走可重试队列 + CDC 二次失效 + 所有 key 强制 TTL 上限 |
+| 9 | **失效丢失**（failover 期间应用 DEL 未复制，或 Invalidator 的 OK 随旧主一起丢） | 短暂脏读；CDC 也漏失时最坏存活到 TTL | CDC lag/重试年龄、缓存拓扑 epoch、缓存与 DB 抽样 drift 率（每 5 min 抽 1,000 个 key） | 应用 DEL 仅作快路径；CDC Invalidator 保留事件并重试、拓扑变化回放安全窗口；所有 key 强制 TTL 上限 |
 | 10 | 内存碎片 > 1.5，或 ratio < 1.0（已在 swap） | p99 1 ms → 100 ms | `mem_fragmentation_ratio` 双向告警 | `activedefrag yes`；ratio < 1.0 立即扩容或下调 maxmemory；关 THP |
 | 11 | 连接数打满 `maxclients` | 新连接被拒，业务侧表现为"缓存挂了" | `connected_clients / maxclients` > 70% | sidecar 收敛连接 + 客户端 pipelining；调高 maxclients 需重算输出缓冲内存 |
 
@@ -547,11 +547,13 @@ v3  多区域 / 边缘缓存
 遮住上文，你能不能说出：
 
 1. **目标命中率 99% 是怎么倒推出来的**（数据库硬上限 2 万 → 60% 利用率 → 1.2 万 miss 预算 → 1 − 1.2/100），以及为什么 99.5% 在经济上不值得追。
-2. **回源信号量容量 200 的完整推导**（Little's Law：1.2 万 QPS × p99 20 ms = 240，取 200），以及它为什么必须落在数据库连接池上而不是应用内 —— 600 个实例分不了 200 个许可。
+2. **回源的两个上限**：用 SLO 内实测 goodput 得到速率上限，用平均停留时间和 Little's Law 得到并发起点，再用压测定最终值；解释为什么 p99 不能代入，以及为什么 600 个应用实例不能各自猜本地许可。
 3. **18 → 19 扩容时 miss 从 1 万涨到 6.2 万 QPS**，以及"分批不超过 0.2%/批、共 27 批、2.3 小时"这三个数字是怎么算出来的，为什么我最终选了双读而不是分批。
-4. **failover 里丢一个 SET 无所谓、丢一个 DEL 是永久脏数据**，以及兜底的三件事：可重试的失效队列、CDC 二次失效、所有 key 强制 TTL 上限。
+4. **failover 里丢一个 SET 无所谓、丢一个 DEL 会复活脏数据**，以及两条 DEL 路径的分工：应用提交后 best-effort 删除只降延迟；CDC Invalidator 才持有可重放事件、重试到当前拓扑并在 epoch 变化后回放安全窗口；TTL 是最后上界。
 5. **不开持久化的决定**是用 10 台机器（$5k/月）换 28 分钟的冷启动差距，以及这个交换在什么条件下反转（缓存里有回源重建不了的东西时 —— 但那时它就不该叫缓存）。
 
 ---
 
-**下一篇** → [13-ride-hailing.md](13-ride-hailing.md)
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**案例顺读下一篇** → [13-ride-hailing.md](13-ride-hailing.md)

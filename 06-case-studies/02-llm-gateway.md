@@ -1,13 +1,16 @@
 # 02 · 案例：设计一个企业级 LLM 网关
 
-> LLM 网关看起来像 API 网关，其实不是：后端不是同构副本（换模型就换了输出分布），
-> 缓存不在你手里（在 provider 的 KV 里，所以你必须做**有状态路由（stateful routing）**），
+> LLM 网关看起来像 API 网关，其实不是：后端不一定是同构副本（换模型就换了输出分布），
+> 缓存位置也不一定由你控制（自建推理的 KV cache 在具体实例；托管 API 的缓存作用域由供应商定义），
+> 所以你需要**感知缓存状态的路由**，但不等于把持久状态塞进网关进程；
 > 计费单位不是请求而是 token（所以限流必须**预扣（reservation）+ 结算（settlement）**），
 > 而且响应是一条可能持续 10 分钟、中途才会失败的流。
 
 ---
 
 ## 读这道题之前
+
+> **阅读层级与时间口径**：主干是需求 → 路由 → 配额 → 流式 → 计量，full-stack 开发者先读这些即可；具体供应商型号、价格、缓存阈值和合规能力是截至 **2026-08** 的示例快照，上线前必须重新查合同与官方文档。
 
 🔶 **这道题属于 AI 岗方向**：通用 full-stack / 后端面试路径（[README 路径 A / B](../README.md#学习路径)）可以整题跳过 —— 判断依据和 [`04-ai-agent-systems/`](../04-ai-agent-systems/) 一致：JD 里出现「LLM / Agent / 推理 / RAG / GPU」中任意一个词，它才从"可跳过"变成"面试官的主场"（路径 C）。
 
@@ -16,17 +19,17 @@
 **先确认你能回答这三个问题**
 
 1. 有状态（stateful）和无状态（stateless）的判据是什么？一个"只做转发"的网关，为什么一旦要吃到 provider 的前缀缓存，就不能再随便挑一个后端了？
-   答不出 → 先读 [00-concepts §9 有状态 vs 无状态](../00-foundations/00-concepts.md)、[04-networking-and-edge §2 连接管理](../01-building-blocks/04-networking-and-edge.md)
+   答不出 → 先读 [00-concepts §9 有状态 vs 无状态](../00-foundations/00-concepts.md#9-有状态-vs-无状态)、[04-networking-and-edge §2 连接管理](../01-building-blocks/04-networking-and-edge.md#2-连接管理)
 2. 前缀缓存命中的前提是"前缀逐字节相同"。在 system prompt 里放一个 `now()`、或一段未排序的 `json.dumps`，命中率和账单会怎么变？
-   答不出 → 先读 [02-caching §7 LLM 时代的新缓存层](../01-building-blocks/02-caching.md)、[08-cost-and-latency §4 Prompt caching](../04-ai-agent-systems/08-cost-and-latency.md)
+   答不出 → 先读 [02-caching §7 LLM 时代的新缓存层](../01-building-blocks/02-caching.md#7-专项选读llm-缓存层)、[08-cost-and-latency §4 Prompt caching](../04-ai-agent-systems/08-cost-and-latency.md#4-prompt-caching三家机制差异与工程约束)
 3. 一次调用要用掉多少 token，请求发出前你知道吗？不知道的话令牌桶怎么扣？20 个 pod 各扣各的本地桶，全局配额会错成什么样？
-   答不出 → 先读 [02-billing-and-metering §7 配额与限额](../03-saas-platform/02-billing-and-metering.md)、[03-resilience-patterns §6 负载卸载与准入控制](../05-reliability/03-resilience-patterns.md)
+   答不出 → 先读 [02-billing-and-metering §7 配额与限额](../03-saas-platform/02-billing-and-metering.md#7-配额与限额)、[03-resilience-patterns §6 负载卸载与准入控制](../05-reliability/03-resilience-patterns.md#6-负载卸载load-shedding与准入控制)
 
 **这道题会用到的构件**
 
 | 构件 | 用在哪 | 详见 |
 |---|---|---|
-| 有状态 vs 无状态、长连接、SSE vs WebSocket | §7 缓存亲和路由把网关变成有状态的、§8 流式代理 | [00-concepts §9](../00-foundations/00-concepts.md)、[`04-networking-and-edge.md`](../01-building-blocks/04-networking-and-edge.md) §2、§4 |
+| 有状态 vs 无状态、长连接、SSE vs WebSocket | §7 缓存亲和路由把网关变成有状态的、§8 流式代理 | [00-concepts §9](../00-foundations/00-concepts.md#9-有状态-vs-无状态)、[`04-networking-and-edge.md`](../01-building-blocks/04-networking-and-edge.md) §2、§4 |
 | 超时预算、重试放大、熔断、负载卸载 | §5 路由与故障转移、§12 失败模式清单 | [`03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) §2、§3、§4、§6 |
 | 前缀缓存 / 精确缓存 / 语义缓存 | §7 三种缓存各自的命中前提与泄露面 | [`02-caching.md`](../01-building-blocks/02-caching.md) §7、[`08-cost-and-latency.md`](../04-ai-agent-systems/08-cost-and-latency.md) §4 |
 | 计量管道：事件 schema、去重幂等、对账 | §9 四类 token 必须分开计、三方对账 | [`02-billing-and-metering.md`](../03-saas-platform/02-billing-and-metering.md) §3、§4、§9 |
@@ -47,7 +50,7 @@
 |---|---|
 | **谁是使用方？** 内部团队 / 产品服务 / 外部客户 | 内部 = 信任边界宽、可要求改客户端；外部 = 必须做租户隔离（tenant isolation）与滥用防护（abuse prevention） |
 | **多少团队、多少 key？** | 10 个团队用配置文件就够；2,000 个 key 需要真正的控制面 |
-| **托管 API / 自建推理 / 都有？** | 只接托管 API → 网关是**无状态策略层**；接自建 vLLM 池 → 必须做 **KV cache 感知路由**，变成有状态 |
+| **托管 API / 自建推理 / 都有？** | 只接托管 API → 数据面进程通常仍可无状态；接自建 vLLM 池 → 路由器必须读取 KV cache/队列状态，但持久状态仍应放在外部系统 |
 | **强制走网关吗？有 break-glass 吗？** | 强制 = 网关是 SPOF，可用性目标要比业务高一档 |
 | **合规边界？** 数据驻留（data residency）/ ZDR / 审计留痕（audit trail） | 决定是否按租户绑定 provider 区域端点，以及日志能不能存 prompt 原文 |
 | **SLO 与成本归属？** | 网关自身预算应 ≤ 上游延迟的 5%；决定预算是"告警"还是"拒绝"，以及**失败请求是否计费** |
@@ -59,7 +62,7 @@
 形态：70% 流式对话/agent（多轮长前缀），30% 同步短请求（分类/抽取/embedding）
 Provider：Anthropic + OpenAI + Gemini 托管；自建 vLLM 池 v2 才接
 合规：EU 子公司流量必须区域内处理；默认不落 prompt 原文，按租户白名单开
-SLO：网关自身 p99 附加延迟 < 25 ms；可用性 99.95%；强制走网关但保留 break-glass
+内部目标：网关自身附加延迟的 p99 候选阈值为 25 ms；可燃尽 SLO 写成“至少 99.9% 的有效网关调用附加延迟 ≤ 25 ms”，可用性目标 99.95%；强制走网关但保留 break-glass
 ```
 
 ---
@@ -74,7 +77,7 @@ QPS      240,000 请求/日 ÷ 86,400 ≈ 2.8 RPS 平均；8h 工作时段 + 3×
 ```
 **这不是一个高 QPS 系统。** 网关的难点从来不是 QPS，是**并发的长连接（long-lived connection）**和**每请求的字节数**。单个 Go/Rust 进程扛 2,000+ 条 mostly-idle 流很轻松 ⇒ **3 个 pod 够跑，6 个用于 HA 与滚动发布**。CPU 不花在转发上，花在**逐 token 做内容过滤/计数**上 —— 那是容量模型里唯一需要压测的部分。
 
-**Token 与成本**（2026 年中量级，随时变动）
+**Token 与成本**（教学算例，不是报价；下列型号、单价和折扣会随合同与日期变化）
 ```
 输入 12,000 tok/请求（含稳定前缀）、输出 800 tok/请求
 ⇒ 输入 2,880 M tok/日   输出 192 M tok/日
@@ -120,7 +123,7 @@ QPS      240,000 请求/日 ÷ 86,400 ≈ 2.8 RPS 平均；8h 工作时段 + 3×
 ```
 
 **三条不可违背的分层原则：**
-1. **控制面不进关键路径（critical path）。** 策略/价目/预算以推送 + 本地 TTL 缓存驻留数据面（data plane）；控制面全挂时按最后一份快照继续服务（限流退化为本地近似）。
+1. **控制面不进每次请求的同步关键路径（critical path）。** 策略/价目/预算以推送 + 本地缓存驻留数据面（data plane）；控制面故障时使用带版本、签名和有效期的最后已知良好快照。若从未拿到有效快照，认证、租户隔离、数据驻留和硬预算等边界应拒绝请求；只有明确批准的低风险策略才可退化。
 2. **计量是旁路。** 写 Kafka 失败不能让用户请求失败；但**必须先落本地 WAL 再回响应**——丢事件的方向永远对供应商不利。
 3. **网关不做 agent 循环。** 网关是"每请求一次决策"的策略执行点（policy enforcement point）。谁把 agent loop 写进网关，谁就会在半年后为了加一个 checkpoint 重写整个数据面。
 
@@ -128,7 +131,7 @@ QPS      240,000 请求/日 ÷ 86,400 ≈ 2.8 RPS 平均；8h 工作时段 + 3×
 
 ## 4. 深挖一：Provider 抽象层——抽到什么粒度
 
-**唯一正确的答案：归一化（normalization）到"请求语义与计量口径（metering semantics）"，绝不归一化到"生成行为"。** 下表字段名以各家当前文档为准，说明的是**差异形态**而非稳定 API 契约。
+**推荐边界：归一化（normalization）到"请求语义与计量口径（metering semantics）"，不要假装能统一"生成行为"。** 下表字段名以各家当前文档为准，说明的是**差异形态**而非稳定 API 契约。
 
 | 维度 | Anthropic Messages | OpenAI | Gemini | 抽象策略 |
 |---|---|---|---|---|
@@ -163,10 +166,10 @@ L3 Escape Hatch    : provider_options.{anthropic|openai|gemini} 透传 + /v1/raw
 | `RATE_LIMITED` | 429 + `retry-after` | ✅ 按 `retry-after` | ✅ 换接入点 | ⚠ 仅显式允许时 |
 | `OVERLOADED` | 529 / 503 | ✅ 指数退避（exponential backoff）+ 抖动（jitter） | ✅ | ⚠ |
 | `UPSTREAM_TIMEOUT` | 无 token 超过空闲阈值 | ⚠ **仅当请求幂等且未产出 token** | ✅ | ⚠ |
-| `CONTEXT_TOO_LONG` | 上下文超限 | ❌ | ❌ | ✅ 换更大窗口的模型是**唯一**合理降级 |
+| `CONTEXT_TOO_LONG` | 上下文超限 | ❌ | ❌ | ⚠ 可选更大窗口模型，也可由调用方截断、摘要、检索或缩小输出预算；网关不要擅自改 prompt |
 | `CONTENT_FILTERED` | 安全策略拒绝 | ❌ | ❌ | ❌ **绝不换 provider 重试**——那是在做"合规套利（compliance arbitrage）"，审计时会要命 |
 | `INVALID_REQUEST` | 4xx 参数错 | ❌ | ❌ | ❌ |
-| `AUTH_FAILED` | 密钥问题 | ❌ | ✅ 换密钥池 | ❌ |
+| `AUTH_FAILED` | 密钥问题 | ❌ | ⚠ 只可切换同一合同账户内已知健康的轮换凭证；撤销/权限失败应停止并告警 | ❌ |
 
 ---
 
@@ -178,7 +181,7 @@ routes:                                  # 客户只认别名，网关拥有实�
     strategy: cost_aware_cascade         # 先小后大
     targets: [ {model: claude-sonnet-5, weight: 90, role: primary},
                {model: claude-opus-5,   weight: 10, role: escalate} ]
-    endpoints: [anthropic_first_party, bedrock_us_east_1, vertex_us_central1]  # 同模型多接入点
+    endpoints: [anthropic_first_party, bedrock_us_east_1, vertex_us_central1]  # 候选接入点；需逐一通过兼容性评测
     allow_model_downgrade: false         # 默认关！见下文
     retry_budget: { max_attempts: 3, total_ms: 20000, retry_ratio: 0.1 }
     idle_timeout_ms: 30000
@@ -199,13 +202,13 @@ routes:                                  # 客户只认别名，网关拥有实�
 
 > **面试金句：**
 > "LLM 网关的 failover 和 HTTP 网关的 failover 不是一回事。HTTP 后端是同构副本（homogeneous replica），转移是无损的；模型不是同构副本，转移一定改变输出分布。所以我把它分成两类：
-> **(a) 同模型跨接入点**——第一方 API → Bedrock → Vertex，权重相同，可以自动转、可以静默；
+> **(a) 同一模型工件的多接入点**——第一方 API、Bedrock、Vertex 即使名字相同，也可能在版本、参数、过滤器、tokenizer 和发布节奏上不同。只有注册表确认工件版本并通过同一套契约/质量评测后，才把某组接入点视为可自动转移；
 > **(b) 跨模型降级（cross-model downgrade）**——Opus → Sonnet，输出会变，必须显式：响应头回 `x-llm-served-model` 和 `x-llm-degraded: true`，计量按实际模型计价，且只对声明了 `allow_model_downgrade: true` 的路由生效。
 > 默认关闭跨模型自动降级。因为一个下游做严格 JSON schema 解析的批处理任务，会在你'成功兜底'的那一刻开始**静默产出错误数据**——那比返回 503 糟糕得多。"
 
 **跨模型降级前必须回答的三个问题**（写进 ADR）：①调用方能否检测到降级（→ 响应头 + 计量事件记 `served_model`）；②下游是否严格解析输出（→ 是则禁止降级，或要求降级目标通过同一套 schema 回归集）；③降级目标的 tokenizer 是否不同（→ Claude 4.7+ 同文本多约 30% token，会撞 `max_tokens`，"同样任务突然被截断"就是这么来的）。
 
-**重试的三条硬纪律：** ①`retry_ratio ≤ 0.1`，上游过载时无限重试 = 参与 DDoS 自己；②**流已产出 token 后不重试**（重复内容 + 两次生成都计费）；③重试必须换接入点或至少换密钥，在同一个刚回 429 的接入点上重试是纯浪费。
+**重试的三条硬纪律：** ①给重试单独设预算（如额外流量不超过 10%，具体值由容量与 SLO 验证），上游过载时无限重试会继续放大故障；②**流已产出 token 后不做透明重试**（重复内容 + 两次生成都计费）；③遵守 `Retry-After`，并基于错误作用域选择健康接入点。只有确认是单凭证配额问题时才轮换同账户凭证，不能靠换 key 绕过组织级限额或撤销。
 
 ---
 
@@ -214,8 +217,8 @@ routes:                                  # 客户只认别名，网关拥有实�
 **按请求数限流对 LLM 是失效的**：一个 200k 输入的请求和一个 200 token 的请求，对上游的压力和对账单的影响都差 1000 倍。上游 provider 自己就是按 **TPM（tokens per minute）+ RPM** 双维度限的；网关只限 RPM，唯一效果是把上游的 429 原样转给用户。
 
 ```
-限流键 = (tenant, team, virtual_key, actor, model_family, priority_class)
-每维三组阈值：RPM / TPM_input / TPM_output（输出的边际成本是输入的 5–25×，必须分开）
+配额层级 = tenant → team → virtual_key/actor，并另按 model_family、priority_class 分类
+每个需要约束的层级可设 RPM / TPM_input / TPM_output；不要为所有维度做笛卡尔积 key
 外加两条绝对上限：单请求 max_input_tokens、单会话/单任务 total_tokens
 ```
 **最后那条"单任务绝对上限"是 agent 时代新增的**。人类会话的 token 方差可预测，agent 循环的方差大一个数量级——一个跑飞的 workflow 能在 20 分钟内吃掉团队当天全部 TPM。三层同时设：并发上限 / 单任务 token 上限 / 组织级 spend limit。
@@ -226,19 +229,24 @@ routes:                                  # 客户只认别名，网关拥有实�
 
 ```python
 # ── 准入（预扣）──────────────────────────────────────────────
-est_input  = count_tokens(req, tokenizer_of(model))     # count_tokens 端点或本地 tokenizer
-est_output = min(req.max_tokens, route.max_output_cap)  # 必须有 cap！否则默认值把桶抽干
-reserve    = est_input + est_output * OUTPUT_WEIGHT     # OUTPUT_WEIGHT ≈ 输出价/输入价，如 5.0
-ok, reservation_id = ratelimit.acquire(keys, reserve)
+est_input  = count_tokens(req, tokenizer_of(model))
+est_output = min(req.max_tokens, route.max_output_cap)
+reserve    = WeightedUsage(est_input, est_output)
+ok, reservation_id = ratelimit.acquire_hierarchy(keys, reserve,
+                                                   idempotency_key=req.id)
 if not ok: return 429 with Retry-After
 # ── 结算（回补）──────────────────────────────────────────────
-try:    actual = proxy_and_stream(req)                  # 逐 token 记账，见 §8
-finally: ratelimit.settle(reservation_id,               # 多退少补；异常路径必须走到
-           actual_input = actual.input + actual.cache_read + actual.cache_write,
-           actual_output = actual.output)
+observed = Usage(input=est_input, output=0)              # 先初始化，异常前也有值
+outcome = "unknown"
+try:
+    outcome = proxy_and_stream(req, on_usage=observed.merge_monotonic)
+finally:
+    ratelimit.settle_once(reservation_id, observed, outcome)
 ```
 
-**三个必踩的坑：** ①**不给 `max_tokens` 设 cap** —— 客户端填成模型上限（如 64k），预扣直接抽干桶，所有人 429；②**`finally` 里不结算** —— 客户端中断/上游超时/panic 任一路径漏掉 settle，预扣永久泄漏，几小时后租户"莫名其妙被限流"；③**失败请求是否计入配额没有行业惯例** —— 退款体验好但制造滥用面，计入更公平但对瞬时故障苛刻。**必须选一个，写进文档并对租户可见。**
+**四个必踩的坑：** ①**不给 `max_tokens` 设 cap** —— 客户端填成模型上限，预扣会抽干桶；②先进入 `try` 才初始化 `actual` —— 代理在赋值前抛错时，`finally` 自己也会报错；③只靠进程内 `finally` —— pod 崩溃时它不会执行，所以 reservation 必须是持久状态，并由对账任务收口；④失败请求是否计入配额没有行业统一答案。策略必须写进文档并对租户可见。
+
+reservation 过期也**不能无条件全额退款**：进程失联时，上游可能已经生成并计费。恢复器应把它标成 `unknown`，先保守占用已预扣上限或已观测用量，再用 provider usage/账单和本地流式日志对账；只有确认未消费的部分才归还。这样既不会永久泄漏，也不会把未知消费变成无限超发窗口。
 
 ### 分布式限流算法选型
 
@@ -251,34 +259,39 @@ finally: ratelimit.settle(reservation_id,               # 多退少补；异常�
 | **本地租约（local lease）+ 中心结算** | 近似（超发 ≤ N×slack） | 每租约 1 次 | 好 | 高 QPS 时把 Redis RTT 从每请求 1 次降到每秒 1 次 |
 
 ```lua
--- token_bucket.lua ： 原子地取 N 个令牌
+-- token_bucket.lua：单个 bucket 原子地取 N 个令牌；只接受 need > 0
 -- KEYS[1] = "rl:{tenant:acme}:m:claude-sonnet-5:tpm_in"  ← hash tag 保证同租户落同 slot
--- ARGV = now_ms, capacity, refill_per_ms, requested, ttl_ms
+-- ARGV = capacity, refill_per_ms, requested, ttl_ms
 local st  = redis.call('HMGET', KEYS[1], 'tokens', 'ts')
-local now, cap, rate, need = tonumber(ARGV[1]), tonumber(ARGV[2]), tonumber(ARGV[3]), tonumber(ARGV[4])
+local t = redis.call('TIME')                              -- 不信客户端时钟
+local now = tonumber(t[1]) * 1000 + math.floor(tonumber(t[2]) / 1000)
+local cap, rate, need = tonumber(ARGV[1]), tonumber(ARGV[2]), tonumber(ARGV[3])
+if not cap or not rate or not need or cap <= 0 or rate <= 0 or need <= 0 then
+  return redis.error_reply('invalid token bucket arguments')
+end
 local tok = math.min(cap, (tonumber(st[1]) or cap) + (now - (tonumber(st[2]) or now)) * rate)
 if tok < need then
   return {0, math.ceil((need - tok) / rate)}   -- 回传还需等多久 → 生成 Retry-After，比盲目退避强
 end
 redis.call('HMSET', KEYS[1], 'tokens', tok - need, 'ts', now)
-redis.call('PEXPIRE', KEYS[1], ARGV[5])
+redis.call('PEXPIRE', KEYS[1], ARGV[4])
 return {1, 0}
 ```
 
-**结算是同一脚本的负数版本**（`requested = actual - reserved`，可为负，加回时不超过 capacity）。
+不要把结算实现成“同一脚本传负数”。重放一次负数请求就能反复加额度。结算必须按 `reservation_id` **幂等**：存储 `reserved`、单调递增的 `observed` 与终态，只应用尚未结算的差额，并把退款封顶在已预扣量。多个层级若要一次原子扣减，Redis Cluster 下所有 key 必须在同一 hash slot；做不到时就用中心配额服务/分层租约，并明确最大超发边界，不能假装多次单 key 调用是原子的。
 
-**撞墙条件**：单 Redis 分片约 10–15 万 QPS；限流键基数涨到"每 actor × 每模型"时热 key 集中在头部租户。信号是 Redis p99 从 0.5 ms 涨到 5 ms。届时切**本地租约模式**：每个 pod 每秒租一片配额（`quota/N + burst`），本地令牌桶消费，到期归还。代价是最多超发 `N × slack`（6 pod、1 s 租约下约 1–3%），换掉 99% 的 Redis 往返。
+**撞墙条件**（数字须由自己的压测校准）：限流键基数上涨、头部租户形成热 key，Redis p99 和超时率持续恶化。届时可切**本地租约模式**：每个 pod 从中心预领一小片额度，本地令牌桶消费并周期性报告单调累计值。到期只归还中心确认未消费的余额；失联租约先封存到对账完成。代价是最多超发“同时有效租约数 × 每租约 slack”，用可量化误差换掉大部分中心往返。
 
 ---
 
-## 7. 深挖四：缓存——为什么网关必须是有状态的
+## 7. 深挖四：缓存——为什么路由必须感知状态
 
 ### 前缀缓存的路由亲和性（cache affinity，最重要的一节）
 
 前缀缓存（KV cache reuse）把输入价打到 **10%**，把 TTFT 降一个数量级。架构后果是：**缓存住在某个具体的地方，请求必须被送到"见过这个前缀的地方"。**
 
 - **自建推理**：KV 在某个 pod 的显存/本地 CPU 层。[llm-d 的对照实验](https://llm-d.ai/blog/kvcache-wins-you-can-see)（8 pod / 16×H100 / Qwen-32B / 150 租户 × 6k 上下文）的极端差距：P90 TTFT **0.542 s（精确缓存感知路由） vs 92.551 s（随机路由）**，约 **170×**。这不是优化，是"能不能用"。
-- **托管 API**：缓存按 **workspace / 组织**隔离（Bedrock / Vertex 上按 organization）。"同一会话必须打到同一接入点"同样成立——跨接入点 failover 让缓存全废，成本在一次故障转移后翻数倍且**不会自己转回来**。
+- **托管 API**：缓存的隔离与路由范围由供应商、接入方式和合同决定；你通常看不到内部缓存节点。网关能做的是在文档保证的作用域内固定 provider endpoint、账户/workspace 与缓存相关参数。跨接入点可能丢失缓存收益，但不要凭猜测把“同会话固定到内部实例”写成保证。
 
 ```
 hash_key = (tenant_id, session_id 或 stable_prefix_hash) → 一致性哈希 → 目标 pod / 接入点
@@ -286,7 +299,7 @@ hash_key = (tenant_id, session_id 或 stable_prefix_hash) → 一致性哈希 �
 ```
 
 > **面试金句：**
-> "网关一旦要吃前缀缓存的红利，它就**不再是无状态的**了。负载均衡策略从'最少连接（least connections）'变成'一致性哈希（consistent hashing，按会话）+ 负载上限溢出'。我用 TTFT 和 $/请求 这两个指标来证明这个牺牲是值的，并且我会给亲和路由加一个熔断：当目标实例排队深度超阈值时立刻放弃亲和——**缓存命中是优化，排队是事故**。"
+> "网关进程仍可以无状态，但**路由决策必须感知外部状态**。自建推理时，可从'最少连接'升级为'按前缀/会话的一致性哈希 + KV 命中分数 + 负载上限溢出'；托管 API 只能利用供应商公开保证的缓存作用域。我用 TTFT 和单位请求成本验证收益，并在目标队列过深时放弃亲和——缓存命中是优化，排队超出 SLO 就应溢出。"
 
 ### 让缓存真的命中：前缀的字节稳定性（byte stability）
 
@@ -316,16 +329,16 @@ hash_key = (tenant_id, session_id 或 stable_prefix_hash) → 一致性哈希 �
 
 | | 精确缓存 | 语义缓存 |
 |---|---|---|
-| 键 / 命中率 | `hash(model, normalized_messages, tools, params, tenant, 权限指纹)`；命中率低（<5%，除非有重复批处理） | query embedding 相似度 > 阈值；命中率中等 |
-| 风险 | 低（键相同则答案应相同） | **高**："北京今天天气" vs "上海今天天气" 相似度可到 0.93，答案完全不同 |
-| 适用 | 分类/抽取/embedding 等确定性任务；`temperature=0` | 无个性化、无时效性的 FAQ |
-| 网关默认 | **开**（按租户分区） | **关**，opt-in，阈值 ≥0.97，强制按 (tenant, 权限指纹) 分区 |
+| 键 / 命中率 | `hash(tenant, authz_version, model_artifact, normalized_input, tools, all_behavioral_params, policy_version)`；命中率取决于业务 | query embedding 相似度 > 经评测确定的阈值；命中率取决于语料 |
+| 风险 | 中：即便键相同，模型也可能非确定；还要处理时效、撤权、模型/策略升级和敏感内容落盘 | **高**：语义近不等于答案可复用，尤其是实体、时间和权限不同的查询 |
+| 适用 | 调用方显式声明可缓存、允许复用且有 TTL 的分类/抽取/embedding 等任务；`temperature=0` 也不是确定性保证 | 无个性化、低时效且有离线误命中评测的 FAQ |
+| 网关默认 | **关或仅对明确 allowlist 开**；按租户/权限分区、加密、TTL、撤权失效 | **关**，opt-in；阈值由数据集与误命中成本决定，强制按 (tenant, 权限指纹) 分区 |
 
 **语义缓存的隐藏杀伤力是污染评测**：一次 A/B 的差异可能全部来自缓存命中率而非模型。影子流量（shadow traffic）/评测流量必须**强制绕过所有缓存**。
 
 ### 跨租户（cross-tenant）缓存：性能杠杆与最大泄露面的直接冲突
 
-[PROMPTPEEK（NDSS 2025）](https://www.ndss-symposium.org/wp-content/uploads/2025-1772-paper.pdf) 实证：共享 prefix cache 的时序侧信道（timing side channel）可**逐 token 重建他人的 prompt**——已知模板时成功率 99%，**无任何背景知识时 95%**；攻击面覆盖 vLLM / SGLang / LightLLM / DeepSpeed（完整数据与缓解矩阵见 [`03-saas-platform/04-isolation-and-compliance.md §8.4`](../03-saas-platform/04-isolation-and-compliance.md)）。这是一个真张力：
+[PROMPTPEEK（NDSS 2025）](https://www.ndss-symposium.org/wp-content/uploads/2025-1772-paper.pdf) 实证：共享 prefix cache 的时序侧信道（timing side channel）可**逐 token 重建他人的 prompt**——已知模板时成功率 99%，**无任何背景知识时 95%**；攻击面覆盖 vLLM / SGLang / LightLLM / DeepSpeed（完整数据与缓解矩阵见 [`03-saas-platform/04-isolation-and-compliance.md §8.4`](../03-saas-platform/04-isolation-and-compliance.md#84-kv-cache最大的性能杠杆也是最大的跨租户泄露面)）。这是一个真张力：
 
 ```
 跨租户共享 prefix cache = 最大性能杠杆，同时 = 已被实证的跨租户 prompt 泄露面
@@ -355,7 +368,7 @@ HARD_TIMEOUT = 900 s    # 绝对上限，防无限生成/失控循环
 
 ### 中途错误：HTTP 200 已经发出去了
 
-流式第一个字节发出后状态码就锁死了。上游在第 3,000 个 token 挂掉，你**不能**回 500。必须：①流内发 `error` 事件并**明确标注这是部分输出**；②主动结束流（静默挂断会被客户端当成正常结束，产出被截断的内容且毫不知情）；③**记录部分用量并计费/计配额**（上游对已生成 token 要收钱）；④尾部回 `x-llm-stream-outcome: upstream_error`。**"静默截断（silent truncation）"是 LLM 网关最阴的 bug**：没有报错、没有告警，只有下游数据里多了一批不完整的 JSON。
+流式第一个字节发出后状态码和普通响应头就锁死了。上游在第 3,000 个 token 挂掉，你**不能**改回 500，也不能在最后补一个普通 header。必须：①流内发带 `partial: true` 的终止 `error` 事件；②明确结束流，并要求 SDK 只有看到 `finish` 终止事件才算成功；③记录部分用量并按公开策略计费/计配额。若客户端和传输层显式协商支持 HTTP trailers，可以把 `x-llm-stream-outcome` 放在 trailer；否则终态只放在流内事件与服务端计量记录。**静默截断（silent truncation）**会让下游把不完整内容当成功结果，是这里的 P0 风险。
 
 ### 取消传播（cancellation propagation）
 
@@ -382,7 +395,7 @@ HARD_TIMEOUT = 900 s    # 绝对上限，防无限生成/失控循环
 ```sql
 -- ClickHouse：网关侧计量事实表 —— 你自己的"真相"，用于对账
 CREATE TABLE llm_usage_events (
-  event_id UUID,               -- 幂等键：由 request_id 派生，**不是随机 UUID**
+  event_id UUID,               -- 稳定幂等键：可由 request_id 派生，或首次生成后持久化并跨重试复用
   ts DateTime64(3),
   tenant_id LowCardinality(String), team_id LowCardinality(String),
   actor_id String,             -- 人类用户 或 agent 的独立身份
@@ -390,25 +403,30 @@ CREATE TABLE llm_usage_events (
   virtual_key_id String,
   route_alias LowCardinality(String),        -- 客户请求的别名
   served_provider LowCardinality(String),
-  served_model LowCardinality(String),       -- **实际服务的模型**，不是别名
+  served_model LowCardinality(String),       -- **实际服务的模型工件/版本**，不是别名
+  price_tier LowCardinality(String),          -- batch/standard/priority 等合同档位
   input_tokens UInt32, cache_read_tokens UInt32,   -- 0.1× 计价
   cache_write_tokens UInt32,                       -- 1.25× / 2× 计价
   output_tokens UInt32, reasoning_tokens UInt32,   -- reasoning 口径各家不同，单独归因
   ttft_ms UInt32, total_ms UInt32,
   attempt_no UInt8,            -- 重试第几次 —— 重试的成本必须可见
   stream_outcome Enum8('complete'=1,'client_abort'=2,'upstream_error'=3,'idle_timeout'=4),
-  usage_source Enum8('provider'=1,'estimated'=2), degraded UInt8
-) ENGINE = ReplacingMergeTree(ts) ORDER BY (tenant_id, ts, event_id);
+  usage_source Enum8('provider'=1,'estimated'=2), degraded UInt8,
+  record_version UInt64                      -- 同一 event 的单调更新版本
+) ENGINE = ReplacingMergeTree(record_version) ORDER BY (tenant_id, event_id);
 
 -- 成本计算放后端，不要把单价烧进 SDK；价目表必须带生效区间
 SELECT tenant_id, served_model,
        sum(input_tokens)/1e6*p.input_price + sum(cache_read_tokens)/1e6*p.cache_read_price
      + sum(cache_write_tokens)/1e6*p.cache_write_price + sum(output_tokens)/1e6*p.output_price AS usd
-FROM llm_usage_events e JOIN model_prices p
-  ON p.model = e.served_model AND e.ts BETWEEN p.valid_from AND p.valid_to
+FROM llm_usage_events FINAL AS e JOIN model_prices AS p
+  ON p.provider = e.served_provider
+ AND p.model = e.served_model
+ AND p.price_tier = e.price_tier
+ AND e.ts >= p.valid_from AND e.ts < p.valid_to
 WHERE ts >= now() - INTERVAL 1 DAY GROUP BY 1,2 ORDER BY usd DESC;
 ```
-价目表**带生效区间**是硬要求：促销价有明确切换日（例：Sonnet 5 的 $2 促销至 2026-08-31，之后 $3），历史账单不能被新价改写。
+价目表**带半开生效区间 `[valid_from, valid_to)`**是硬要求，并在写入时拒绝同一 provider/model/tier 的重叠区间；否则切价瞬间会 join 两次。历史账单不能被新价改写。`ReplacingMergeTree` 的去重是异步的，示例查询用 `FINAL` 只为说明正确性；生产大表通常用上游幂等写入/物化聚合避免昂贵的 `FINAL`。若 reasoning token 单独计价，也要把它加入价目与公式。
 
 ### 三方对账（必须有）
 
@@ -420,7 +438,7 @@ WHERE ts >= now() - INTERVAL 1 DAY GROUP BY 1,2 ORDER BY usd DESC;
 
 ### PII 与留痕
 
-**prompt/response 内容属性在 OTel 里是 opt-in、默认不采——保持这个默认。** 网关提供三档：`none`（默认）/ `hashed`（内容哈希，用于去重与缓存分析）/ `full`（按租户白名单 + 采样率）。审计日志（WORM，不可篡改）必须包含：模型版本、prompt 模板版本、工具调用参数与结果、最终输出（或其哈希）、**授权决策（谁、代表谁、依据哪条策略）**。EU AI Act Article 50 的透明度义务与 SOC 2 的 AI 证据要求指向同一份日志。
+**prompt/response 内容属性在 OTel 里是 opt-in、默认不采——保持这个默认。** 网关提供三档：`none`（默认）/ `hashed`（内容哈希，用于去重与缓存分析）/ `full`（按租户白名单 + 采样率、目的与保留期）。租户等高基数字段放 trace/log 或离线聚合，不直接做无界 metrics label。审计日志应含模型/模板版本、工具调用与授权决策等必要元数据；参数、结果和最终输出默认存哈希或脱敏摘要，只有合法依据、最小权限与明确保留期同时满足时才留原文。具体法规与审计证据要求由法务/审计按适用范围确认。
 
 ---
 
@@ -452,7 +470,7 @@ WHERE ts >= now() - INTERVAL 1 DAY GROUP BY 1,2 ORDER BY usd DESC;
 ② 影子流量 mirror：复制线上请求给候选模型，两边打分，候选输出**永不返回用户**
 ③ 固定路由 pinning：调用方可把某个别名钉死在具体模型+版本上，直到自己解锁
 ```
-影子模式 + 同一个 correlation ID 挂结果与打分，是唯一能在**真实分布**上验证"能不能换模型"的手段。上线路径固定为：离线 eval → 影子 → 金丝雀（canary）→ 全量，四段共用同一套 scorer；金丝雀自动回滚阈值经验值是**单 rubric 回归超 2–3 个百分点且持续 15–60 分钟**。
+影子模式 + 同一个 correlation ID 关联结果与打分，是在**真实流量分布**上比较候选模型的常见手段；脱敏生产回放、离线 eval 和人工抽查仍各自覆盖不同风险。常见上线链是离线 eval → 去副作用影子 → 金丝雀（canary）→ 扩量，尽量复用同一套 scorer。回滚阈值要由 rubric 基线方差、样本量、业务风险和标签延迟决定，不能跨产品固定成 2–3 个百分点或 15–60 分钟。
 
 ---
 
@@ -462,10 +480,10 @@ WHERE ts >= now() - INTERVAL 1 DAY GROUP BY 1,2 ORDER BY usd DESC;
 |---|---|---|
 | **静默 cache miss** | `cache_read_tokens` 骤降为 0，账单涨 3–5× 而流量不变 | 做成一等监控指标 + 前缀指纹变化率告警 |
 | **failover 后缓存不回迁** | 一次故障后成本永久抬高 | 亲和路由要有"回归主接入点"的收敛逻辑，不能只有溢出没有回落 |
-| **预扣泄漏** | 租户被限流但用量不高 | `finally` 必须 settle；给 reservation 加 TTL 自动回收 |
+| **预扣状态悬空** | 租户被限流但已确认用量不高 | 正常路径幂等 settle；崩溃路径标 `unknown` 并对账，只退还已确认未消费部分，不能 TTL 到期盲目全退 |
 | **重试放大（retry amplification）** | 上游 429 时网关自身流量翻倍 | 重试预算（retry budget）≤10%、指数退避 + 抖动、熔断半开 |
-| **静默截断** | 下游 JSON 解析错误率上升，网关无告警 | 流内 error 事件 + `x-llm-stream-outcome` + 部分输出显式标注 |
-| **控制面故障拖垮数据面** | 网关 5xx 与配置服务同步下降 | 策略本地缓存 + 降级为"放行 + 记账"，宁可事后追账不要全站不可用 |
+| **静默截断** | 下游 JSON 解析错误率上升，网关无告警 | 流内终止 error + `partial: true`；仅在协商支持时用 HTTP trailer，SDK 未见 finish 一律失败 |
+| **控制面故障拖垮数据面** | 网关 5xx 与配置服务同步下降 | 使用带有效期的最后已知良好快照；无有效快照时，认证/隔离/驻留/硬预算 fail closed，只有批准过的低风险功能可退化 |
 | **限流 Redis 热点** | Redis p99 0.5 ms → 5 ms | 切本地租约模式，接受 1–3% 超发 |
 | **模型下线/改名** | 上游 404 或行为突变 | 模型注册表带生命周期状态；provider 弃用公告接入告警；别名层是你唯一的缓冲带 |
 | **tokenizer 换代** | 同样任务突然被截断；预算莫名超支 | 跨代升级先跑 `count_tokens` 重新标定 `max_tokens` 与限流阈值（Claude 4.7+ 约 +30% token） |
@@ -483,7 +501,7 @@ WHERE ts >= now() - INTERVAL 1 DAY GROUP BY 1,2 ORDER BY usd DESC;
 2. **在网关里做 agent 循环 / 重排 / 长任务编排。** 有状态的东西放应用层或专门的 runtime。
 3. **默认开语义缓存**（污染评测、跨权限边界、时效性问题返回过期答案）；**跨模型自动降级默认开**（见 §5）；**总时长超时**（见 §8）。
 4. **同步依赖计量系统** —— 计费系统的可用性会变成产品的可用性。
-5. **没有 break-glass。** 网关是强制路径时必须有一条经审批、有留痕、限时生效的直连通道，否则你的 MTTR 上限就是网关的修复时间。
+5. **没有 break-glass。** 网关是强制路径时应准备经审批、有留痕、限时且最小权限的备用数据面或预配置直连凭证；它仍须保留租户/驻留等硬边界，不能把“应急”变成无治理绕行。
 6. **把网关可用性目标定得和业务一样。** 它在所有业务的关键路径上，目标要高一档；同时数据面必须能在控制面全挂时继续跑。
 
 ---
@@ -504,7 +522,7 @@ WHERE ts >= now() - INTERVAL 1 DAY GROUP BY 1,2 ORDER BY usd DESC;
 ## 面试官会追问
 
 1. 为什么按 token 限流而不是按请求数？流式请求在开始时不知道输出长度，你怎么预扣和结算？漏掉结算会怎样？
-2. 你的网关是有状态的还是无状态的？如果要吃前缀缓存的红利，负载均衡策略必须变成什么？代价是什么？
+2. 网关进程可以无状态，为什么路由仍要感知缓存和队列状态？自建推理与托管 API 分别能控制到哪一层？
 3. Anthropic 挂了，你自动切到 OpenAI。列出这个决定会造成的三个下游问题。你会怎么把它变成安全的默认值？
 4. 流式响应已经发出了 3,000 个 token，上游断了。HTTP 状态码是 200，你怎么办？这条请求要计费吗？
 5. 客户端中途断开连接，你从哪里拿到 usage？拿不到怎么办？对账时怎么标记？
@@ -514,4 +532,6 @@ WHERE ts >= now() - INTERVAL 1 DAY GROUP BY 1,2 ORDER BY usd DESC;
 
 ---
 
-**下一篇** → [03-multi-tenant-vector-search.md](03-multi-tenant-vector-search.md)
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**案例顺读下一篇** → [03-multi-tenant-vector-search.md](03-multi-tenant-vector-search.md)
