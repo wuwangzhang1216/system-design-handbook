@@ -45,7 +45,7 @@
 | 延迟放大 | latency amplification | | "At 90% utilization you get 10x latency amplification — that's why we target 60 to 70%." |
 | 利用率 | utilization | ⚠ 不是 usage rate | "Steady-state target utilization for online services is 60 to 70%." |
 | 余量 / 头部空间 | headroom ◆ | ⚠ 不说 margin（那是利润或页边距） | "I leave twenty to thirty percent headroom for traffic jitter." |
-| 峰谷比 | peak-to-average ratio / peak-to-trough ratio | ⚠ 不是 peak valley ratio | "I'm assuming a 3x peak-to-average ratio — tell me if that's wrong." |
+| 峰均比；峰谷比 | **peak-to-average ratio**；**peak-to-trough ratio** | 两个分母不同：容量估算通常用“峰值 ÷ 均值”，中文应写**峰均比**；只有真的除以最低谷值时才是峰谷比。都不是 peak valley ratio | "I'm assuming a 3x peak-to-average ratio — tell me if that's wrong." |
 | 秒杀 | flash sale | ⚠ 绝对不要说 second kill | "A flash sale can be 100x the average, so we pre-scale instead of autoscaling." |
 | 队头阻塞 | head-of-line blocking ◆ | 连字符不能省，缩写 HOL blocking | "One slow message causes head-of-line blocking for the whole partition." |
 | 扇出 | fan-out (n.) / fan out (v.) | 名词带连字符，动词分开写 | "A celebrity post is a hundred-million fan-out write, so celebrities go pull." |
@@ -76,7 +76,7 @@
 | 中文 | English | 常见误译 / 注意 | 面试例句 |
 |---|---|---|---|
 | 线性一致性 | linearizability ♪ | 形容词 linearizable。⚠ 不等于 serializability | "R plus W greater than N doesn't give you linearizability — for that you need consensus." |
-| 强一致性 | strong consistency | ⚠ 形容词说 strongly consistent | "Strong consistency costs you an extra round trip on every read." |
+| 强一致性 | strong consistency | ⚠ 形容词说 strongly consistent；具体成本取决于复制协议和读路径 | "A strongly consistent read may need a leader or quorum round trip; I would measure that cost in this topology." |
 | 最终一致性 | eventual consistency | ⚠ 形容词说 eventually consistent | "Default reads are eventually consistent; you opt into strong reads." |
 | 读己之写 | read-your-writes ◆ | 固定写法，别改成 read-my-write | "The user saves and the list doesn't show it — that's a read-your-writes violation." |
 | 陈旧读 | stale read | | "Which path can tolerate a stale read, and which absolutely can't?" |
@@ -90,7 +90,7 @@
 | 丢失更新 | lost update | | "The compensation overwrote a concurrent write — classic lost update." |
 | 幂等 | idempotent ♪⚠ | **全场最高频的发音坑**，见文末 | "Every side-effecting endpoint has to be idempotent." |
 | 幂等性 | idempotency ♪ | idempotency 比 idempotence 更常用；两个都能听懂 | "At-least-once delivery means idempotency is mandatory, not optional." |
-| 幂等键 | idempotency key | ⚠ 不是 idempotent key | "The idempotency key has to be derived from business semantics, not a fresh UUID per retry." |
+| 幂等键 | idempotency key | ⚠ 不是 idempotent key；随机 UUID 可以用，但必须在首次尝试前持久化并由同一业务操作的所有重试复用 | "An idempotency key identifies one business operation, not one network attempt; a fresh UUID per retry defeats it." |
 | 乐观并发控制 | optimistic concurrency control (OCC) | | "We use optimistic concurrency — update where version equals N." |
 | 乐观锁 | optimistic locking | ⚠ 它不是锁；别把 optimistic lock 当名词用 | "409 from optimistic locking means re-read and retry; 409 from an idempotency key means stop." |
 | 条件更新 | conditional update / compare-and-swap (CAS) | CAS 读 "cass" 或 "C-A-S" | "A conditional update gives you the same mutual exclusion without a lock." |
@@ -101,7 +101,7 @@
 | 补偿事务 | compensating transaction ◆ | ⚠ 不是 rollback transaction | "Compensation isn't a rollback — it's a new forward business operation." |
 | 法定人数 | quorum ♪ | 读 KWOR-um，两个音节 | "R plus W greater than N gives you quorum overlap, not linearizability." |
 | 双写问题 | dual-write problem ◆ | | "Writing to the DB and publishing to Kafka is the classic dual-write problem." |
-| 精确一次 | exactly-once ⚠ | 传输层不存在。诚实说法是 effectively-once | "Exactly-once billing doesn't exist in transport — it's at-least-once delivery plus idempotent apply." |
+| 精确一次 | exactly-once ⚠ | 必须说清边界：单个流处理系统内可能支持；跨外部副作用通常做 effectively-once | "Kafka can give us exactly-once processing inside its transaction boundary; billing still needs idempotent apply and reconciliation." |
 | 至少一次 / 至多一次 | at-least-once / at-most-once | 做定语时连字符不能丢 | "Delivery is at-least-once, so every compensation has to be idempotent." |
 | 超卖 | overselling | ⚠ 名词用 -ing 形式 | "We tolerate slight overselling and compensate afterwards." |
 | 一致性边界 | consistency boundary | | "The consistency boundary is the account balance; everything else can be eventual." |
@@ -225,7 +225,7 @@
 | 削峰 | smooth traffic spikes / buffer the burst ⚠ | ⚠ 见第 15 组，绝不要直译 | "If you're only smoothing a 2x spike, just add machines instead." |
 | 饥饿 | starvation ⚠ | ⚠ 不是 hunger | "Interactive tasks must not starve behind batch — separate queues or weighted round-robin." |
 | 公平队列 | fair queuing | | "Round-robin is wrong when request cost varies — you want deficit-based fair queuing." |
-| 两将军问题 | Two Generals Problem | 首字母大写 | "End-to-end exactly-once delivery is impossible — that's the Two Generals Problem." |
+| 两将军问题 | Two Generals Problem | 首字母大写；说明不可靠通信下无法靠有限消息获得共同确定性 | "The Two Generals Problem is why another acknowledgement cannot create perfect common knowledge over an unreliable channel." |
 
 ---
 
@@ -292,7 +292,7 @@
 | 时钟漂移 | clock drift | 速率偏差 | "Quartz drift is about plus or minus 50 ppm — roughly four seconds a day." |
 | 时钟偏移 | clock skew | 瞬时差值 | "Allow at most 60 seconds of clock skew on exp and nbf." |
 | 时钟跳变 | clock step / clock jump | | "NTP can step the clock backwards, so t2 minus t1 goes negative." |
-| 时钟回拨 | clock rollback | | "Clock rollback is Snowflake's only correctness risk — you block or switch worker IDs, never keep issuing." |
+| 时钟回拨 | clock rollback | | "Clock rollback is one Snowflake risk; duplicate worker IDs and sequence exhaustion also need explicit handling." |
 | 单调时钟 | monotonic clock ⚠ | ⚠ 不是 monotonous | "Always measure durations with a monotonic clock, never wall clock." |
 | 逻辑时钟 | logical clock | | "Logical clocks give you causality without trusting the wall clock." |
 | 向量时钟 | vector clock | | "Vector clocks can actually detect concurrent updates; Lamport clocks can't." |
@@ -547,7 +547,7 @@
 | 工具调用 | tool calling / function calling ⚠ | ⚠ 不是 tool invoke。两个说法都通用 | "Every provider has a different tool calling format — that's why you need one abstraction." |
 | 工具定义 | tool definition | | "Changing a single tool definition invalidates the entire cached prefix." |
 | 并行工具调用 | parallel tool calls | | "Parallel tool calls are for reads and reviews; writes stay single-threaded." |
-| 轮次 | turn ⚠ | ⚠ 不是 round。上限固定说 max turns | "Agent cost is quadratic in turns, so cutting turns beats swapping models." |
+| 轮次 | turn ⚠ | ⚠ 不是 round。上限固定说 max turns；只有每轮重发全部历史、没有压缩且缓存未命中时，输入 token 才会出现明显二次项 | "With full-history resend and no cache hits, input cost can grow quadratically in the number of turns." |
 | 终止条件 | termination criteria / stop condition | | "Termination is an OR over four independent gates." |
 | 轨迹 | trajectory ♪ | truh-JEK-tur-ee | "Outcome-only eval is blind to multi-agent failures; you need trajectory-level eval." |
 | 子代理 | sub-agent / subagent | | "The sub-agent burns fifty thousand tokens and returns a one-thousand-token summary." |
@@ -724,7 +724,7 @@
 | 双活 | double live | **active–active** | "The hard part of active-active isn't routing, it's write conflicts." |
 | 毛刺 | burr / glitch | **latency spike** / p99 spike | "Compaction causes latency jitter — you see p99 spikes every few minutes." |
 
-### 14.2 动作与搭配类（15 个）
+### 15.2 动作与搭配类（15 个）
 
 | 中文 | ❌ 中式英文 | ✅ 地道说法 | 面试例句 |
 |---|---|---|---|
@@ -732,7 +732,7 @@
 | 下线（服务） | offline it | **decommission** / sunset / take it out of service | "We sunset the old endpoint after 180 days of brownouts." |
 | 回滚 | roll back the version | **roll back**（动词） / **rollback**（名词） / revert | "One-click rollback is the highest-ROI mitigation we have." |
 | 削峰填谷 | cut peak fill valley | **smooth traffic spikes** / flatten the peak | "Going async buys us the right to smooth traffic spikes instead of provisioning for them." |
-| 扛住流量 | resist the traffic | **handle** / **absorb** / sustain X QPS | "A single primary sustains about 20k TPS; past that we shard." |
+| 扛住流量 | resist the traffic | **handle** / **absorb** / sustain X QPS | "Our load test shows this primary sustains 5k TPS within the latency SLO; past that we batch or shard." |
 | 摘节点 | pick off the node | **drain** the node / take it out of rotation | "We drain the node instead of killing it outright." |
 | 打散 key | break up the key | **salt the key** / spread it across suffixes | "For the whales we salt the key to spread them across shards." |
 | 降级 | downgrade ⚠ | **degrade gracefully** / fall back to | "At 100 percent of budget we degrade gracefully to a cheaper model instead of erroring out." |
@@ -820,5 +820,7 @@
 
 ---
 
-**下一篇** → [05-english-phrasebook.md](05-english-phrasebook.md)：词有了，接下来是把词组装成有分量的整句。
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**面试专章顺读下一篇** → [05-english-phrasebook.md](05-english-phrasebook.md)：词有了，接下来是把词组装成有分量的整句。
 **配合使用** → [03-cheatsheet.md](03-cheatsheet.md) 背数字与公式｜[02-question-bank.md](02-question-bank.md) 54 题自测｜[01-interview-framework.md](01-interview-framework.md) 控 45 分钟节奏

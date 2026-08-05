@@ -18,12 +18,12 @@
 
 | 概念 | 一句话 | 详见 |
 |---|---|---|
-| 幂等 | 同一个操作执行多次，效果和执行一次相同 | [00-concepts §12](../00-foundations/00-concepts.md) |
-| 幂等键 | 客户端生成、服务端去重的请求标识，让重试不产生第二次副作用 | [00/01 §5](../00-foundations/01-fundamentals.md) |
-| 背压 | 处理不过来时向上游反向施压（拒绝/阻塞），而不是无限排队 | [00/01 §6](../00-foundations/01-fundamentals.md) |
-| 超时预算传播 | 剩余时间随请求逐层传下去，每层只减不加 | [00/01 §9](../00-foundations/01-fundamentals.md) |
-| 有状态 vs 无状态 | 判据是"随机杀掉一台，有没有东西永久消失" | [00-concepts §9](../00-foundations/00-concepts.md) |
-| 前缀缓存与失效级联 | 改了靠前的内容，它后面所有内容的缓存一起作废 | [02 §9](02-context-engineering-and-rag.md) |
+| 幂等 | 同一个操作执行多次，效果和执行一次相同 | [00-concepts §12](../00-foundations/00-concepts.md#12-本章术语速查) |
+| 幂等键 | 客户端生成、服务端去重的请求标识，让重试不产生第二次副作用 | [00/01 §5](../00-foundations/01-fundamentals.md#5-幂等idempotency分布式系统的第一公民) |
+| 背压 | 处理不过来时向上游反向施压（拒绝/阻塞），而不是无限排队 | [00/01 §6](../00-foundations/01-fundamentals.md#6-背压backpressure没有它系统就会雪崩cascading-failure) |
+| 超时预算传播 | 剩余时间随请求逐层传下去，每层只减不加 | [00/01 §9](../00-foundations/01-fundamentals.md#9-幂等--重试--超时三件套必须一起设计) |
+| 有状态 vs 无状态 | 运维判据是：随机杀掉一台实例后，服务能否只靠外部持久化状态恢复，而不丢失唯一数据或会话进度 | [00-concepts §9](../00-foundations/00-concepts.md#9-有状态-vs-无状态) |
+| 前缀缓存与失效级联 | 改了靠前的内容，它后面所有内容的缓存一起作废 | [02 §9](02-context-engineering-and-rag.md#9-上下文组装顺序与前缀缓存的硬约束) |
 
 **这一章要回答的问题**
 
@@ -45,7 +45,7 @@
 | 提示注入 | prompt injection | 攻击者把指令藏在模型会读到的数据里（网页、邮件、文件名、工具返回值），让模型把它当命令执行 |
 | MCP | Model Context Protocol | 工具提供方与 Agent 运行时之间的对接协议，用来消掉"N 个 Agent × M 个工具"份集成代码 |
 | 检查点 | checkpoint | 把一次运行的状态定期落盘，进程崩了能从这里接着跑而不是从头来 |
-| 租约 | lease | 一个带过期时间的"这活归我了"的声明，持有者要定期续期；持有者挂掉租约自然过期，活被别人接走 |
+| 租约 | lease | 一个带过期时间的"这活归我了"的声明；每次重新领取还要递增 `lease_epoch` 作为 fencing token，阻止旧 worker 在失联后继续写 |
 | 人在回路 | human-in-the-loop (HITL) | 在特定动作执行前强制停下来等人批准 |
 | 取消传播 | cancellation propagation | 取消信号要能逐层送达在飞的模型请求、工具调用和子 Agent，并有强制兜底 |
 
@@ -82,12 +82,13 @@ def agent_run(run_id, task, budget: Budget, deadline_ts):
         calls = resp.tool_calls
         for c in calls: validate_schema(c); authorize(c, state.principal)
         if not calls: return finalize(state, Stop.MODEL_DONE, resp.text)   # 显式完成信号
-        # 4 执行：读并行、写串行（single-writer）
+        # 4 执行：纯读可并行；写默认串行（显式声明资源不相交时才可并行）
         reads  = [c for c in calls if TOOLS[c.name].pure]
         writes = [c for c in calls if not TOOLS[c.name].pure]
         results = gather(reads, limit=TOOL_FANOUT, timeout=TOOL_TIMEOUT)
         for w in writes:
-            results.append(exec_with_idempotency(w, key=(run_id, state.step_id)))
+            results.append(exec_with_idempotency(
+                w, key=(run_id, state.step_id, w.id)))
         # 5 回填：顺序必须与 calls 一致，否则 prefix cache 全废
         state.history += [resp.assistant_msg] + [normalize(r) for r in order_by(results, calls)]
         state.step_id += 1
@@ -102,7 +103,7 @@ def agent_run(run_id, task, budget: Budget, deadline_ts):
 | 3 校验 | 校验失败就抛异常终止 | 单次幻觉参数杀死整个 run | 把错误当**工具结果**回填，给 1–2 次自纠（self-correction）机会再终止 |
 | 3 授权 | 在沙箱里判权限 | 沙箱内的判断可被注入影响 | 授权在**沙箱外**做，沙箱只是第二道 |
 | 4 执行 | 无超时，或超时 = 整轮失败 | 一个 30s 慢工具拖垮 p99 | 每工具独立超时（30–60s），超时也回填结构化结果 |
-| 4 执行 | 并行写同一资源 | Agent PR 合并冲突率实测 **27.67%** | 写单线程，或分文件/分资源所有权 |
+| 4 执行 | 并行写同一资源 | 产生覆盖、重复副作用或合并冲突 | 默认串行；只有工具声明稳定的 `conflict_key`，且调度器证明资源集合不相交时才并行 |
 | 5 回填 | 原样塞入几十 KB 输出；顺序随完成先后变 | 上下文最大污染源；前缀漂移（prefix drift） → 缓存不命中 | 截断（truncation） + 落盘只回引用（§3）；按 `tool_use_id` 定序 |
 | 6 终止 | 判据放在循环底部 | 恢复后会多跑一轮、多花一次钱 | 放顶部，恢复即重新判定 |
 
@@ -222,9 +223,9 @@ def truncate(result, budget):
 
 ## 4. 并行化与依赖
 
-2026 年 Anthropic / Cognition / LangChain 三方收敛出的一条规则：
+一条安全的默认规则是：
 
-> **并行只用于"读"和"评"，"写"必须单线程（single-writer）。**
+> **纯读和相互独立的评估可以并行；写操作默认串行。只有资源所有权明确、冲突键不相交且下游幂等时，写才可以并行。**
 
 原因不是性能而是语义：**动作隐含决策，冲突的决策产生糟糕结果**。两个并行 Agent 各自定了配色方案，合起来就是垃圾。
 
@@ -233,11 +234,11 @@ def truncate(result, budget):
                         write_file(c) run_migration()        ──► 串行，按模型给出的顺序 + 幂等键
 ```
 
-判定"能否并行"的三条：**纯读**（`pure=true` 声明在工具元数据里，不靠模型判断）、**无共享资源**（同一路径/同一行/同一账户即冲突）、**失败可独立重试**。
+判定"能否并行"至少看四条：工具是否声明 `pure=true`、是否有稳定的资源/冲突键、资源集合是否不相交、失败能否独立重试。声明来自受信任的工具注册表，不能由模型临时决定。数据库对不同行的幂等 upsert 可以并行；同一账户扣款即使参数不同也应串行或交给下游事务化。
 
 | 并发上限层级 | 参数 | 建议值 | 缺失后果 |
 |---|---|---|---|
-| 单轮扇出（fan-out：一次请求向下分发出 N 个并行的下游调用；N 越大，整体延迟越接近最慢那个下游的高分位，见 [`00/01 §7`](../00-foundations/01-fundamentals.md)） | `TOOL_FANOUT` | 5–10 | 一轮拉起 50 个子任务打爆下游 |
+| 单轮扇出（fan-out：一次请求向下分发出 N 个并行的下游调用；N 越大，整体延迟越接近最慢那个下游的高分位，见 [`00/01 §7`](../00-foundations/01-fundamentals.md#7-尾延迟放大tail-latency-amplification)） | `TOOL_FANOUT` | 5–10 | 一轮拉起 50 个子任务打爆下游 |
 | 单 run 并发 | 子 Agent 并发 | 参考 Claude Code Dynamic Workflows 硬上限：**同时最多 16 个 Agent、单次运行总计 1,000 个**，>25 个或预计 >150 万 token 时预警 | 扇出失控（Anthropic 观察到简单 query 被拉起 50+ 子 Agent） |
 | 组织级 | spend limit / TPM 配额 | 按团队日预算 | 一次跑飞的 workflow 吃掉全团队当天配额 |
 
@@ -316,7 +317,7 @@ Anthropic 在自己的[容器化复盘](https://www.anthropic.com/engineering/ho
 
 ## 7. 长任务与可恢复执行
 
-| checkpoint 粒度 | 写放大（write amplification：一次逻辑上的"存一下"引发多少次实际磁盘写入，见 [`00-concepts §11`](../00-foundations/00-concepts.md)） | 崩溃损失 | 适用 |
+| checkpoint 粒度 | 写放大（write amplification：一次逻辑上的"存一下"引发多少次实际磁盘写入，见 [`00-concepts §11`](../00-foundations/00-concepts.md#11-三个最常见的优化手段各在优化什么)） | 崩溃损失 | 适用 |
 |---|---|---|---|
 | 每轮循环后 | 中 | ≤1 轮（一次模型调用 + 一批工具） | **默认选择** |
 | 每个工具调用后 | 高 | ≤1 个工具 | 工具昂贵（长跑构建、付费 API） |
@@ -326,6 +327,7 @@ LangGraph 的 `durability` 三档正是这个谱系：`"exit"` 只在图退出�
 
 ```jsonc
 { "run_id":"…", "step_id":42,                          // 幂等键的两个组成部分
+  "lease_epoch":17,                                      // 每次重新领取 run 都递增；旧 epoch 的写必须被拒绝
   "history":[…],                                       // 已提交的消息（含 tool_use_id）
   "pending_calls":[{"id":"tu_7","name":"write_file","status":"in_flight"}],
   "budget_spent":{"input_tokens":812340,"output_tokens":41200,"usd":4.31},
@@ -339,22 +341,33 @@ LangGraph 的 `durability` 三档正是这个谱系：`"exit"` 只在图退出�
 
 ### checkpoint ≠ durable execution
 
-这一点**存在争议**：Diagrid 主张 LangGraph / CrewAI / Google ADK 的 checkpoint 模型对生产 Agent workflow 不够（缺确定性重放（deterministic replay：把历史上每一步的结果按顺序记进日志，恢复时重跑代码但直接读日志里的旧结果，从而精确复现到崩溃那一刻）、跨服务编排、精确一次（exactly-once：一个副作用最终恰好发生一次；对比 at-least-once 至少一次，可能重复）副作用）；LangChain 主张配了 checkpointer 即为 durable execution，可任意点 pause/resume。**分歧的根子是"durable"的定义不同：状态快照恢复 vs 执行历史重放。** 但双方对工程结论一致——**任何有外部副作用的写操作必须携带由 `(workflow_id, step_id)` 派生的幂等键（idempotency key）**：
+这一点**存在争议**：Diagrid 主张 LangGraph / CrewAI / Google ADK 的 checkpoint 模型对生产 Agent workflow 不够（缺确定性重放（deterministic replay：把历史上每一步的结果按顺序记进日志，恢复时重跑代码但直接读日志里的旧结果，从而精确复现到崩溃那一刻）、跨服务编排、精确一次（exactly-once：一个副作用最终恰好发生一次；对比 at-least-once 至少一次，可能重复）副作用）；LangChain 主张配了 checkpointer 即为 durable execution，可任意点 pause/resume。**分歧的根子是"durable"的定义不同：状态快照恢复 vs 执行历史重放。** 但双方对工程结论一致——**任何有外部副作用的写操作都应携带由 `(workflow_id, step_id, tool_use_id)` 派生的幂等键（idempotency key）**。前两项定位恢复步骤，第三项区分同一步里的多次写：
 
 ```python
 def exec_with_idempotency(call, key):
     idem = f"{key[0]}:{key[1]}:{call.id}"             # run_id : step_id : tool_use_id
-    if (cached := idem_store.get(idem)) is not None: return cached   # 重放命中，不重复执行
-    result = do(call, idempotency_key=idem)           # 下游 API 也传这个键（Stripe 风格）
-    idem_store.put(idem, result, ttl=7*86400); return result
+    policy = action_contract(call.name).idempotency
+    # 不能写死 7 天：至少覆盖 workflow 最晚恢复/重试、下游动作契约与争议/对账窗口。
+    tombstone_until = max(policy.workflow_retry_until(key[0]),
+                          policy.action_retry_until(call),
+                          policy.reconciliation_or_dispute_until(call))
+    rec = idem_store.claim_once(                       # 原子占位，挡住并发重放
+        idem, request_hash=hash_request(call),
+        result_ttl=policy.result_replay_ttl,
+        tombstone_until=tombstone_until)
+    if rec.already_exists:
+        return restore_or_reconcile(rec)               # 即使完整结果已清，也绝不再次执行
+    result = do(call, idempotency_key=idem)            # 下游 API 也传这个键（Stripe 风格）
+    idem_store.complete(idem, result, downstream_ref=extract_operation_ref(result))
+    return result
 ```
 
-没有这个键，"可恢复"会退化成"重新执行一次"——用户被收两次款、邮件发两遍。另一条容易踩的恢复语义（Claude Code Dynamic Workflows 实测行为）：**恢复按 Agent 启动顺序回放，缓存命中止于第一个未完成的 Agent，此后启动的 Agent 全部重跑，哪怕它们已经完成**（A,B,C,D 停在 B → 只有 A 命中缓存）。设计推论：**把工作切成很多小 Agent，比一个长 Agent 能保住更多进度。**
+没有这个键，"可恢复"会退化成"重新执行一次"——用户被收两次款、邮件发两遍。**完整响应与去重证据是两种保留期**：大响应可在 `result_replay_ttl` 后转冷存储或删除；紧凑 tombstone 至少保留 `key + request_hash + terminal_status + downstream_ref + executed_at`，直到上面三个窗口都结束。付款、发信、删除等动作若契约上没有一个“过了此刻重放就安全”的时间点，tombstone 就长期归档，不能因省一点热存储而重新开放副作用。命中只有 tombstone、拿不到原响应时，应凭 `downstream_ref` 查询/对账或进入人工恢复，**不能把 miss 当成“没执行过”**。具体能保住多少进度取决于工作流图、检查点边界和引擎的重放语义；把长节点拆成有明确输入输出的小步骤通常能缩小重做范围，但“拆成更多 Agent”本身并不自动带来更好的恢复性，反而可能增加协调与一致性成本。
 
 ### 可恢复执行状态机
 
 ```
-                 调度器取到 + lease(worker, ttl=60s)
+                 调度器原子领取 + lease(worker, ttl=60s, lease_epoch++)
   create ──► PENDING ─────────────────────────────────► RUNNING ──┐ step 完成
                  ▲                                       │  ▲     │ → checkpoint
                  └──── 租约过期（worker 挂）─────────────┘  └─────┘   (step_id++)
@@ -370,19 +383,19 @@ def exec_with_idempotency(call, key):
   CANCELLED  经 CANCELLING（清理中）；**副作用不回滚**，只记录到 world_refs
 ```
 
-三条不显然的设计：① **RUNNING 靠租约（lease）而不是心跳标志位** —— worker 挂了租约自然过期、状态回 PENDING 被别人接走，这是 at-least-once，所以幂等键必须有；② **WAITING_FOR_HUMAN 是持久状态，不是内存里的 `await`**，进程重启后审批请求必须还在；③ **CANCELLED 不等于回滚（rollback）** —— 已发出的邮件收不回来，取消只保证"不再产生新的副作用"。
+四条不显然的设计：① **RUNNING 靠租约（lease）而不是心跳标志位** —— worker 挂了租约自然过期、状态回 PENDING 被别人接走，这是 at-least-once，所以幂等键必须有；② **租约必须带 fencing token**：每次领取在同一事务里递增 `lease_epoch`，worker 的 checkpoint、状态迁移和副作用网关请求都携带它，存储层只接受等于当前 epoch 的写。否则旧 worker 只是网络失联、并没有死亡，租约过期后仍能覆盖新 worker 的进度；第三方工具无法校验 epoch 时，至少由本方副作用网关拒绝旧 epoch，并继续依赖下游幂等键；③ **WAITING_FOR_HUMAN 是持久状态，不是内存里的 `await`**，进程重启后审批请求必须还在；④ **CANCELLED 不等于回滚（rollback）** —— 已发出的邮件收不回来，取消只保证"不再产生新的副作用"。
 
 **上面那张图是调度器视角的流转；下图沿用同一套状态名，补两个它没画的态——`SUSPENDED`（checkpoint 已落盘、等着被恢复）与 `FAILED`（错误已发生、还没决定重试还是收尾），以及由此暴露出来的可达性：哪些状态还有回到 `RUNNING` 的边，哪些一进去就再也出不来。**
 
 ```mermaid
 stateDiagram-v2
     [*] --> PENDING
-    PENDING --> RUNNING: lease acquired
+    PENDING --> RUNNING: lease acquired, epoch incremented
     RUNNING --> WAITING_FOR_HUMAN: high impact tool call
-    WAITING_FOR_HUMAN --> RUNNING: approved or rejected
+    WAITING_FOR_HUMAN --> RUNNING: approved or rejected, reacquire lease and epoch++
     WAITING_FOR_HUMAN --> EXPIRED: approval TTL of 24h elapsed
     RUNNING --> SUSPENDED: checkpoint flushed on deadline or disconnect
-    SUSPENDED --> RUNNING: resume only if code_version matches
+    SUSPENDED --> RUNNING: version matches, reacquire lease and epoch++
     RUNNING --> CANCELLED: cancel flag propagated into running tools
     RUNNING --> FAILED: tool or model error
     FAILED --> SUSPENDED: retryable so keep the checkpoint
@@ -410,7 +423,7 @@ stateDiagram-v2
 | [DBOS](https://www.dbos.dev/) | Postgres 即真理来源（source of truth） | **零新增基础设施** | 绑定 PG，规模上限即 PG 上限 |
 | Inngest | 事件驱动 step function | 托管为主，接入快 | 供应商绑定 |
 
-⚠ **未找到这四者在 Agent 负载下公开可复现的一手基准**，以上是定位差异而非性能对比。**值得上**：run 跨越数小时以上、有跨服务外部副作用（付款/开单/发信）、需要精确一次语义、需跨进程重启存活。**不值得**：交互式会话、纯只读研究任务、团队没人懂确定性重放——**引入 Temporal 是架构级承诺，它会重写你的错误处理、测试与部署方式**；这些场景下"Postgres 表 + 租约 + 幂等键"这套自研 200 行的方案够用，而且全队都读得懂。
+⚠ **未找到这四者在 Agent 负载下公开可复现的一手基准**，以上是定位差异而非性能对比。**值得上**：run 跨越数小时以上、有跨服务外部副作用（付款/开单/发信）、需要精确一次语义、需跨进程重启存活。**不值得**：交互式会话、纯只读研究任务、团队没人懂确定性重放——**引入 Temporal 是架构级承诺，它会重写你的错误处理、测试与部署方式**。这些场景可以从“Postgres 表 + 租约 + 幂等键”的小型实现起步；“约 200 行”只能代表教学原型，生产版还要补迁移、并发竞争、监控、清理、灾备和故障注入测试。
 
 **中断与取消**必须是协作式（cooperative） + 可传播 + 有兜底（fallback）：
 
@@ -445,9 +458,9 @@ Five Eyes 五国联合指南（2026-05-01，CISA + NSA + ASD + CCCS + NCSC-NZ + 
 
 ## 9. 并发与背压
 
-Agent 负载和普通 HTTP 负载的根本差别：**单个请求持续数分钟到数小时，且大部分时间在等待**。线程/进程模型完全不适用，必须是"持久化任务 + 无状态 worker + 租约"。
+Agent 负载和普通 HTTP 负载的根本差别：**单个请求可能持续数分钟到数小时，且大部分时间在等待**。线程、协程或进程仍可作为 worker 内的执行机制，但不能成为唯一状态载体；跨重启的运行状态应外置，长任务通常采用“持久化任务 + 可替换 worker + 租约”。
 
-（本节两个词：**水位线（watermark）**是一条预设的容量刻度线，越过就触发动作 —— 这里指全局在跑的 run 数超过阈值就开始拒新；**信号量（semaphore）**是一个计数式的并发闸门，最多放 N 个任务同时进入，满了后来者要么排队要么被拒。整节讲的是[`00/01 §6`](../00-foundations/01-fundamentals.md) 那条背压原理在 Agent 上的具体形态。）
+（本节两个词：**水位线（watermark）**是一条预设的容量刻度线，越过就触发动作 —— 这里指全局在跑的 run 数超过阈值就开始拒新；**信号量（semaphore）**是一个计数式的并发闸门，最多放 N 个任务同时进入，满了后来者要么排队要么被拒。整节讲的是[`00/01 §6`](../00-foundations/01-fundamentals.md#6-背压backpressure没有它系统就会雪崩cascading-failure) 那条背压原理在 Agent 上的具体形态。）
 
 ```
  API ──► runs 表(PENDING) ──准入：每租户并发配额 / 全局水位──► worker pool（无状态，持租约）
@@ -465,7 +478,7 @@ Agent 负载和普通 HTTP 负载的根本差别：**单个请求持续数分钟
 | 沙箱池 | 预热池（warm pool）大小 | 覆盖 p95 并发（冷启动 90–150 ms 时可以小） | 冷启动占端到端延迟比例上升 |
 | 模型侧 | TPM/RPM 配额 | **按租户分桶**，不要共享一个大池 | 一个租户吃掉全部配额 |
 
-**背压的正确姿势是拒绝（load shedding），不是排队。** Agent run 排队 10 分钟比立刻 429 更糟，因为用户不知道该等还是该走。规则：队列深度超阈值时对**新 run** 返回 429 + `Retry-After`，但**已在跑的 run 永远优先**（它花掉的 token 是沉没成本 sunk cost，杀掉等于纯亏）。会话硬上限要提前设计进去：E2B 的 Hobby 档 **1 小时**、Pro 档 **24 小时**是硬上限，容器休眠会中断进程 —— **不要把长任务押在单个沙箱存活上**，状态必须外置（progress 文件 + git commit + 结构化 feature list），沙箱要能被重建。
+**背压需要“有界排队 + 准入控制”，而不是无限排队。** 交互请求的预计等待超过产品承诺时，对新 run 返回 429 + `Retry-After`；可延迟的后台任务可以进入有容量、TTL 和优先级的 `PENDING` 队列。已运行任务也不是因为“花过钱”就永远优先——沉没成本不应影响决策；调度器应看用户优先级、deadline、剩余成本、是否已产生不可中断副作用和公平配额，必要时安全挂起低优先级任务。会话硬上限要提前设计进去：E2B 的 Hobby 档 **1 小时**、Pro 档 **24 小时**是硬上限，容器休眠会中断进程 —— **不要把长任务押在单个沙箱存活上**，状态必须外置（progress 文件 + git commit + 结构化 feature list），沙箱要能被重建。
 
 ---
 
@@ -501,8 +514,8 @@ Agent 负载和普通 HTTP 负载的根本差别：**单个请求持续数分钟
 | **凭据放进沙箱** | 一次成功注入就全丢（实测 24/25） | 沙箱外代理持有，只下发短时窄 scope 派生凭证 |
 | **依赖 MCP 协议层 session / SSE 续传** | 2026-07-28 已删除 | 无状态设计；长任务走 Tasks 扩展轮询；工具幂等 |
 | **per-connection 动态裁剪 tool 列表做租户隔离** | 新规范禁止 list 按连接变化，且会击穿客户端缓存与 prompt cache | 不同 server 端点，或授权后在调用时拒绝 |
-| **副作用工具没有幂等键** | 恢复 = 重复执行；用户被收两次款 | `(run_id, step_id, tool_use_id)` 派生键，下游也传 |
-| **一上来就上 Temporal** | 确定性重放约束会重写你的错误处理、测试与部署 | 先用 "PG 表 + 租约 + 幂等键"；跨小时 + 跨服务副作用时再升级 |
+| **副作用工具没有幂等键，或固定 7 天就删记录** | 恢复 = 重复执行；晚于 TTL 的重放仍会让用户被收两次款 | `(run_id, step_id, tool_use_id)` 派生键，下游也传；结果可短存，tombstone 按动作契约/重试/争议窗口保留 |
+| **一上来就上 Temporal** | 确定性重放约束会重写你的错误处理、测试与部署 | 先用 "PG 表 + 带 `lease_epoch` 的租约 + 幂等键/长期 tombstone"；跨小时 + 跨服务副作用时再升级 |
 | **用多 Agent 解决单 Agent 能解决的问题** | token 成本 15× vs 4×，且引入 orchestrator 类失效（占失效责任 67.7%） | 先把单 Agent 的工具与终止判据做对 |
 | **把长任务押在单个沙箱存活上** | 会话有 1h / 24h 硬上限，休眠会断进程 | 外部化状态：progress 文件 + git commit + 结构化任务清单 |
 | **审批弹窗当兜底** | 93% 自动批准率 = 审批疲劳 | 高影响清单静态定义 + 能力域批准，每 run ≤3 次弹窗 |
@@ -537,4 +550,6 @@ Agent 负载和普通 HTTP 负载的根本差别：**单个请求持续数分钟
 
 ---
 
-**下一篇** → [04-agent-memory-and-state.md](04-agent-memory-and-state.md)
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**AI 专章顺读下一篇** → [04-agent-memory-and-state.md](04-agent-memory-and-state.md)

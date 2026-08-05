@@ -2,6 +2,8 @@
 
 > 控制面全挂时数据面必须还能收钱。这一条不成立，后面所有设计都是装饰。
 > Cell 化不提升可用性，它只降低爆炸半径（blast radius）和缩短恢复时间 —— 别把这两件事混为一谈。
+>
+> **阅读分层**：§1–§5 是 Core；§6 之后是进阶落地。文中的容量、时延和控制器参数是示例起点，必须用自己的负载与故障演练重新标定。
 
 ---
 
@@ -18,11 +20,11 @@
 
 | 概念 | 一句话 | 详见 |
 |---|---|---|
-| 无状态 / 有状态 | 随机杀掉一台机器，有没有东西永久消失 | [00-concepts §9](../00-foundations/00-concepts.md) |
-| 可用性会相乘 | 关键路径上每加一个串行依赖，整体可用性只会更低（0.999³ = 99.7%） | [00-concepts §10](../00-foundations/00-concepts.md) |
-| 强一致与脑裂 | 配置读到旧值只是难受，配置出现两个"权威"是事故 | [00-concepts §5 §6](../00-foundations/00-concepts.md) |
-| 幂等 | 同一个操作重复执行，效果和执行一次相同 | [00/01 §5](../00-foundations/01-fundamentals.md) |
-| 重试、退避与超时 | 重试必须带指数退避 + 抖动，且受全局重试预算约束 | [00/01 §9](../00-foundations/01-fundamentals.md) |
+| 无状态 / 有状态 | 随机杀掉一台机器，有没有东西永久消失 | [00-concepts §9](../00-foundations/00-concepts.md#9-有状态-vs-无状态) |
+| 可用性会相乘 | 关键路径上每加一个串行依赖，整体可用性只会更低（0.999³ = 99.7%） | [00-concepts §10](../00-foundations/00-concepts.md#10-可用性几个-9-是什么意思) |
+| 强一致与脑裂 | 配置读到旧值只是难受，配置出现两个"权威"是事故 | [00-concepts §5 §6](../00-foundations/00-concepts.md#5-副本分片分区--三个被混用的词) |
+| 幂等 | 同一个操作重复执行，效果和执行一次相同 | [00/01 §5](../00-foundations/01-fundamentals.md#5-幂等idempotency分布式系统的第一公民) |
+| 重试、退避与超时 | 重试必须带指数退避 + 抖动，且受全局重试预算约束 | [00/01 §9](../00-foundations/01-fundamentals.md#9-幂等--重试--超时三件套必须一起设计) |
 | 多租户的隔离级别 | pool / schema / silo 各自的成本与爆炸半径 | [02/03](../02-architecture-patterns/03-multi-tenancy.md) |
 
 **这一章要回答的问题**
@@ -44,7 +46,7 @@
 | 漂移 | drift | 现实偏离了期望态，通常是因为有人绕过控制面手工改了东西 |
 | 最后一份好配置 | last-known-good | 最后一次成功加载并验证过的配置，落盘保存；拿不到新配置时就一直用它 |
 | 爆炸半径 | blast radius | 一次故障最多能波及多大比例的租户 / 流量 / 收入 |
-| Cell 架构 | cell-based architecture | 把一个装 N 个租户的系统，复制成 K 套互不通信的完整副本，每套只装 N/K 个租户 |
+| Cell 架构 | cell-based architecture | 把一个装 `T` 个租户的系统，复制成 `K` 套互不依赖的完整副本；均匀分布只是理想情况，每套约装 `T/K` 个租户 |
 | 围栏 / 纪元号 | fencing / epoch | 给"谁是当前归属方"配一个只增不减的编号，带着旧编号来的写入一律被拒绝 |
 | 紧急旁路 | break-glass | 一条绕开控制面正常逻辑、直接改底层存储的、全程留审计的应急运维通道 |
 | 死区 / 滞回 | deadband / hysteresis | 指标落在两个阈值之间时控制器什么都不做，以免在阈值附近来回抖动 |
@@ -60,7 +62,7 @@
 | 可用性目标 | 99.9%（月停 43 分钟） | 99.99%+（月停 4.3 分钟） |
 | 延迟预算（latency budget） | 秒级、甚至分钟级可接受 | p99 毫秒级 |
 | 变更频率 | 高（每天多次发布） | 低、保守、金丝雀（canary：先把新版本只放给极小一部分流量或租户，观察指标没问题再逐步扩大） |
-| 一致性需求 | **强一致（strong consistency）**（配置不能脑裂 split-brain：网络一断，两边都以为自己是权威、各自接受写入，见 [00-concepts §5](../00-foundations/00-concepts.md)） | 最终一致（eventual consistency）通常可接受 |
+| 一致性需求 | **强一致（strong consistency）**（配置不能脑裂 split-brain：网络一断，两边都以为自己是权威、各自接受写入，见 [00-concepts §5](../00-foundations/00-concepts.md#5-副本分片分区--三个被混用的词)） | 最终一致（eventual consistency）通常可接受 |
 | 挂掉的后果 | 不能开通/改配置，**存量业务不受影响** | **收入立刻归零** |
 
 **铁律（static stability，[AWS Builders' Library](https://aws.amazon.com/builders-library/static-stability-using-availability-zones/) 的原始表述）：**
@@ -154,7 +156,7 @@ def reconcile(key: str) -> Result:
 
 1. **Level-triggered，不是 edge-triggered。** 事件只用来"提示该看一眼了"，绝不携带增量语义。丢一个事件的后果必须只是"晚 30 秒收敛"，而不是"永远不收敛"。所以**周期全量扫描（drift scan）是必需的**，不是冗余。
 2. **`already_done()` 必须是语义检查**（"数据库里有没有这个 schema"），不是状态位检查（"我在 status 里记过"）。后者在控制面自己崩溃重启后就失效了。
-3. **幂等键（idempotency key）要从 `(资源 key, generation, step)` 派生**，不是随机 UUID。重试必须生成同一个键 —— 这是最常见的 bug（详见 [02-billing-and-metering.md](02-billing-and-metering.md) §4）。
+3. **幂等键（idempotency key）必须稳定标识一次业务步骤。** 控制器最方便的做法是从 `(资源 key, generation, step)` 派生；随机 UUID 也可以，但必须在首次调用前写入持久状态并由所有重试复用。每次重试生成新键才是最常见的 bug（详见 [02-billing-and-metering.md](02-billing-and-metering.md) §4）。
 4. **区分 Terminal 与 Transient**。把 400 当 500 重试，会让一个坏租户的坏配置永久占满你的 worker。
 
 ### 退避（backoff）与并发控制
@@ -183,7 +185,7 @@ Per-key 串行：同一个 key 同一时刻只有一个 reconcile 在跑（工�
 
 ## 3. 租户开通（Provisioning）：一个必须能回滚的分布式事务（distributed transaction）
 
-开通不是一次 API 调用，是一个 6–12 步的 **Saga**（把一个跨系统的长事务拆成若干个可以各自提交的步骤，任何一步失败就按相反顺序执行前面每一步的**补偿动作**；因为跨系统没有统一的回滚，见 [`02/02 §2`](../02-architecture-patterns/02-event-driven-and-cqrs.md)），跨越 5 个以上外部系统。
+开通不是一次 API 调用，是一个 6–12 步的 **Saga**（把一个跨系统的长事务拆成若干个可以各自提交的步骤，任何一步失败就按相反顺序执行前面每一步的**补偿动作**；因为跨系统没有统一的回滚，见 [`02/02 §2`](../02-architecture-patterns/02-event-driven-and-cqrs.md#2-saga跨服务事务的现实解法)），跨越 5 个以上外部系统。
 
 ```
 状态机（存在 tenants.phase）：
@@ -217,7 +219,7 @@ Per-key 串行：同一个 key 同一时刻只有一个 reconcile 在跑（工�
 
 ## 4. Cell 架构（Cell-Based Architecture）
 
-单元化（cellularization）的本质：**把一个 N 租户的系统，变成 K 个各含 N/K 租户的、互不通信的完整副本**。参考 [AWS Guidance for Cell-Based Architecture](https://github.com/aws-solutions-library-samples/guidance-for-cell-based-architecture-on-aws/blob/main/README.md)（2023-12 首发，仍现行）与 re:Invent ARC312。
+单元化（cellularization）的本质：**把一个有 `T` 个租户的系统，变成 `K` 个互不依赖的完整部署单元**。`T/K` 只是均匀分布时的平均值；真实系统必须按流量、用户数和收入分别计算。参考 [AWS Guidance for Cell-Based Architecture](https://github.com/aws-solutions-library-samples/guidance-for-cell-based-architecture-on-aws/blob/main/README.md) 与 re:Invent ARC312（链接与产品状态以阅读时官方页面为准）。
 
 ```
                        ┌─────────────────────────────┐
@@ -236,7 +238,7 @@ Per-key 串行：同一个 key 同一时刻只有一个 reconcile 在跑（工�
 │ 完全自治：     │          │  ✗ 不与 CELL-1 │           │               │
 │ 挂了不影响别人 │          │    共享任何状态 │           │               │
 └───────────────┘          └───────────────┘           └───────────────┘
-   爆炸半径 ≤ 1/N              ✗ 无跨 cell 复制            ✗ 无跨 cell 调用
+   名义租户半径 ≈ 1/K           ✗ 无跨 cell 同步依赖         ✗ 无跨 cell 调用
         │                                                        │
         └──────── 控制面（开通/迁移/部署编排）在带外，不在请求路径 ┘
 
@@ -246,7 +248,7 @@ Per-key 串行：同一个 key 同一时刻只有一个 reconcile 在跑（工�
 
 ### 分区键（Partition Key）：cell 架构的成败点
 
-⚠️ 这里的"分区"是**把数据切开分给不同 cell** 的那个意思，和 CAP 里的"网络分区"毫无关系 —— 两者的英文都是 partition，是全书最容易混的一对词（见 [00-concepts §5](../00-foundations/00-concepts.md)）。
+⚠️ 这里的"分区"是**把数据切开分给不同 cell** 的那个意思，和 CAP 里的"网络分区"毫无关系 —— 两者的英文都是 partition，是全书最容易混的一对词（见 [00-concepts §5](../00-foundations/00-concepts.md#5-副本分片分区--三个被混用的词)）。
 
 AWS 的原话立场很硬：**要选能最小化跨 cell 交互的分区键**；需要复杂映射的服务只是把问题**转移给映射服务**；需要跨 cell 交互的服务会在 cell 之间**制造依赖**。
 
@@ -274,9 +276,10 @@ AWS 的原话立场很硬：**要选能最小化跨 cell 交互的分区键**；
 **Cell 数量的选择公式：**
 
 ```
-N ≥ ceil(1 / 可接受爆炸半径)                       ← 上界由 SLO/合规给
-cell 最小规格 ≥ 最大单租户峰值 × 安全系数(1.5–2)     ← 下界由最大租户给
-运维成本 ≈ O(N)：部署时长、演练次数、监控面板、on-call 认知负担
+K ≥ ceil(1 / 可接受的名义半径)                     ← 这是 cell 数的下界，不是实际保障
+cell 最小规格 ≥ 最大单租户峰值 × 安全系数(1.5–2)     ← 规格下界由最大租户给
+实际半径 = max(流量占比, MAU 占比, ARR 占比等业务权重)  ← 必须用装箱结果复算
+运维成本 ≈ O(K)：部署时长、演练次数、监控面板、on-call 认知负担
 ```
 
 ⚠ **cell 化最常见的死结**：某个巨型租户的峰值已经超过了单个 cell 的规格上限 —— 它装不进任何 cell。解法只有两个：给它开专属 cell（silo），或者在产品层拆分它的工作负载。**没有第三个解法。**
@@ -303,18 +306,25 @@ AWS 的起步策略也是这个意思：**先做少量大 cell，等自动化成
 租户迁移是 cell 架构的税。没有可靠的迁移，你会在半年内因为"某个 cell 满了"而瘫痪。
 
 ```
-阶段          写            读            回滚成本
-────────────────────────────────────────────────────
-1 预热     旧 cell      旧 cell      0     ← 全量 snapshot + CDC 追增量到新 cell
-2 双写     旧+新        旧 cell      低    ← 影子读比对，差异率必须 < 0.01%
-3 切读     旧+新        新 cell      低    ← 按租户灰度，可秒级切回
-4 切写     新 cell      新 cell      高    ← 需要短暂写冻结（1–30s）+ 版本栅栏
-5 收尾     新 cell      新 cell      不可逆 ← 旧数据保留 7–30 天再删
+阶段             写入真相源       读              回滚成本
+──────────────────────────────────────────────────────────────
+1 预热            旧 cell          旧 cell         0
+  全量 snapshot + CDC 追增量；CDC offset 只有在新侧事务提交后才推进
+2 持续复制/修复     旧 cell          旧 cell         低
+  新写通过 outbox/事务日志复制到新侧；失败进入可重放 repair log，影子读比对
+3 切读             旧 cell          新 cell         低
+  仍以旧侧为写入真相源；不一致的 key 立即回旧侧并排入 durable repair
+4 切写             新 cell          新 cell         高
+  短暂冻结并排空旧写；确认 CDC watermark 追平后原子提升 route_epoch
+5 回滚窗口          新 cell          新 cell         高
+  向旧侧做同样可重放的反向复制；旧侧只用于受控回滚，不能同时接收独立写
+6 收尾             新 cell          新 cell         不可逆
+  关闭反向复制；按保留与合规策略归档/删除旧副本
 ```
 
 （表里两个词：**CDC**（change data capture）= 直接读源库的事务日志，把行级变更源源不断地搬到新 cell，见 [`01/03`](../01-building-blocks/03-messaging-and-streams.md)；**影子读 shadow read** = 把线上读请求复制一份也打到新 cell，结果只拿来比对、不返回给用户。）
 
-**版本栅栏（fencing）是第 4 步的关键**：切写瞬间必须保证旧 cell 上没有"飞行中"的写。做法是给路由映射带一个单调递增（monotonically increasing）的 `epoch`，旧 cell 拒绝 `epoch` 小于当前值的写入；客户端拿到 `409 STALE_EPOCH` 后刷新路由重试。**没有 fencing 的迁移一定会丢写**，这和分布式锁需要 fencing token 是同一个道理（见 [05-consensus-and-coordination.md](../01-building-blocks/05-consensus-and-coordination.md)）。
+**版本栅栏（fencing）是第 4 步的关键**：切写瞬间必须保证旧 cell 上没有“飞行中”的写。路由映射带单调递增的 `route_epoch`；**存储写入必须原子校验 `tenant_id + target_cell + route_epoch`，只接受等于当前 epoch 的写**，不能只在 Router 校验，也不能接受“更大的任意 epoch”。旧请求拿到 `409 STALE_EPOCH` 后刷新路由，并用原业务幂等键重试。冻结窗口内先停止分配新写、排空旧写、追平 CDC watermark，再在同一个受一致性保护的映射事务中提升 epoch。没有存储侧 fencing 与 durable repair log，“应用同时写两个库”只能把部分失败变成静默分叉。
 
 **冻结窗口（freeze window）的量级**：p99 写事务时长 × 3 + 路由传播时间。对典型 OLTP 是 **1–5 秒**；如果你的系统里有长事务或长连接（WebSocket、SSE、Agent 会话），冻结窗口会被拉到分钟级 —— 这时要么做优雅排空（drain：先不再往它上面分配新请求，等已有请求和长连接自然结束，再真正下线），要么接受这些连接被断开重连。
 
@@ -334,9 +344,9 @@ W3    N/4 个 cell                 2 h       ——
 W4    剩余                        ——        ——
 ```
 
-**bake time（新版本上线后"静置观察"、不推进下一批的那段时长）必须覆盖一个完整的日周期**。绝大多数"只在特定时段触发"的 bug（定时任务、月末结账、时区边界）只有跨过 24 小时才会暴露。把 W1 压到 1 小时是最常见的省钱式失误。
+**bake time（新版本上线后“静置观察”、不推进下一批的时长）要覆盖相关业务周期与足够样本**。日常流量可至少覆盖峰谷，定时任务、月结和时区边界则要靠定向测试/合成探针并跨过对应周期；“固定 24 小时”既可能不足，也可能对低风险变更过度。W1 的时长应由风险和可观测证据决定。
 
-**回滚的第一原则：回滚必须比前进快。** 回滚路径不能依赖任何"重新构建"的步骤 —— 上一个版本的镜像/配置必须是现成的、可以一条命令指过去的。回滚时间目标：**单 cell < 5 分钟，全量 < 30 分钟**。
+**回滚的第一原则：恢复路径应比继续扩大影响更快、更确定。** 回滚不应依赖重新构建；上一版镜像/配置应预先存在并演练。单 cell < 5 分钟、全量 < 30 分钟可作为示例目标，实际值由 SLO、数据兼容性与部署规模确定。
 
 ⚠ **数据库迁移打破了这个模型**：schema 变更不能按 cell 回滚（每个 cell 有自己的库，但代码是同一份）。解法是六步法的扩展/收缩模式（expand/contract，见 [05-release-engineering.md](05-release-engineering.md)）—— 任何一次发布中，**代码必须同时兼容变更前后的两个 schema 版本**。
 
@@ -407,7 +417,7 @@ W4    剩余                        ——        ——
         容器（镜像已缓存）        5–30 s
         VM / 新节点              60–180 s
         GPU 节点（含权重加载）    3–10 min   ← 见 04-ai-agent-systems/01-llm-serving-infra.md
-稳定条件：T_s ≳ 2–3 × T_a。否则在旧决策生效前你已经做了 3 个新决策 → 过冲 → 反向过冲 → 震荡。
+不要把稳定条件简化成 `T_s ≳ 2–3 × T_a`：采样可以远短于 `T_a`，否则会错过突发；真正需要约束的是**动作节奏**。在上一次扩缩动作尚未可观测地生效前，不发出方向相反的动作；扩缩 cooldown / stabilization horizon 至少覆盖实测 `T_a`，并把 pending capacity 计入下一次决策。
 ```
 
 `T_a` 这段空窗就是**冷启动（cold start）**：从"决定扩容"到"新实例真的能接流量"之间的时间，由拉镜像、进程启动、缓存/权重预热、健康检查通过、进 LB 这几段串起来。
@@ -417,14 +427,14 @@ W4    剩余                        ——        ——
 
 | 机制 | 参数（可直接抄） | 作用 |
 |---|---|---|
-| **死区（deadband）/ 滞回（hysteresis）** | 扩容阈值 70% 利用率，缩容阈值 40%，中间不动 | 消除阈值附近的抖动 |
-| **冷却窗口（cooldown window）** | 扩容后冷却 0–60s；**缩容后冷却 300–600s**（K8s HPA `behavior.scaleDown.stabilizationWindowSeconds` 默认 300） | 缩容比扩容危险 10 倍，必须更保守 |
+| **死区（deadband）/ 滞回（hysteresis）** | 示例起点：扩容阈值 70%、缩容阈值 40%，中间不动 | 消除阈值附近的抖动；阈值须按 workload 压测 |
+| **冷却窗口（cooldown window）** | 示例：扩容动作去重窗口覆盖实例可见前的主要阶段；缩容稳定窗口可从 300–600s 起压测（具体默认值随控制器版本而变） | 不重复计算 pending capacity；缩容比扩容更保守 |
 | **信号平滑（signal smoothing）** | 对指标做 EWMA（指数加权移动平均：越新的采样权重越大，于是既平滑又不迟钝，α≈0.2）或取滚动窗口的 **p95 而不是瞬时值** | 抑制毛刺触发 |
 | **速率限制（rate limiting）** | 单次最多 ±30% 或 ±N 实例；设死 `min/maxReplicas` | 防止一次误判把集群拉到天上（或归零） |
 
-HPA 还有一个容易被忽略的默认值：**tolerance = 0.1**，即目标值 ±10% 以内不动作。这本身就是一个死区。自研控制器时忘了加死区，是震荡的头号原因。
+HPA 常见配置会设置约 10% 的 tolerance（具体默认值与可配置性以所用 Kubernetes 版本为准），即目标附近不动作。这本身就是一个死区。自研控制器时忘了加死区，是震荡的高频原因。
 
-**GPU 推理服务的特殊结论**：`T_a` 是 3–10 分钟，而流量尖峰的上升沿是秒级。**这意味着 LLM 服务在结构上无法靠自动扩缩追流量。** 正确的组合是：预留容量（reserved capacity，L2 静态稳定）+ 请求队列 + 准入控制（admission control：队列里的等待时间已经超过阈值就直接拒绝新请求）/ 负载卸载（load shedding：优先拒掉低优先级流量，保住高优先级的，见 [`00/01 §6`](../00-foundations/01-fundamentals.md)）+ 降级到小模型。把 HPA 当作 LLM 容量方案是一个会在第一次上热搜时暴露的错误。
+**GPU 推理服务的特殊结论**：`T_a` 是 3–10 分钟，而流量尖峰的上升沿是秒级。**这意味着 LLM 服务在结构上无法靠自动扩缩追流量。** 正确的组合是：预留容量（reserved capacity，L2 静态稳定）+ 请求队列 + 准入控制（admission control：队列里的等待时间已经超过阈值就直接拒绝新请求）/ 负载卸载（load shedding：优先拒掉低优先级流量，保住高优先级的，见 [`00/01 §6`](../00-foundations/01-fundamentals.md#6-背压backpressure没有它系统就会雪崩cascading-failure)）+ 降级到小模型。把 HPA 当作 LLM 容量方案是一个会在第一次上热搜时暴露的错误。
 
 **扩缩容与计费的耦合**：自动扩缩的目标函数应该写成成本约束下的 SLO 满足，而不是纯利用率。一个实用的护栏（guardrail）是给每个 cell 设 `max_hourly_spend`，控制回路在接近上限时**先降级功能再拒绝扩容**，而不是无声地把账单翻倍。
 
@@ -434,7 +444,7 @@ HPA 还有一个容易被忽略的默认值：**tolerance = 0.1**，即目标值
 
 | 情况 | 别做 | 做什么 |
 |---|---|---|
-| 租户 < 100，单区域，团队 < 15 人 | 不要 cell 化 | 单个部署单元（deployment unit）+ 良好的分片键（shard key：决定一行数据落到哪个分片的那个字段，见 [00-concepts §5](../00-foundations/00-concepts.md)）设计。cell 化的固定成本（部署编排、迁移工具、N 套监控）在这个规模下是纯负担 |
+| 租户 < 100，单区域，团队 < 15 人 | 不要 cell 化 | 单个部署单元（deployment unit）+ 良好的分片键（shard key：决定一行数据落到哪个分片的那个字段，见 [00-concepts §5](../00-foundations/00-concepts.md#5-副本分片分区--三个被混用的词)）设计。cell 化的固定成本（部署编排、迁移工具、N 套监控）在这个规模下是纯负担 |
 | 业务天然跨租户协作 | 不要强行按 tenant_id 分 cell | 按协作单元分；或该子系统不 cell 化 |
 | 只是想"提高可用性" | 不要用 cell 化当理由 | **AWS 官方文档没有做"cell 化 ⇒ 更高 SLA"的推导**。它承诺的是爆炸半径和恢复时间。不要在 SLA 承诺里写"因为 cell 化所以 99.99%" |
 | 期望态频繁被外部改写 | 不要用 reconcile 循环 | 如果外部系统会持续改动你管理的资源，reconcile 会和它打架（flapping：两个系统互相把对方的改动改回去，无限来回，两边的日志都显示"我在正常工作"）。先解决所有权问题 |
@@ -458,7 +468,7 @@ HPA 还有一个容易被忽略的默认值：**tolerance = 0.1**，即目标值
 
 1. **控制面挂掉只该影响明天的收入，不该影响今天的收入。** 数据面在请求路径上对控制面的任何一次同步调用，都是在抹掉这条界限 —— 而最隐蔽的那种同步调用长得像"读一下本地 Redis"。
 2. **带 TTL 的缓存不是静态稳定，它只是把故障推迟到 TTL 到期的那一秒，还顺手把"控制面挂了"升级成"全站挂了"。** 真正的静态稳定必须能用一份过期的、落盘的 last-known-good 无限期工作下去。
-3. **Cell 化不提高可用性，它只是把"全挂"换成"1/N 挂"** —— 而这个 1/N 只有在你报得出**收入加权**爆炸半径、并且**迁移工具已经能用**的前提下才是真的；否则第一个 cell 满的那天，你会发现自己没有退路。
+3. **Cell 化不自动提高可用性，它把“全挂”换成“一个部署单元挂”。** `1/K` 只是租户均匀时的名义值；真正要报的是流量、MAU 与 ARR 加权后的最大 cell 占比，而且迁移工具必须已经可用。
 
 ---
 
@@ -477,4 +487,6 @@ HPA 还有一个容易被忽略的默认值：**tolerance = 0.1**，即目标值
 
 ---
 
-**下一篇** → [02-billing-and-metering.md](02-billing-and-metering.md)
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**目录顺读下一篇** → [02-billing-and-metering.md](02-billing-and-metering.md)

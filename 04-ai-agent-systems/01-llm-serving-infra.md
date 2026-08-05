@@ -1,7 +1,11 @@
 # 01 · LLM 推理基础设施
 
+> **阅读定位：自托管进阶选修。** 本篇面向需要自己运行模型、管理 GPU 或准备 Inference / ML Systems 岗位的读者。
+> 如果你是调用托管 LLM API 的 Full Stack 开发者，请先走 [本章 README](README.md) 的应用主线，从 Context、Runtime 与 Security 开始。
+> 本篇的硬件数字都是带日期和 workload 的容量算例，不是可以直接采购的标准答案。
+
 > 推理优化的杠杆顺序是：**不重算 > 换拓扑 > 换精度 > 换卡**。2026 年同一批 GB300 上，纯软件在半年内做出 2.7× 吞吐（[MLPerf Inference v6.0](https://mlcommons.org/2026/04/mlperf-inference-v6-0-results/)）——选框架和拓扑的收益已经大于选硬件。
-> 还有一条：**只写"P95 TTFT < 2s"而不写 TPOT 的 SLO，等于没有 SLO。**
+> 还有一条：**只写“P95 TTFT < 2s”而不约束 TPOT，等于没有完整的延迟目标。**
 
 ---
 
@@ -11,19 +15,19 @@
 
 你把一个 70B 模型用 vLLM 起在两张 H100 上，压测报告写着"聚合吞吐 3,100 tok/s"，很漂亮，你按这个数报了容量。
 上线后客服转来的用户原话是"字是一个一个蹦出来的"。你翻监控：TTFT p95 是 1.4 秒，达标 ——
-但你的 SLO 里压根没有第二个指标，而首 token 之后每个字要等 400 ms，这件事被"聚合吞吐"那一个数字完整地盖住了。
+但你的延迟目标里压根没有第二个指标，而首 token 之后每个字要等 400 ms，这件事被“聚合吞吐”那一个数字完整地盖住了。
 你加了两张卡想救一下，加完发现一点没变。
 
 **需要先懂的概念**
 
 | 概念 | 一句话 | 详见 |
 |---|---|---|
-| 延迟 / 吞吐 / 并发 | 延迟是单次耗时，吞吐是单位时间处理量，并发是此刻在途的请求数 | [00-concepts §2](../00-foundations/00-concepts.md) |
-| Little's Law | 并发 = 吞吐 × 延迟；本章 §12 用它从 QPS 反推要几张卡 | [00-concepts §2](../00-foundations/00-concepts.md) |
-| p50 / p99 分位数 | 排序后处在某个百分比位置的耗时，平均值会骗人 | [00-concepts §3](../00-foundations/00-concepts.md) |
-| 缓存命中率的代价 | 命中率 90% 的缓存一挂，后端瞬间承受 10 倍流量 | [00-concepts §11](../00-foundations/00-concepts.md) |
-| 垂直 vs 水平扩展 | 换更强的单机 vs 加更多台机器，两条完全不同的路 | [00-concepts §4](../00-foundations/00-concepts.md) |
-| 三个延迟量级 | 内存 ~100 ns、SSD ~100 µs、跨洲往返 ~100 ms，每级差 1000× | [00/01 §1](../00-foundations/01-fundamentals.md) |
+| 延迟 / 吞吐 / 并发 | 延迟是单次耗时，吞吐是单位时间处理量，并发是此刻在途的请求数 | [00-concepts §2](../00-foundations/00-concepts.md#2-延迟吞吐并发--三个最常被混淆的词) |
+| Little's Law | 并发 = 吞吐 × 延迟；本章 §12 用它从 QPS 反推要几张卡 | [00-concepts §2](../00-foundations/00-concepts.md#2-延迟吞吐并发--三个最常被混淆的词) |
+| p50 / p99 分位数 | 排序后处在某个百分比位置的耗时，平均值会骗人 | [00-concepts §3](../00-foundations/00-concepts.md#3-为什么平均值是骗人的p50--p90--p99) |
+| 缓存命中率的代价 | 命中率 90% 的缓存一挂，后端瞬间承受 10 倍流量 | [00-concepts §11](../00-foundations/00-concepts.md#11-三个最常见的优化手段各在优化什么) |
+| 垂直 vs 水平扩展 | 换更强的单机 vs 加更多台机器，两条完全不同的路 | [00-concepts §4](../00-foundations/00-concepts.md#4-什么是扩展垂直-vs-水平) |
+| 三个延迟量级 | 内存 ~100 ns、SSD ~100 µs、跨洲往返 ~100 ms，每级差 1000× | [00/01 §1](../00-foundations/01-fundamentals.md#1-为什么要有这些数字) |
 
 **这一章要回答的问题**
 
@@ -157,22 +161,23 @@ vllm serve meta-llama/Llama-3.1-70B-Instruct \
   --quantization fp8 --kv-cache-dtype fp8_e4m3 \
   --max-model-len 32768 \
   --gpu-memory-utilization 0.92 \
-  --max-num-batched-tokens 8192 \   # chunked prefill 的每步 token 预算
+  # chunked prefill 每一步允许处理的 token 上限
+  --max-num-batched-tokens 8192 \
   --max-num-seqs 256 \
   --enable-prefix-caching
 ```
 
-**代价必须说清楚**：chunked prefill 用**同批 decode 请求的 TPOT** 换整体吞吐。`--max-num-batched-tokens` 调大 → TTFT 好、TPOT 差；调小 → 反之。**当 TTFT 和 TPOT 都是硬 SLO 时，调参解决不了，得上 PD 分离。**
+**代价必须说清楚**：chunked prefill 用**同批 decode 请求的 TPOT** 换整体吞吐。`--max-num-batched-tokens` 调大 → TTFT 好、TPOT 差；调小 → 反之。**当 TTFT 和 TPOT 都有硬延迟阈值时，调参解决不了，得上 PD 分离。**
 
 ---
 
-## 4. Goodput：唯一能用来做容量规划的指标
+## 4. Goodput：容量规划的核心输出指标
 
 三个定义（[CNCF: Why goodput matters more than throughput](https://www.cncf.io/blog/2026/07/20/why-goodput-matters-more-than-throughput-for-llm-serving/)）：
 
 - **TTFT** = 首 token 到达时间（含网络 + 排队 + prefill）
 - **TPOT / ITL** = 首 token 之后的平均产出间隔
-- **goodput** = 每秒完成、**且同时满足 TTFT 与 TPOT SLO** 的请求数（SLO：service level objective，你对外承诺的服务指标，如"P95 TTFT ≤ 2s"，写法与错误预算见 [`05/01`](../05-reliability/01-slo-and-error-budget.md)）
+- **goodput** = 每秒完成、**且同时满足 TTFT 与 TPOT 延迟阈值**的请求数。`P95 TTFT ≤ 2s` 可作为分布诊断/压测目标；要接错误预算，应把内部 SLO 写成“有效请求中，同时满足 TTFT ≤ X、TPOT ≤ Y 且成功完成的比例 ≥ Z%，滚动 N 天”。写进合同的对外承诺才是 SLA（见 [`05/01`](../05-reliability/01-slo-and-error-budget.md)）
 
 throughput 会一路涨到 GPU 打满，goodput 会在某个批大小之后**崩到 0**：
 
@@ -187,16 +192,18 @@ throughput 会一路涨到 GPU 打满，goodput 会在某个批大小之后**崩
     └──┴────┴────┴────┴────┴──→          └──┴────┴────┴────┴────┴──→
        1   16   64  256 1024  batch          1   16   64  256 1024
                                                   ├── goodput 窗口 ──┤
-                                                  两条 SLO 同时成立的区间
+                                                  两条延迟阈值同时成立的区间
 
   goodput = f(batch)：      ╭───╮
                           ╭─╯   ╰──╮
                       ╭───╯         ╰────────  → 0（吞吐仍在涨，但全部超时）
 ```
 
-**这条曲线的实操含义**：容量规划（capacity planning）必须在 goodput 峰值的**左侧**取工作点（operating point），留出 20–30% 余量（headroom）应对流量抖动。跑在峰值右侧的系统，一次小流量尖峰就会让全部请求同时违约。
+**这条曲线的实操含义**：容量规划（capacity planning）要在 goodput 峰值的**左侧**取工作点（operating point）。
+本章算例先留 20–30% 余量（headroom）；这个比例只是起点，最终要由到达突发性、扩容时间、故障域和成本共同决定。
+Goodput 回答“这套配置在延迟阈值内能完成多少请求”，容量规划还必须同时输入流量分布、故障冗余与发布余量。
 
-**真实反例**：同样满足 TTFT ≤ 1.5s 的两个配置，P95 TPOT 一个约 50 ms、另一个约 494 ms——**10× 差异，单指标 SLO 完全看不出来**。
+**真实反例**：同样满足 TTFT ≤ 1.5s 的两个配置，P95 TPOT 一个约 50 ms、另一个约 494 ms——**10× 差异，单个延迟指标完全看不出来**。
 
 测量方法论抄 CNCF 那条 **windowing rule**：要求**连续 8 个稳定采样点**才计分，避免用瞬时峰值定容量。
 
@@ -264,9 +271,9 @@ NVIDIA 官方文档罕见地明确反驳了自家方案："**It is not automatic
 
 另有一派主张统一内存路线（Tenstorrent 声称片内 SRAM 带宽足够大就完全不需要 KV 传输）——**这是 2026 年一个真实的未决争论**，不要当成已有定论。
 
-### 生产模板（可直接抄的 SLA 形状）
+### 生产模板（可借鉴的延迟目标形状）
 
-[vLLM 上 GLM-5.2 / 24× B300 的 PD 分离部署](https://vllm.ai/blog/2026-07-23-glm-5.2-nvfp4-b300-pd)：744B MoE（mixture of experts，混合专家：模型内部有很多组"专家"子网络，每个 token 只激活其中几组，所以总参数量很大而每次实际算的量小；下面 §10 展开）（40B 激活）NVFP4，**4 个 prefill 节点（TP1 DP4 EP）+ 1 个 decode 节点（TP1 DP8 EP）**，SLA 定为 mean TTFT ≤ 2.5 s、mean TPOT ≤ 20 ms，实测 TPOT 17 ms（基线约 40 ms）。注意 P:D = 4:1 是**从这份负载的 ISL/OSL 推出来的，不是通用常数**。
+[vLLM 上 GLM-5.2 / 24× B300 的 PD 分离部署](https://vllm.ai/blog/2026-07-23-glm-5.2-nvfp4-b300-pd)：744B MoE（mixture of experts，混合专家：模型内部有很多组“专家”子网络，每个 token 只激活其中几组，所以总参数量很大而每次实际算的量小；下面 §10 展开）（40B 激活）NVFP4，**4 个 prefill 节点（TP1 DP4 EP）+ 1 个 decode 节点（TP1 DP8 EP）**，原文把 mean TTFT ≤ 2.5 s、mean TPOT ≤ 20 ms 称为 SLA，实测 TPOT 17 ms（基线约 40 ms）。在本书口径里先把它当特定基准的延迟目标；若要成为可燃尽 SLO，还需改成阈值达标事件比例。注意 P:D = 4:1 是**从这份负载的 ISL/OSL 推出来的，不是通用常数**。
 
 分离的维度在 2026 年还在扩展：Encoder 分离（EPD）、Hybrid SSM 分离、[Attention/FFN 分离（AFD，实验性）](https://vllm.ai/blog/2026-07-23-vllm-afd-plugin)。判据永远是同一条：**这两段的算力/带宽/显存 profile 是否显著不同 + 中间态传输是否便宜**。
 
@@ -447,46 +454,64 @@ K8s 侧：**DRA（Dynamic Resource Allocation）核心已在 [Kubernetes v1.34�
 峰值 QPS        = 10
 ISL (p50/p95)   = 4,000 / 12,000 token
 OSL (p50/p95)   = 500 / 2,000 token
-SLO             : TTFT p95 ≤ 2 s, TPOT p95 ≤ 30 ms
+延迟工程目标    : TTFT p95 ≤ 2 s, TPOT p95 ≤ 30 ms
 模型            : 70B dense, FP8 权重 + FP8 KV, TP2 on H100
+
+容量初算还需要平均值；本算例先假设：
+mean ISL        = 5,000 token
+mean OSL        = 600 token
+实测 mean TTFT  = 1.0 s
+实测 mean TPOT  = 22 ms
 ```
 
-**第一步：decode 侧并发（Little's Law）**
+> **稳定概念 vs 场景数字**：Little's Law 用的是稳定窗口里的**平均到达率与平均驻留时间**，不能把 p95 延迟上界或 p50 token 数代进去。
+> 上面的 mean 值只是为了演示算法；生产中要从 trace 直接统计，并按短/中/长请求分桶重算。
+
+**第一步：decode 侧平均并发（Little's Law）**
 
 ```
-单请求驻留时间 = TTFT + OSL × TPOT = 2 s + 500 × 0.03 s = 17 s
-稳态并发 L = λ × W = 10 × 17 = 170 个请求
+平均驻留时间 W ≈ mean TTFT + mean OSL × mean TPOT
+               = 1.0 s + 600 × 0.022 s = 14.2 s
+稳态平均并发 L = λ × W = 10 × 14.2 = 142 个请求
 ```
+
+平均并发不是 p95 并发。还要用到达过程回放或排队仿真验证突发窗口；下面先用 142 做基准，再由最终 headroom 覆盖不确定性。
 
 **第二步：decode 侧受什么约束**
 
 ```
 KV 约束：  每副本 KV 预算 78 GB ÷ 0.70 GB/请求 = 111 并发/副本
-           170 / 111 → 2 个 decode 副本（TP2）= 4 张 H100
+           142 / 111 → 至少 2 个 decode 副本（TP2）= 4 张 H100
 
-TPOT 校验：每步每卡访存 = 35 GB(权重/TP2) + 85 × 0.35 GB(KV/TP2) ≈ 65 GB
-           65 GB / 3.35 TB/s ≈ 19.4 ms  +  kernel/all-reduce 开销 ≈ 25 ms  ✅ < 30 ms
+带宽下界：平均每副本约 71 并发；每步每卡访存
+           ≈ 35 GB(权重/TP2) + 71 × 0.35 GB(KV/TP2) ≈ 60 GB
+           60 GB / 3.35 TB/s ≈ 17.9 ms；再加 kernel/all-reduce 后先估约 23 ms
+           这只是 roofline 初筛，不等于 p95 TPOT 证明；30 ms 延迟阈值必须由真实分布压测验收
 ```
 
 **第三步：prefill 侧受算力约束**
 
 ```
-需要的 prefill 速率 = 10 QPS × 4,000 token = 40,000 tok/s
+需要的平均 prefill 速率 = 10 QPS × 5,000 token = 50,000 tok/s
 每卡 prefill 吞吐  = H100 FP8 峰值 1,979 TFLOPS × 40% MFU ÷ (2 × 70e9 FLOP/token)
                    ≈ 5,600 tok/s
 每 TP2 副本（85% 扩展效率） ≈ 9,600 tok/s
-40,000 / 9,600 → 5 个 prefill 副本 = 10 张 H100
+50,000 / 9,600 → 6 个 prefill 副本 = 12 张 H100
 ```
 
 **第四步：合账**
 
 ```
-prefill 10 卡 + decode 4 卡 = 14 卡
-+ 冗余/滚动升级/长尾（+20~30%）→ 16–18 卡（2 个 8 卡节点）
-P:D 副本比 ≈ 5:2
+prefill 12 卡 + decode 4 卡 = 16 卡        ← 只覆盖本算例的平均服务需求
++ 冗余/滚动升级/长尾（先按 +20~30%）→ 20–21 卡
+按 8 卡节点和故障域落地时，可能向上取到 24 卡；最终数字由 goodput 压测决定
+P:D 副本比 ≈ 6:2
 ```
 
-**这里出现了本篇最重要的推论**：P:D 比是 **5:2**。如果不做 PD 分离而是聚合部署，你必须按**两个瓶颈的最大值**配卡——prefill 需要 10 卡的算力、decode 需要 4 卡的显存，聚合后两边互相干扰，实际要 20 卡以上才能同时满足两条 SLO。**PD 分离省下的不是算力，是"为了满足另一个指标而多买的卡"。**
+**这里的推论不是“P:D 永远等于 6:2”，而是比例必须由 workload 推出来。** 本算例里 prefill 的算力需求明显高于 decode 的显存需求；换成短输入、长输出时，比例可能反过来。
+聚合部署会让两个阶段争抢同一批卡，PD 分离的价值是分别放置和扩缩两个瓶颈，避免为了另一阶段的约束购买闲置容量。
+
+> **容量估算的退出条件**：上面的公式只负责给压测一个起点。采购、内部 SLO 或外部 SLA 承诺之前，必须回放真实 ISL/OSL/到达间隔分布，测出 TTFT 与 TPOT 同时达标的 goodput，并对卡故障、滚动升级和流量突发做敏感性分析。
 
 ### 扩缩容的现实：GPU 不是弹性资源
 
@@ -520,9 +545,9 @@ API_$/hr   = QPS × 3600 × (ISL × P_in + OSL × P_out) / 1e6
 盈亏平衡 QPS = N_gpu × P_gpu × k_hidden ÷ [ 3600 × (ISL×P_in + OSL×P_out)/1e6 ]
 ```
 
-`k_hidden` 是关键：**总成本约为裸 GPU 租金的 3–5×**（网络、存储、K8s 控制面、监控、以及 $5,000–15,000/月的专职工程人力）。忽略它是自建成本模型最常见的谎言。
+`k_hidden` 是关键。本算例先用 **3×**，3–5× 只是团队规模与利用率未知时的探索区间（网络、存储、K8s 控制面、监控和工程人力都在里面）；生产比较应逐项列账，而不是套一个固定倍数。
 
-**算例**（沿用 §12 的 16 卡配置，2026 年中量级，随时变动）：
+**算例**（沿用 §12 的 16 卡**基础服务容量**，暂不含生产冗余；2026 年中价格快照，随时变动）：
 
 ```
 自建：16 × $2.50/hr(H100 现货) × 3 = $120/hr
@@ -533,7 +558,8 @@ API （对标 Claude Haiku 4.5：$1/M 输入、$5/M 输出）：
 盈亏平衡 = 120 / 23.4 ≈ 5.1 QPS，7×24 稳定负载
 ```
 
-**读法**：需要**全天候** 5 QPS（≈ 44 万请求/天）才打平（break even）。如果流量是白天 10 QPS、夜里 0（日均利用率 40%），实际需要峰值约 13 QPS 才打平。**利用率从 100% 掉到 20%，单位成本涨 5 倍**——这才是自建的真实风险。
+**读法**：这只是“给定两边质量已经等价”之后的价格算术，不证明 70B 自建模型与 Haiku 在你的任务上等质。
+先用同一评测集验证质量、安全和可用性门槛，再比较成本。按本组价格，需要**全天候**约 5 QPS 才打平；若流量峰谷明显，所需峰值会更高。
 
 ⚠️ **这个结论有真实的公开分歧（写进你的答案里）**：一派算出 70B 单 H100 约 400 tok/s、对标 $5/M 的旗舰模型约 12M token/天回本；另一派实测 8×H100 跑 671B MoE 满载约 **$10/M 输出**，比廉价开源托管 API（约 $0.87/M）**贵 11 倍**。**两边都没算错，是对标基线不同**（溢价旗舰 vs 廉价开源托管）。引用任何自建 ROI 之前，先钉死你对标的是哪个模型的哪个档位。
 
@@ -547,7 +573,7 @@ API （对标 Claude Haiku 4.5：$1/M 输入、$5/M 输出）：
 |---|---|---|
 | 连续批处理 | 吞吐 2–10× | 默认必开；批内超长请求拖尾（straggler） |
 | 分页 KV（PagedAttention） | 碎片 <4%，并发 2–4× | 块表索引开销、kernel 复杂度 |
-| Chunked prefill | 混合负载吞吐提升，TTFT 毛刺消失 | **拉长同批 decode 的 TPOT**；TPOT 是硬 SLO 时需限 chunk 或改分离 |
+| Chunked prefill | 混合负载吞吐提升，TTFT 毛刺消失 | **拉长同批 decode 的 TPOT**；TPOT 有硬阈值时需限 chunk 或改分离 |
 | 前缀缓存 | 命中 70–90% 时 TTFT 降数倍；极端场景 46× | 命中率是 workload 属性；低重叠下净吞吐可 **−36.7%**；**跨租户共享 = 泄露面** |
 | 缓存感知路由 | P90 TTFT **57–170×** | 路由器变有状态；与负载均衡冲突；扩容后短期劣化 |
 | KV 卸载到 CPU | TTFT 2–22×，吞吐 ≤9× | PCIe 83 GB/s 是上限；短前缀不如重算；GA 成熟度存疑 |
@@ -570,7 +596,7 @@ API （对标 Claude Haiku 4.5：$1/M 输入、$5/M 输出）：
 4. **把投机解码当免费加速**。公开评测大多在 batch=1 下做，与生产 regime 无关。
 5. **≤10B 的模型上 FP4**。省下的显存救不了掉的 2 分。
 6. **用 MPS/time-slicing 做跨租户隔离**。MPS 无故障隔离，time-slicing 连显存都不隔离。
-7. **只写一个 SLO 指标**。TTFT 和 TPOT 必须同时约束，否则 P95 TPOT 能在你不知情的情况下漂 10×。
+7. **只写一个延迟指标**。TTFT 和 TPOT 必须同时约束，否则 P95 TPOT 能在你不知情的情况下漂 10×；要计算燃尽率，再把联合阈值写成 `good / valid` SLO。
 8. **横向比较单卡 tok/s**。同一批 288 卡半年内软件涨 2.7×；prefill-only 口径与混合口径差 7×。没有 ISL/OSL/并发/量化/版本标注的数字一律作废。
 9. **跟 latest 版本**。vLLM 两周一个 minor 且 v0.25.0 直接删了 legacy attention 路径；SGLang 一个月三个版本。**生产必须锁版本（version pinning） + 有回归基线（regression baseline）**。
 10. **信"博客里的 GA"**。2026 年大量能力仍是实验态：AFD 明确 experimental、Mooncake 集成未合入主干、Elastic EP 只支持 TP=1、多层 MTP 未稳定。逐项核对 release note。
@@ -581,7 +607,7 @@ API （对标 Claude Haiku 4.5：$1/M 输入、$5/M 输出）：
 ## 这一章的三句话
 
 1. **decode 阶段的 GPU 不是在算，是在搬。** 所以 LLM 推理系统的中心是显存而不是算力 —— KV cache 装得下几个请求，就是你的并发上限；容量规划的第一条公式是显存账，不是 FLOPS 账。
-2. **只写一个延迟指标的 SLO 等于没有 SLO。** 因为让 TTFT 达标最省事的手段（把批做小、抢占别人）恰好是让 TPOT 崩掉的手段，反之亦然；能用来做容量规划的只有同时约束两者的 goodput，而工作点必须取在 goodput 峰值的左侧。
+2. **只写一个延迟指标，目标就不完整。** 因为让 TTFT 达标最省事的手段（把批做小、抢占别人）恰好是让 TPOT 崩掉的手段，反之亦然；能用来做容量规划的只有同时约束两者的 goodput。预算型 SLO 则统计“同时达标”的好事件比例，工作点必须取在 goodput 峰值的左侧。
 3. **2026 年最大的性能杠杆是"不重算"，而它同时是最大的跨租户泄露面。** 前缀缓存加上缓存感知路由能把 P90 TTFT 拉开 57–170 倍，同一份共享 KV cache 也能被逐 token 反推出别人的 prompt —— 这两件事必须放在同一次决策里权衡，默认答案是"同租户内共享、跨租户关闭"。
 
 ---
@@ -593,7 +619,7 @@ API （对标 Claude Haiku 4.5：$1/M 输入、$5/M 输出）：
 3. 什么情况下 PD 分离会让系统**变慢**？判据是什么？
 4. 前缀缓存的命中率取决于什么？为什么 agent 场景的命中率会跌破 20%？你怎么把它救回来？
 5. 缓存感知路由和负载均衡冲突时你怎么办？扩容之后延迟为什么会先变差？
-6. 你的 SLO 只写了 P95 TTFT < 2s，我给你一个满足它但用户体验很差的配置——问题出在哪？
+6. 你的延迟目标只写了 P95 TTFT < 2s，我给你一个满足它但用户体验很差的配置——问题出在哪？如果要接错误预算，你会怎样改写成好事件比例？
 7. 投机解码在你的生产系统里为什么可能是负收益？什么场景该开？
 8. 跨租户共享 KV cache 有什么风险？你的默认策略是什么，代价是什么？
 9. 从 QPS = 10、ISL = 4k、OSL = 500 推到要几张卡，把过程讲一遍。
@@ -601,4 +627,6 @@ API （对标 Claude Haiku 4.5：$1/M 输入、$5/M 输出）：
 
 ---
 
-**下一篇** → [02-context-engineering-and-rag.md](02-context-engineering-and-rag.md)
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**AI 专章顺读下一篇** → [02-context-engineering-and-rag.md](02-context-engineering-and-rag.md)

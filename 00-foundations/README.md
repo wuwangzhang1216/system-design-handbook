@@ -98,7 +98,7 @@
 
 `00/00 §1 → §2 → §3 → §4 → §5 → §6 → §7 → §8 → §9 → §10 → §11 → §12 速查 → 自测 15 题`
 
-判据在 [00-concepts §0](00-concepts.md)：答不出 12 题就别往后翻。这一段每个词出现时，它依赖的词都已经出现过。
+判据在 [00-concepts §0](00-concepts.md#0-怎么用这一章)：答不出 12 题就别往后翻。这一段每个词出现时，它依赖的词都已经出现过。
 
 **段 B · 每一站只依赖前面已读过的站**（这是"不跳"的最短顺序，不是最快顺序）
 
@@ -115,7 +115,7 @@
 | ⑳ | [06 案例](../06-case-studies/) → [07 面试](../07-interview/) | 案例只是上面所有概念的组合题；07 从头到尾都可以随时查 |
 | ㉑ | *（仅 ML Systems 岗）* [08 ML 专章](../08-ml-systems/) → [06/18–21](../06-case-studies/) | 前置是 ⑮⑯⑰ 全部（缓存、存储、消息、复制、SLO、韧性、可观测）。入口是 [08-ml-systems/README.md 考点映射表](../08-ml-systems/README.md)，它把 syllabus 逐项指到小节 |
 
-> ⚠️ **这是"不跳"的顺序，不是"备考"的顺序。** 备考要按重要性和时间预算排，那在 [START-HERE.md](../START-HERE.md) 的四周计划里
+> ⚠️ **这是"不跳"的顺序，不是"备考"的顺序。** 备考要按重要性和时间预算排，那在 [START-HERE.md](../START-HERE.md) 的 31 个学习日计划里
 > —— 它在段 A 之后立刻跳到 07/03 速查表和案例，把 ⑮–⑲ 打散成「哪一节这周用得上就读哪一节」，因为面试的收益不按依赖顺序分布。
 > **两者不冲突：这一页管"读得懂"，START-HERE 管"来不来得及"。**
 
@@ -125,63 +125,63 @@
 
 | 概念 | 首次定义 | 之后在哪里加深 |
 |---|---|---|
-| 一个请求的旅程 · 关键路径 | [00/00 §1](00-concepts.md) | 01/04 §1、05/02 §4（追踪） |
-| 延迟 / 吞吐 / 并发 · Little's Law | [00/00 §2](00-concepts.md) | 00/02 §3 排队论 |
-| 分位数 p50/p99 · 分位数不能相加 | [00/00 §3](00-concepts.md) | 00/01 §7、05/02 §2（直方图与基数） |
-| 垂直 vs 水平扩展 | [00/00 §4](00-concepts.md) | 05/05 §3 §4 |
-| 副本 / 分片 / 分片键 | [00/00 §5](00-concepts.md) | 05/05 §5、02/03 §3 |
-| 网络分区 · 脑裂 | [00/00 §5](00-concepts.md) | 00/01 §3、01/05 §8 |
-| 强一致 / 最终一致 / 线性一致 | [00/00 §6](00-concepts.md) | 00/01 §4 全谱 |
-| ACID 的 C ≠ CAP 的 C | [00/00 §6](00-concepts.md) | 00/01 §3 |
-| 事务 · 隔离级别 · 脏读/幻读 | [00/00 §7](00-concepts.md) | 00/01 §4（写偏斜）、02/02 §2（Saga 没有隔离性） |
-| 乐观并发 / CAS | [00/00 §7](00-concepts.md) | 01/05 §3 fencing token |
-| 同步 / 异步 · 阻塞 / 非阻塞 | [00/00 §8](00-concepts.md) | 01/03 §1 |
-| 有状态 vs 无状态 | [00/00 §9](00-concepts.md) | 01/04 §4（长连接）、06/11 |
-| 可用性 · 几个 9 · 依赖相乘 | [00/00 §10](00-concepts.md) | 05/01 §2 §4 |
-| 优雅降级 · 相关失败 | [00/00 §10](00-concepts.md) | 05/03 §7 |
-| 缓存 · 命中率的非线性 | [00/00 §11](00-concepts.md) | 01/02 全篇 |
-| 队列 · 削峰 · 消息会重复 | [00/00 §11](00-concepts.md) | 01/03 §1 §3 |
-| 索引 · 写放大 | [00/00 §11](00-concepts.md) | 01/01 §3 §5 |
-| 幂等（是什么） | [00/00 §11 队列代价表 + §12](00-concepts.md) | 00/01 §5 幂等键（怎么实现） |
-| 三个数量级 · 光速下限 | [00/01 §1](01-fundamentals.md) | 00/02 §2、07/03 §1 |
-| 延迟数字表 | [00/01 §2](01-fundamentals.md) | 07/03 §1（必背版） |
-| CAP / PACELC | [00/01 §3](01-fundamentals.md) | 01/05 §1 |
-| 一致性模型全谱 · 读己之写 · 写偏斜 | [00/01 §4](01-fundamentals.md) | 05/05 §4（复制延迟）、04/04 §9 |
-| 幂等键 | [00/01 §5](01-fundamentals.md) | 02/04 §5、03/02 §4、06/15 |
-| 背压 · 有界队列 | [00/01 §6](01-fundamentals.md) | 05/03 §6 负载卸载 |
-| 尾延迟放大 | [00/01 §7](01-fundamentals.md) | 03/03 §7（授权的尾延迟）、04/05 §2 |
-| 失败模型 · 灰色故障 | [00/01 §8](01-fundamentals.md) | 05/03 §9（级联故障）、05/04 §7（因果链） |
-| 超时预算 · 重试放大 · 三件套 | [00/01 §9](01-fundamentals.md) | 05/03 §2 §3 |
-| 排队论 · 利用率 · USL | [00/02 §3](02-capacity-estimation.md) | 05/05 §1 |
-| 单位经济 · $/请求 | [00/02 §6](02-capacity-estimation.md) | 04/08、06/04 |
-| 需求澄清清单 | [00/03 §1](03-tradeoff-framework.md) | 07/01 §2 阶段 1 |
-| 单向门 / 双向门 · 可逆性 | [00/03 §2](03-tradeoff-framework.md) | 06/08 §4.3（301 的例子） |
-| ADR · 演进式架构 · 复杂度预算 | [00/03 §4 §5 §6](03-tradeoff-framework.md) | 02/01 §4 §5 |
-| 投递语义 · Outbox · CDC | [01/03 §3 §4](../01-building-blocks/03-messaging-and-streams.md) | 02/02 §3（Saga 编排器）、02/05 |
-| 同步/异步/半同步复制 · RPO / RTO | [01/06 §1 §2](../01-building-blocks/06-replication.md) | 05/05 §4、05/01 §2 |
-| 读己之写的三种解法 · 单调读 · 一致前缀读 | [01/06 §4](../01-building-blocks/06-replication.md) | 02/02 §5（consistency token）、02/04 §5 |
-| 故障转移 · 脑裂防护 · 多主与冲突解法 | [01/06 §5 §7 §8](../01-building-blocks/06-replication.md) | 01/05 §8、06/05（协作编辑的 CRDT） |
-| Quorum `W+R>N` · 读修复 · 反熵 · hinted handoff | [01/06 §9](../01-building-blocks/06-replication.md) | 06/12（分布式缓存）、07/02 §Dynamo |
-| 租户隔离四级 · 噪音邻居 | [02/03 §1 §5](../02-architecture-patterns/03-multi-tenancy.md) | 03/01、03/04 |
-| SLI / SLO / 错误预算 / 燃尽率 | [05/01 §1 §5](../05-reliability/01-slo-and-error-budget.md) | 05/04 §3（严重级别）、03/05 §3 |
-| 冷启动 · 预热 · 预热池 | [04/01 §12](../04-ai-agent-systems/01-llm-serving-infra.md) | [08/03 §2 §3 §5](../08-ml-systems/03-model-loading-and-warmup.md)（九项分解、收敛判据、容量公式） |
-| 双缓冲切换 · 排空 · 显存超售 | [08/03 §6 §7](../08-ml-systems/03-model-loading-and-warmup.md) | 04/01 §11（GPU 多租户） |
-| ML 双指标 SLO（延迟 + 质量） | [08/01 §6](../08-ml-systems/01-ml-system-overview.md) | 05/01 §9（AI 系统的 SLI）、[08/09 §2](../08-ml-systems/09-model-deployment.md)（金丝雀看哪个） |
-| 模型版本四元组 · 不可变提升 | [08/02 §3 §8](../08-ml-systems/02-model-lifecycle.md) | [08/09 §4](../08-ml-systems/09-model-deployment.md)（只回滚权重会发生什么） |
-| 训练/服务偏斜 · 特征穿越 · 时点正确性 | [08/01 术语表 + §4](../08-ml-systems/01-ml-system-overview.md) | [08/06 §2 §3](../08-ml-systems/06-feature-and-data.md)（五种成因、as-of join）、06/19 §4.3 §4.6 |
-| 数据漂移 vs 概念漂移 · 静默降级 | [08/01 术语表 + §4](../08-ml-systems/01-ml-system-overview.md) | [08/08 §1 §2 §3](../08-ml-systems/08-drift-and-monitoring.md)（PSI 的两个错误用法） |
-| 反馈回路 · 级联模型误差累积 | [08/01 §4](../08-ml-systems/01-ml-system-overview.md) | [08/08 §9](../08-ml-systems/08-drift-and-monitoring.md)、[08/09 §7](../08-ml-systems/09-model-deployment.md)（改一级会动下游输入分布） |
-| 特征日志 · 影子部署 · 黄金数据集 | [08/01 术语表 + §5](../08-ml-systems/01-ml-system-overview.md) | [08/06 §7](../08-ml-systems/06-feature-and-data.md)、[08/07 §9](../08-ml-systems/07-model-quality-and-experimentation.md)（影子能证明什么、不能证明什么） |
-| 动态批处理 · 两个旋钮 · 延迟-吞吐曲线 | [08/04 §4 §5](../08-ml-systems/04-online-inference.md) | 04/01 §3（LLM 的 continuous batching 差在哪，对比见 08/04 §8） |
-| 准入控制 · 队列纪律（FIFO vs LIFO） | [08/04 §9 §10](../08-ml-systems/04-online-inference.md) | 00/01 §6 背压、05/03 §6 负载卸载 —— **三个名字同一件事** |
-| Roofline · GPU 利用率的谎言 | [08/05 §2 §9](../08-ml-systems/05-inference-optimization.md) | 08/04 §13（调优顺序）、06/18 §2.3 |
-| 模型金丝雀 · 双层门禁 | [08/09 §1 §3](../08-ml-systems/09-model-deployment.md) | 03/05 §3（服务的渐进式交付，对比着读） |
-| MDE · 样本量的平方关系 · SRM | [08/07 §4](../08-ml-systems/07-model-quality-and-experimentation.md) | 06/21 §2.3 §4.5（实验周期是容量约束） |
-| 模型注册表 · 血缘 · checkpoint · safetensors | [08/02 §2 §3 §4 §6](../08-ml-systems/02-model-lifecycle.md) | [08/03 §2](../08-ml-systems/03-model-loading-and-warmup.md)（加载在冷启动里占多少）、06/18 §4.1 |
-| feature view · 在线/离线存储 · 物化 · 特征新鲜度 | [08/06 术语表 + §4 §6](../08-ml-systems/06-feature-and-data.md) | 06/19 §4.2 §4.4（延迟由 view 个数决定）、06/20 §4.5 |
-| 曝光偏差 · 探索流量 · 退化反馈回路 | [08/08 术语表 + §9](../08-ml-systems/08-drift-and-monitoring.md) | 06/20 §4.8（探索流量为什么必须常驻）、[08/09 §4](../08-ml-systems/09-model-deployment.md)（回滚窗口的曝光日志不可逆） |
-| 偷看 · CUPED · 护栏指标 · 交错实验 | [08/07 §5 §7 §8](../08-ml-systems/07-model-quality-and-experimentation.md) | 06/21 §4.4（序贯检验与多重校正）、06/20 §4.1 |
-| 分层正交 · 互斥组 · 触发分析 | [06/21 §4.1 §4.3](../06-case-studies/21-ab-experiment-platform.md) | 03/05 §2（feature flag 的求值一致性） |
+| 一个请求的旅程 · 关键路径 | [00/00 §1](00-concepts.md#1-一个请求到底经历了什么) | 01/04 §1、05/02 §4（追踪） |
+| 延迟 / 吞吐 / 并发 · Little's Law | [00/00 §2](00-concepts.md#2-延迟吞吐并发--三个最常被混淆的词) | 00/02 §3 排队论 |
+| 分位数 p50/p99 · 分位数不能相加 | [00/00 §3](00-concepts.md#3-为什么平均值是骗人的p50--p90--p99) | 00/01 §7、05/02 §2（直方图与基数） |
+| 垂直 vs 水平扩展 | [00/00 §4](00-concepts.md#4-什么是扩展垂直-vs-水平) | 05/05 §3 §4 |
+| 副本 / 分片 / 分片键 | [00/00 §5](00-concepts.md#5-副本分片分区--三个被混用的词) | 05/05 §5、02/03 §3 |
+| 网络分区 · 脑裂 | [00/00 §5](00-concepts.md#5-副本分片分区--三个被混用的词) | 00/01 §3、01/05 §8 |
+| 强一致 / 最终一致 / 线性一致 | [00/00 §6](00-concepts.md#6-什么是一致性--一个词两种完全不同的意思) | 00/01 §4 全谱 |
+| ACID 的 C ≠ CAP 的 C | [00/00 §6](00-concepts.md#6-什么是一致性--一个词两种完全不同的意思) | 00/01 §3 |
+| 事务 · 隔离级别 · 脏读/幻读 | [00/00 §7](00-concepts.md#7-事务与隔离级别) | 00/01 §4（写偏斜）、02/02 §2（Saga 没有隔离性） |
+| 乐观并发 / CAS | [00/00 §7](00-concepts.md#7-事务与隔离级别) | 01/05 §3 fencing token |
+| 同步 / 异步 · 阻塞 / 非阻塞 | [00/00 §8](00-concepts.md#8-同步--异步--阻塞--非阻塞) | 01/03 §1 |
+| 有状态 vs 无状态 | [00/00 §9](00-concepts.md#9-有状态-vs-无状态) | 01/04 §4（长连接）、06/11 |
+| 可用性 · 几个 9 · 依赖相乘 | [00/00 §10](00-concepts.md#10-可用性几个-9-是什么意思) | 05/01 §2 §4 |
+| 优雅降级 · 相关失败 | [00/00 §10](00-concepts.md#10-可用性几个-9-是什么意思) | 05/03 §7 |
+| 缓存 · 命中率的非线性 | [00/00 §11](00-concepts.md#11-三个最常见的优化手段各在优化什么) | 01/02 全篇 |
+| 队列 · 削峰 · 消息会重复 | [00/00 §11](00-concepts.md#11-三个最常见的优化手段各在优化什么) | 01/03 §1 §3 |
+| 索引 · 写放大 | [00/00 §11](00-concepts.md#11-三个最常见的优化手段各在优化什么) | 01/01 §3 §5 |
+| 幂等（是什么） | [00/00 §11 队列代价表 + §12](00-concepts.md#11-三个最常见的优化手段各在优化什么) | 00/01 §5 幂等键（怎么实现） |
+| 三个数量级 · 光速下限 | [00/01 §1](01-fundamentals.md#1-为什么要有这些数字) | 00/02 §2、07/03 §1 |
+| 延迟数字表 | [00/01 §2](01-fundamentals.md#2-只背三个数量级其余用作估算查表2026-校准版) | 07/03 §1（必背版） |
+| CAP / PACELC | [00/01 §3](01-fundamentals.md#3-cap-与-pacelc正确的用法) | 01/05 §1 |
+| 一致性模型全谱 · 读己之写 · 写偏斜 | [00/01 §4](01-fundamentals.md#4-两条正交轴副本一致性与事务隔离) | 05/05 §4（复制延迟）、04/04 §9 |
+| 幂等键 | [00/01 §5](01-fundamentals.md#5-幂等idempotency分布式系统的第一公民) | 02/04 §5、03/02 §4、06/15 |
+| 背压 · 有界队列 | [00/01 §6](01-fundamentals.md#6-背压backpressure没有它系统就会雪崩cascading-failure) | 05/03 §6 负载卸载 |
+| 尾延迟放大 | [00/01 §7](01-fundamentals.md#7-尾延迟放大tail-latency-amplification) | 03/03 §7（授权的尾延迟）、04/05 §2 |
+| 失败模型 · 灰色故障 | [00/01 §8](01-fundamentals.md#8-失败模型你要防的到底是什么) | 05/03 §9（级联故障）、05/04 §7（因果链） |
+| 超时预算 · 重试放大 · 三件套 | [00/01 §9](01-fundamentals.md#9-幂等--重试--超时三件套必须一起设计) | 05/03 §2 §3 |
+| 排队论 · 利用率 · USL | [00/02 §3](02-capacity-estimation.md#3-排队论queueing-theory为什么-80-利用率utilization是危险的) | 05/05 §1 |
+| 单位经济 · $/请求 | [00/02 §6](02-capacity-estimation.md#6-成本建模单位经济unit-economics) | 04/08、06/04 |
+| 需求澄清清单 | [00/03 §1](03-tradeoff-framework.md#1-需求澄清requirements-clarification清单面试前-5-分钟必问) | 07/01 §2 阶段 1 |
+| 单向门 / 双向门 · 可逆性 | [00/03 §2](03-tradeoff-framework.md#2-决策的四象限法) | 06/08 §4.3（301 的例子） |
+| ADR · 演进式架构 · 复杂度预算 | [00/03 §4 §5 §6](03-tradeoff-framework.md#4-adr架构决策记录architecture-decision-record) | 02/01 §4 §5 |
+| 投递语义 · Outbox · CDC | [01/03 §3 §4](../01-building-blocks/03-messaging-and-streams.md#3-exactly-once-的真相) | 02/02 §3（Saga 编排器）、02/05 |
+| 同步/异步/半同步复制 · RPO / RTO | [01/06 §1 §2](../01-building-blocks/06-replication.md#1-复制在解决四件不同的事而它们要的方案不一样) | 05/05 §4、05/01 §2 |
+| 读己之写的三种解法 · 单调读 · 一致前缀读 | [01/06 §4](../01-building-blocks/06-replication.md#4-会话保证三件套读己之写单调读一致前缀读) | 02/02 §5（consistency token）、02/04 §5 |
+| 故障转移 · 脑裂防护 · 多主与冲突解法 | [01/06 §5 §7 §8](../01-building-blocks/06-replication.md#5-故障转移自动-failover-的脑裂风险和为什么很多团队选手动) | 01/05 §8、06/05（协作编辑的 CRDT） |
+| Quorum `W+R>N` · 读修复 · 反熵 · hinted handoff | [01/06 §9](../01-building-blocks/06-replication.md#9-无主复制与-quorumw--r--n-到底给了你什么) | 06/12（分布式缓存）、07/02 §Dynamo |
+| 租户隔离四级 · 噪音邻居 | [02/03 §1 §5](../02-architecture-patterns/03-multi-tenancy.md#1-四种隔离级别) | 03/01、03/04 |
+| SLI / SLO / 错误预算 / 燃尽率 | [05/01 §1 §5](../05-reliability/01-slo-and-error-budget.md#1-sli优先写成-好事件--有效事件) | 05/04 §3（严重级别）、03/05 §3 |
+| 冷启动 · 预热 · 预热池 | [04/01 §12](../04-ai-agent-systems/01-llm-serving-infra.md#12-容量规划从-qps-与-token-分布推-gpu-数) | [08/03 §2 §3 §5](../08-ml-systems/03-model-loading-and-warmup.md#2-冷启动的九项拆解每一项到底多少秒)（九项分解、收敛判据、容量公式） |
+| 双缓冲切换 · 排空 · 显存超售 | [08/03 §6 §7](../08-ml-systems/03-model-loading-and-warmup.md#6-热加载与模型切换显存够不够放两份) | 04/01 §11（GPU 多租户） |
+| ML 双指标 SLO（延迟 + 质量） | [08/01 §6](../08-ml-systems/01-ml-system-overview.md#6-ml-系统的-slo延迟--质量两条腿) | 05/01 §9（AI 系统的 SLI）、[08/09 §2](../08-ml-systems/09-model-deployment.md#2-模型金丝雀该看什么指标每个多久能出结论)（金丝雀看哪个） |
+| 模型版本四元组 · 不可变提升 | [08/02 §3 §8](../08-ml-systems/02-model-lifecycle.md#3-版本化与血缘semver-为什么不适用) | [08/09 §4](../08-ml-systems/09-model-deployment.md#4-模型回滚--代码回滚)（只回滚权重会发生什么） |
+| 训练/服务偏斜 · 特征穿越 · 时点正确性 | [08/01 术语表 + §4](../08-ml-systems/01-ml-system-overview.md#4-ml-系统特有的失败模式清单) | [08/06 §2 §3](../08-ml-systems/06-feature-and-data.md#2-训练服务偏斜五种成因各自的检测手段)（五种成因、as-of join）、06/19 §4.3 §4.6 |
+| 数据漂移 vs 概念漂移 · 静默降级 | [08/01 术语表 + §4](../08-ml-systems/01-ml-system-overview.md#4-ml-系统特有的失败模式清单) | [08/08 §1 §2 §3](../08-ml-systems/08-drift-and-monitoring.md#1-静默降级为什么面板全绿而模型已经死了)（PSI 的两个错误用法） |
+| 反馈回路 · 级联模型误差累积 | [08/01 §4](../08-ml-systems/01-ml-system-overview.md#4-ml-系统特有的失败模式清单) | [08/08 §9](../08-ml-systems/08-drift-and-monitoring.md#9-反馈回路你的训练数据是模型自己写的)、[08/09 §7](../08-ml-systems/09-model-deployment.md#7-级联模型改一级会改变下游的输入分布)（改一级会动下游输入分布） |
+| 特征日志 · 影子部署 · 黄金数据集 | [08/01 术语表 + §5](../08-ml-systems/01-ml-system-overview.md#5-为什么-ml-系统的测试不同没有确定的期望输出) | [08/06 §7](../08-ml-systems/06-feature-and-data.md#7-版本化监控下线)、[08/07 §9](../08-ml-systems/07-model-quality-and-experimentation.md#9-影子部署能证明什么不能证明什么)（影子能证明什么、不能证明什么） |
+| 动态批处理 · 两个旋钮 · 延迟-吞吐曲线 | [08/04 §4 §5](../08-ml-systems/04-online-inference.md#4-动态批处理原理与两个旋钮) | 04/01 §3（LLM 的 continuous batching 差在哪，对比见 08/04 §8） |
+| 准入控制 · 队列纪律（FIFO vs LIFO） | [08/04 §9 §10](../08-ml-systems/04-online-inference.md#9-准入控制过载时该拒绝谁) | 00/01 §6 背压、05/03 §6 负载卸载 —— **三者协同但不等同**：背压把“慢下来”向上游传播，准入控制在开始工作前限制进入，负载卸载在过载时主动拒绝 |
+| Roofline · GPU 利用率的谎言 | [08/05 §2 §9](../08-ml-systems/05-inference-optimization.md#2-roofline判断你撞的是哪堵墙) | 08/04 §13（调优顺序）、06/18 §2.3 |
+| 模型金丝雀 · 双层门禁 | [08/09 §1 §3](../08-ml-systems/09-model-deployment.md#1-为什么服务的金丝雀判据搬到模型上会失效) | 03/05 §3（服务的渐进式交付，对比着读） |
+| MDE · 样本量的平方关系 · SRM | [08/07 §4](../08-ml-systems/07-model-quality-and-experimentation.md#4-样本量与统计功效先算再决定要不要做这个实验) | 06/21 §2.3 §4.5（实验周期是容量约束） |
+| 模型注册表 · 血缘 · checkpoint · safetensors | [08/02 §2 §3 §4 §6](../08-ml-systems/02-model-lifecycle.md#2-registry-该记什么一张-schema-表重点在最后一列) | [08/03 §2](../08-ml-systems/03-model-loading-and-warmup.md#2-冷启动的九项拆解每一项到底多少秒)（加载在冷启动里占多少）、06/18 §4.1 |
+| feature view · 在线/离线存储 · 物化 · 特征新鲜度 | [08/06 术语表 + §4 §6](../08-ml-systems/06-feature-and-data.md#4-feature-store-到底解决了什么没解决什么) | 06/19 §4.2 §4.4（延迟由 view 个数决定）、06/20 §4.5 |
+| 曝光偏差 · 探索流量 · 退化反馈回路 | [08/08 术语表 + §9](../08-ml-systems/08-drift-and-monitoring.md#9-反馈回路你的训练数据是模型自己写的) | 06/20 §4.8（探索流量为什么必须常驻）、[08/09 §4](../08-ml-systems/09-model-deployment.md#4-模型回滚--代码回滚)（回滚窗口的曝光日志不可逆） |
+| 偷看 · CUPED · 护栏指标 · 交错实验 | [08/07 §5 §7 §8](../08-ml-systems/07-model-quality-and-experimentation.md#5-cuped能省多少样本别信厂商口径) | 06/21 §4.4（序贯检验与多重校正）、06/20 §4.1 |
+| 分层正交 · 互斥组 · 触发分析 | [06/21 §4.1 §4.3](../06-case-studies/21-ab-experiment-platform.md#41-分流设计哈希分层互斥组) | 03/05 §2（feature flag 的求值一致性） |
 
 **英文怎么说** → [07/04 术语表](../07-interview/04-glossary.md)（545 条，全书索引；第 14 组是 ML 系统、特征与实验）。
 这一页管"它依赖谁"，07/04 管"它英文叫什么"，00-concepts §12 管"一句话它是什么"。

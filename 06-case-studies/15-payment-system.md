@@ -12,21 +12,21 @@
 **先确认你能回答这三个问题**
 
 1. 幂等（idempotency）的定义是什么？为什么"客户端每次重试都生成一个新 UUID 当幂等键"等于完全没有幂等？
-   答不出 → 先读 [00-concepts §12](../00-foundations/00-concepts.md)、[01-fundamentals §5 幂等](../00-foundations/01-fundamentals.md)
+   答不出 → 先读 [00-concepts §12](../00-foundations/00-concepts.md#12-本章术语速查)、[01-fundamentals §5 幂等](../00-foundations/01-fundamentals.md#5-幂等idempotency分布式系统的第一公民)
 2. "读出状态 → 在应用里判断 → 写回"这个写法，在消息乱序或重复投递时会错成什么样？条件更新（`UPDATE ... WHERE status IN (...)`）怎么修它？
-   答不出 → 先读 [00-concepts §7 事务与隔离级别](../00-foundations/00-concepts.md)
+   答不出 → 先读 [00-concepts §7 事务与隔离级别](../00-foundations/00-concepts.md#7-事务与隔离级别)
 3. 一次 RPC 超时了，对方**可能**处于几种状态？你能从客户端区分它们吗？
-   答不出 → 先读 [01-fundamentals §8 失败模型](../00-foundations/01-fundamentals.md)、[§9 幂等 × 重试 × 超时](../00-foundations/01-fundamentals.md)
+   答不出 → 先读 [01-fundamentals §8 失败模型](../00-foundations/01-fundamentals.md#8-失败模型你要防的到底是什么)、[§9 幂等 × 重试 × 超时](../00-foundations/01-fundamentals.md#9-幂等--重试--超时三件套必须一起设计)
 
 **这道题会用到的构件**
 
 | 构件 | 用在哪 | 详见 |
 |---|---|---|
-| 幂等键 · 重试 · 超时三件套 | §4.1 幂等表、§4.2 UNKNOWN 的三重保障 | [01-fundamentals §5、§9](../00-foundations/01-fundamentals.md) |
+| 幂等键 · 重试 · 超时三件套 | §4.1 幂等表、§4.2 UNKNOWN 的三重保障 | [01-fundamentals §5、§9](../00-foundations/01-fundamentals.md#5-幂等idempotency分布式系统的第一公民) |
 | 至少一次投递、重复与乱序、DLQ | §3 回调只做"验签 + 落 Kafka + 200" | [`03-messaging-and-streams.md`](../01-building-blocks/03-messaging-and-streams.md) §3、§4、§5 |
 | Saga 与补偿事务（为什么不是 2PC） | §7 常见错误答法第 2 条 | [`02-event-driven-and-cqrs.md`](../02-architecture-patterns/02-event-driven-and-cqrs.md) §2、§3 |
 | 隔板 / 熔断 / 超时预算 | §2 ③ 在途并发、§5 渠道 p99 劣化 | [`03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) §2、§4、§5 |
-| Little's Law（在途 = TPS × 依赖延迟） | §2 ③ 算出 720 → 6,000 在途 | [00-concepts §2](../00-foundations/00-concepts.md)、[`02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §3 |
+| Little's Law（平均在途 = 稳定窗口完成率 × 平均依赖停留时间） | §2 ③ 算出 720 → 6,000 平均在途 | [00-concepts §2](../00-foundations/00-concepts.md#2-延迟吞吐并发--三个最常被混淆的词)、[`02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §3 |
 
 **这道题的一句话本质**
 
@@ -73,14 +73,15 @@
 ## 2. 估算
 
 ```
-① 吞吐  1,000 万笔/天 ÷ 86,400 = 116 TPS 均值 × 5（日内峰谷）≈ 600 TPS 常规峰值
+① 吞吐  1,000 万笔/天 ÷ 86,400 = 116 TPS 均值 × 5（日内峰均比）≈ 600 TPS 常规峰值
        大促瞬时 20× = 2,300 TPS      ← 容量规划的基准是它，不是 600
 ② 写放大  每笔 ≈ 10 行持久化（幂等 1 + payment 1 + 状态事件 2 + 账本分录 6）
        600 TPS × 10 = 6,000 writes/s；大促 23,000 writes/s
-       ⇒ 单主 Postgres（NVMe + 组提交 group commit：把并发事务的日志攒成一批只 fsync 一次，
-          让"每秒能提交多少事务"不再等于"每秒能刷几次盘"）在 6,000 是舒适区，
-          23,000 要提前扩容或削峰
-       ⇒ 但**不要主动引入分库和分布式事务** —— 这题的难点从来不是吞吐
+       ⇒ 本文先假设短事务、既定索引、NVMe + 组提交（group commit：把并发事务的日志攒成一批，
+          减少 fsync 次数）的单主 Postgres，在目标 p99 下压测可稳定承受 6,000 writes/s；
+          23,000 writes/s 已超过这组场景基线，要提前削峰、扩容或重新压测替代方案
+       ⇒ 这不是 PostgreSQL 的通用上限；事务大小、索引、锁竞争、硬件、持久化配置与 SLO 任一变化都要重测。
+          在证据出现前**不要主动引入分库和分布式事务** —— 这题的难点从来不是吞吐
 ③ 在途并发（Little's law：在途 = TPS × 依赖延迟）
        渠道 p50 800 ms / p99 3 s → 600 × 1.2 s ≈ 720 在途
        渠道劣化到平均 10 s        → 600 × 10   = 6,000 在途
@@ -121,7 +122,7 @@
 
 ```
                                     ┌── 幂等表 idempotency_keys（唯一索引）
- 商户 ─POST /payments──────────▶ Payment API ─┤   热 7d（Postgres）/ 冷 540d（归档）
+ 商户 ─POST /payments──────────▶ Payment API ─┤   热 7d 完整响应 / 长期在线 tombstone
    Idempotency-Key:                 │         └── 命中 → 直接返回**响应快照**，不重新执行
    merchant_id + merchant_order_id  │
                                     │ ① 幂等裁决（唯一索引，非 SELECT-then-INSERT）
@@ -144,7 +145,7 @@
      └───────────────┬──────────────────────┬──────────────────────────┬──┘
                      ▼                      ▼                          ▼
         State Machine Applier：转移白名单 + 条件更新 + 版本号 + 单调前进
-                     │ 影响 1 行 = 推进；影响 0 行 = 这条消息过期，丢弃并计数
+                     │ 同一数据库事务：状态推进 + ledger entries + 下游 outbox
                      ▼
         Ledger：append-only 复式分录，SUM(debit) = SUM(credit)，每分钟断言
                      ├──▶ 余额快照（派生视图，永远可从分录重算）
@@ -158,7 +159,7 @@
 1. **渠道调用那条线之外的一切不可回滚。** 你的所有机制都只是在"事后把自己的认知对齐到对方的事实"。
 2. **回调入口与支付主链路物理隔离。** 回调只做三件事：验签、落 Kafka、返回 200。渠道的重发风暴不能把下单链路带下去。
 3. **状态推进只有一个入口**（State Machine Applier）。查询、回调、对账三条路走同一段代码、同一套白名单。三段各写一遍状态更新的系统，一定会在某一段漏掉一个条件。
-4. **账本 append-only**（只追加：分录一旦写入就不再 UPDATE、不再 DELETE）。任何"更正"都是新增反向分录。这是会计要求，不是技术偏好。
+4. **资金状态与账本原子提交**：一次状态推进、对应复式分录和待发事件写进同一数据库事务。分录 append-only，任何更正新增反向分录。若账本是独立系统，则必须给出持久 journal/outbox、幂等入账与对账协议，不能只画两步箭头。
 
 **数据模型骨架**（白板上写这三张表就够）：
 
@@ -167,8 +168,9 @@ payments(id PK, merchant_id, merchant_order_id, amount_minor BIGINT, currency CH
          status, channel, channel_txn_id, refunded_minor BIGINT DEFAULT 0, version INT,
          created_at, updated_at, UNIQUE (merchant_id, merchant_order_id))  -- 第二道幂等
 idempotency_keys(merchant_id, idem_key, request_fingerprint, state, response_snapshot,
-                 payment_id, created_at, PRIMARY KEY (merchant_id, idem_key))
-ledger_entries(entry_id PK, transaction_id, account_id, direction SMALLINT,  -- +1/-1
+                 payment_id, lease_until, attempt_version, created_at,
+                 PRIMARY KEY (merchant_id, idem_key))
+ledger_entries(entry_id PK, transaction_id, seq INT, account_id, direction SMALLINT,  -- +1/-1
                amount_minor BIGINT CHECK (amount_minor > 0), currency CHAR(3),
                posted_at, effective_at, UNIQUE (transaction_id, account_id, direction, seq))
 ```
@@ -183,7 +185,8 @@ ledger_entries(entry_id PK, transaction_id, account_id, direction SMALLINT,  -- 
 
 | 方案 | 谁生成 key | 重试时 key 会变吗 | 重复扣款风险 | 代价 |
 |---|---|---|---|---|
-| A · 客户端随机 UUID | 客户端 | **会变**（每次重试新 UUID） | 高 —— 幂等形同虚设 | 0 |
+| A · 每次重试都生成新 UUID | 客户端 | 会变 | 高 —— 幂等形同虚设 | 0 |
+| A2 · 每个逻辑操作生成一次 UUID，持久化并在所有重试复用 | 客户端 | 不变 | 低 | 客户端必须可靠保存 operation ID |
 | B · 客户端从业务标识派生 `merchant_id + merchant_order_id` | 客户端，但确定性 | 不变 | 低 | 要求商户有稳定订单号 |
 | C · 服务端两段式：先 `POST /payment_intents` 拿 `intent_id`，再 `POST /payment_intents/{id}/confirm` | 服务端 | 不变（第二段用 `intent_id` 自身） | 低 | 多一次 RTT（~30 ms） |
 
@@ -193,7 +196,7 @@ ledger_entries(entry_id PK, transaction_id, account_id, direction SMALLINT,  -- 
 
 - **裁决靠唯一索引，不靠 SELECT-then-INSERT**：`INSERT INTO idempotency_keys(...) ON CONFLICT DO NOTHING RETURNING *`，无返回即已存在。并发下 SELECT-then-INSERT 必错 —— 这是判断"写没写过并发代码"的单选题。
 - **相同 key 不同 body ⇒ 返回 409，绝不返回旧结果**。body 规范化后取 hash 存 `request_fingerprint`；指纹不符说明调用方有 bug，返回旧结果等于帮他把 bug 藏到某天金额对不上为止。
-- **并发同 key ⇒ 第二个请求看到 `state='in_progress'`，返回 409 + `Retry-After: 1`，不要等**。等待会让连接池被慢渠道吃干，把一个渠道的抖动放大成全站不可用。
+- **`in_progress` 必须可恢复**：记录 `lease_until` 与 attempt/fencing version。租约未过期时第二个请求返回 409/202；过期后只能用 CAS takeover。接管者先用同一个渠道幂等键查询/恢复已有调用，不能盲目再次扣款。claim、payment 初始状态和 outbox 在同一短事务里提交；外部渠道调用不持有数据库事务。
 
 | 保留期 | 存储量（1,000 万笔/天 × 200 B） | 能挡住 | 挡不住 |
 |---|---|---|---|
@@ -201,7 +204,7 @@ ledger_entries(entry_id PK, transaction_id, account_id, direction SMALLINT,  -- 
 | 30 d（Stripe API v2 的窗口） | 60 GB | 上面全部 + 常规运维补单 | 争议期内的重复退款 |
 | **540 d（覆盖 Visa 争议窗口极端值）** | 1.08 TB | 全部 | — |
 
-**保留期分两层：热层 7 天（14 GB，Postgres，点查 < 1 ms）+ 冷层 540 天（归档表 / 对象存储，只在人工排查与补单时查）。** 一层做法要么挡不住补单脚本，要么把 1 TB 的索引压在 OLTP 主库上。另外，**退款的幂等键不能是 `payment_id`** —— 那会让第二次部分退款被当成重复请求静默吞掉，必须用 `merchant_refund_id` 派生的 `refund_id`。这个 bug 在生产里极常见，症状是"客户投诉少退了钱"，排查时没人会怀疑幂等。
+**保留期分两层，但唯一性不能离线**：热层 7 天保留完整响应；之后把 key、指纹、payment_id 和终态压成紧凑的在线 tombstone，覆盖合同规定的最长重复/争议窗口。对象存储归档只用于审计，不能成为正常请求永远不查的“冷层”，否则第 8 天的重复请求仍会再次扣款。若确实只存对象存储，处理前必须同步查冷索引并接受其延迟/可用性成本。退款 key 用 `merchant_refund_id` 或 `(payment_id, refund_operation_id)`，不能只用 `payment_id`，否则第二次合法部分退款会被吞掉。
 
 ---
 
@@ -233,8 +236,8 @@ stateDiagram-v2
 > 📖 **读图要点**：`processing` 有三条出边，其中通向 `failed` 的那条标着 "explicit decline"，通向 `unknown` 的那条标着 "timeout" —— **图里不存在一条从 timeout 指向 failed 的边**，这是整道题唯一必须记住的一件事。再看 `failed`：它没有任何出边。所以把超时误写成 failed 是**不可逆的** —— 之后再没有任何机制会回头去问渠道，那笔已经扣掉的钱会永远消失在你的视野之外。`unknown` 到 `failed` 的边确实存在，但它的标签是"渠道明确说这笔不存在"，不是"等久了"。
 
 > **面试金句**
-> 支付系统里最贵的一个词是 timeout。它的语义是**状态未知**，不是失败。我的状态机里 `failed` 是终态、没有出边，所以超时**永远不允许指向它** —— 一旦误写成 failed，就再没有任何机制会回头去问渠道，那笔真的扣掉的钱永远不会被发现。超时只能进 `unknown`，而 `unknown` 只能被三条路推进：主动查询、渠道回调、T+1 对账。**超时本身永远不推进任何状态。**
-> The most expensive word in a payment system is "timeout." It means unknown, not failed. In my state machine `failed` is terminal — it has no outgoing edges — so a timeout is never allowed to point at it. The moment you write `failed` on a timeout, nothing will ever go back and ask the channel again, and money that actually moved just vanishes from your view. A timeout can only land in `unknown`, and `unknown` advances exactly three ways: an active status query, a channel webhook, or T+1 reconciliation. The timeout itself never advances anything.
+> 支付系统里最贵的一个词是 timeout。它的语义是**状态未知**，不是失败。我的状态机里 `failed` 是终态、没有出边，所以超时**永远不允许指向它** —— 一旦误写成 failed，就再没有任何机制会回头去问渠道，那笔真的扣掉的钱永远不会被发现。记录超时这个事实可以把 `processing` 推进到 `unknown`；但 `unknown` 只能被三类新证据推进到终态：主动查询结果、渠道回调、T+1 对账。**时间流逝本身绝不能把 UNKNOWN 猜成成功或失败。**
+> The most expensive word in a payment system is "timeout." It means unknown, not failed. Recording the timeout may move `processing` to `unknown`, but it can never move the payment directly to a terminal state. Only new evidence — an active status query, a channel webhook, or reconciliation — may resolve `unknown` to success or failure.
 
 **三重保障的分工与量化** —— 三条路必须**同时存在**：只做 ① 的系统在渠道查询接口劣化时集体卡死；只做 ② 的系统在自己回调入口挂 10 分钟时留下一批永久 `processing`；只做 ③ 的系统让用户等 30 小时。
 
@@ -242,9 +245,9 @@ stateDiagram-v2
 |---|---|---|---|
 | ① 主动查询 Poller（退避 5s / 30s / 2m / 10m / 1h，24 h 封顶） | ~90–95% | 秒级–分钟级 | 渠道查询接口也挂了；渠道自己也还没定 |
 | ② 渠道回调 webhook（验签 + 事件去重 + 单调前进） | ~95–99% | 秒级 | 你的回调入口挂了；验签密钥轮换出错；回调乱序 |
-| ③ T+1 清算文件对账 | **100%（终局）** | 最长约 30 h | 渠道文件延迟出（此时唯一的答案是等 + 告警） |
+| ③ T+1 清算文件对账 | 渠道侧权威记录；仍可能延迟或后续更正 | 小时到天 | 文件延迟/缺失时告警、等待并与渠道升级 |
 
-**推进状态的唯一正确写法** —— 条件更新，不是读改写：
+**推进状态的一种安全常用写法** —— 用条件更新把“只允许合法前态”交给数据库原子裁决，避免无保护的读改写：
 
 ```sql
 UPDATE payments
@@ -253,8 +256,9 @@ UPDATE payments
    AND status IN ('processing', 'unknown')      -- 转移白名单：succeeded 不会被打回
    AND version = :expected_version;             -- 乐观锁
 -- 影响 1 行 ⇒ 推进成功
--- 影响 0 行 ⇒ 这条消息是过期/乱序的。丢弃 + state_transition_rejected 计数 +1，
---            **不要重试**。重试一个逻辑上过期的消息只会浪费配额。
+-- 影响 0 行 ⇒ 重新读取当前 version/status，再跑一次转移白名单。
+-- 若状态已等价或更靠后，则幂等成功；若仍允许该转移，则用新 version 重试一次；
+-- 只有明确非法/过期才丢弃并计数。version 冲突本身不证明事件过期。
 ```
 
 **回调先于同步响应到达是常态，不是异常**（渠道的 webhook 往往比 HTTP 响应先到，因为它们走不同的网络路径）：
@@ -303,7 +307,7 @@ t4 结算到账 T+2   txn=T3  bank_cash          银行存款          9680
                           channel_receivable                            9680
         ⇒ channel_receivable = 10000 − 320 − 9680 = 0
         ⇒ **这个"归零"就是对账的断言**：任何非零余额都是一笔在途或一笔差异
-t5 结算给商户     txn=T4  merchant_payable                    10000
+t5 结算给商户     txn=T4  merchant_payable   商户应付          10000
                           bank_cash                                     9500
                           platform_revenue   平台收入                     500
 每一个 txn 内部，同币种的 SUM(direction × amount_minor) 必须等于 0。
@@ -440,7 +444,7 @@ HAVING SUM(direction * amount_minor) <> 0;
 
 | 故障 | 影响 | 检测信号 | 应对 / 降级到什么 |
 |---|---|---|---|
-| 渠道 p99 从 3 s 劣化到 30 s | 在途并发从 720 涨到 6,000+，连接池/线程池打满，**一个渠道拖死整个支付服务** | `channel_inflight` 与 `channel_p99` 同时上涨；连接池等待队列长度 | 每渠道独立隔板（`max_inflight = 2000`）+ 熔断；熔断后由 Router 切备用渠道；无备用则对新请求快速失败并提示稍后重试，**不要排队** |
+| 渠道延迟整体劣化：同一窗口平均值 1.2 s → 10 s、p99 3 s → 30 s | 按平均值算，维持 600 TPS 所需平均在途从 720 涨到 6,000；容量不足时队列继续增长，连接池/线程池打满，**一个渠道拖死整个支付服务** | `channel_inflight`、平均值与 `channel_p99` 同时上涨；连接池等待队列长度 | 每渠道独立隔板；`max_inflight = 2000` 只是本题待压测起点，不是由 p99 推出来的。熔断后由 Router 切备用渠道；无备用则对新请求快速失败并提示稍后重试，**不要排队** |
 | 回调入口被打挂 / 验签服务不可用 | 大量支付卡在 `processing` / `unknown` | `webhook_5xx_rate`、`unknown_state_count` 上升 | 回调入口独立部署独立扩容；回调只做验签 + 落 Kafka + 200，业务处理全异步；渠道会重发，回调必须可被无限重放 |
 | **重复扣款**（幂等失效） | 直接资金损失 + 客诉 + 受监管市场的合规事件 | 探测 SQL：同一 `merchant_order_id` 存在 > 1 条 `succeeded` | 幂等表唯一索引是最后一道；**每小时**跑探测 SQL，命中即自动发起退款并开工单。别等客户来告诉你 |
 | 状态机回退（乱序回调把 `succeeded` 改回 `processing`） | 下游重复发货、重复入账 | `state_transition_rejected` 计数**为 0**（说明根本没有白名单在挡）；状态回退事件 | 转移白名单 + 条件更新 + 乐观锁版本号；被拒绝的转移必须计数并进指标，不能静默丢 |
@@ -466,8 +470,10 @@ v1 · 10 万–500 万笔/天
      > 3,000 writes/s 或写 p99 > 20 ms｜出现"按成功率选渠道"的路由需求｜出现跨币种账户
 
 v2 · 500 万–5,000 万笔/天  ← 本文
-   payments 按 merchant_id 分片；**账本按 account_id 分片且禁止跨分片交易**（一笔 transaction
-   的所有分录必须同分片 —— 这是分片这类系统时唯一重要的约束）；热冷分层（热库 90 天）；
+   payments 按 merchant_id 或 payment home shard 分片；账本按 **journal / legal entity / tenant home shard**
+   路由，使一笔 journal 的全部 debit/credit 分录共置并在一个本地事务提交。不能按 account_id 直接哈希后
+   又宣称禁止跨分片交易：一次支付天然会同时触及 merchant、channel、bank、revenue 多个账户。
+   账户余额是 journal 分录的派生聚合；平台级热点账户可分桶。热冷分层（热库 90 天）；
    多渠道智能路由；异步风控层；对账升级为有 SLA 的运营流程（差异池 + 工单 + 老化告警）。
    ▼ 触发 v3 的信号：多法人实体 / 多国牌照、资金池须按实体隔离｜监管要求实时报送｜
      **单账户分录写入 > 1,000 TPS**（典型是平台收入账户）⇒ 分录分桶
@@ -490,19 +496,19 @@ v3 · 独立的资金与清算系统
 | 1 | "调渠道超时了就置成 failed，让用户重试" | 直接制造重复扣款。而且 `failed` 是终态，之后没有任何机制会回头查渠道 —— **错误不可逆**。这是本题唯一的"立即出局"答案 | "超时的语义是状态未知。它只能进 `unknown`，由主动查询、渠道回调、T+1 对账三条路之一推进。超时本身永远不推进状态" |
 | 2 | "用 2PC / 分布式事务保证一致性" | 三方渠道不可能加入你的事务协调器。而且 2PC 的协调者故障窗口在支付场景意味着资金悬空。说这句话等于宣布没做过真实支付 | "只能 Saga + 补偿（compensating transaction），而且**补偿本身也会失败** —— 所以对账是最终的收敛手段，不是可选的兜底" |
 | 3 | "账户存一个 balance 字段，收付款时加减" | 不可审计、单行 500–1,000 TPS 封顶，最致命的是**损坏不可检测**：没有冗余就没有校验。答不出"某年某月某日余额是多少" | "余额是结论不是数据。append-only 复式分录 + 派生余额快照 + 每分钟的同交易同币种借贷配平断言" |
-| 4 | "金额用 decimal 存就行了" / "幂等键用 UUID" | 前者漏掉了 exponent 随币种变（JPY 会差 100 倍）和舍入余数的归宿；后者在重试时会生成新 key，幂等形同虚设。**退款复用 `payment_id` 做幂等键**更隐蔽：第二次部分退款被静默吞掉 | "minor units 整数 + ISO 4217 币种码一起解释，中间计算用定点数最后一次舍入，余数有指定归宿。幂等键从业务标识确定性派生，退款用独立的 `refund_id`" |
+| 4 | "金额用 decimal 存就行了" / "每次重试新建 UUID" | 前者漏掉币种 exponent 和舍入余数归宿；后者让同一逻辑操作每次换 key。**一次生成并在所有重试复用的 UUID 是有效的**。退款若只复用 `payment_id`，第二次合法部分退款会被吞掉 | "minor units 整数 + ISO 4217 币种码；每个逻辑操作一个稳定 key，退款用独立 refund operation ID" |
 
 ---
 
 ## 8. 相关章节
 
 - **单行条件更新的 TPS 上限、索引与表膨胀、冷热分层** → [`01-building-blocks/01-storage-engines.md`](../01-building-blocks/01-storage-engines.md)
-- **exactly-once 的真相、Outbox 模式、DLQ 与重放** → [`01-building-blocks/03-messaging-and-streams.md §3–§5`](../01-building-blocks/03-messaging-and-streams.md)
-- **幂等与去重的协调视角、租约、时间不可信** → [`01-building-blocks/05-consensus-and-coordination.md §5–§6`](../01-building-blocks/05-consensus-and-coordination.md)
-- **Saga、补偿事务、Outbox + 编排器的可抄实现** → [`02-architecture-patterns/02-event-driven-and-cqrs.md §2–§3`](../02-architecture-patterns/02-event-driven-and-cqrs.md)
-- **超时预算、重试放大、熔断器、隔板、优雅降级** → [`05-reliability/03-resilience-patterns.md §2–§7`](../05-reliability/03-resilience-patterns.md)｜**告警设计** → [`05-reliability/02-observability.md §8`](../05-reliability/02-observability.md)
-- **排队论：在途并发 = TPS × 依赖延迟** → [`00-foundations/02-capacity-estimation.md §3`](../00-foundations/02-capacity-estimation.md)｜**取舍四句话、ADR、复杂度预算** → [`00-foundations/03-tradeoff-framework.md §6–§8`](../00-foundations/03-tradeoff-framework.md)
-- **同一套幂等/对账机制在计费侧的形态、退款与信用额度** → [`03-saas-platform/02-billing-and-metering.md §4、§9–§10`](../03-saas-platform/02-billing-and-metering.md)、[`04-usage-based-billing.md`](04-usage-based-billing.md)
+- **exactly-once 的真相、Outbox 模式、DLQ 与重放** → [`01-building-blocks/03-messaging-and-streams.md §3–§5`](../01-building-blocks/03-messaging-and-streams.md#3-exactly-once-的真相)
+- **幂等与去重的协调视角、租约、时间不可信** → [`01-building-blocks/05-consensus-and-coordination.md §5–§6`](../01-building-blocks/05-consensus-and-coordination.md#5-时间分布式系统里最不可信的东西)
+- **Saga、补偿事务、Outbox + 编排器的可抄实现** → [`02-architecture-patterns/02-event-driven-and-cqrs.md §2–§3`](../02-architecture-patterns/02-event-driven-and-cqrs.md#2-saga跨服务事务的现实解法)
+- **超时预算、重试放大、熔断器、隔板、优雅降级** → [`05-reliability/03-resilience-patterns.md §2–§7`](../05-reliability/03-resilience-patterns.md#2-超时预算timeout-budget与-deadline-传播)｜**告警设计** → [`05-reliability/02-observability.md §8`](../05-reliability/02-observability.md#8-告警的设计)
+- **排队论：在途并发 = TPS × 依赖延迟** → [`00-foundations/02-capacity-estimation.md §3`](../00-foundations/02-capacity-estimation.md#3-排队论queueing-theory为什么-80-利用率utilization是危险的)｜**取舍四句话、ADR、复杂度预算** → [`00-foundations/03-tradeoff-framework.md §6–§8`](../00-foundations/03-tradeoff-framework.md#6-复杂度预算complexity-budget)
+- **同一套幂等/对账机制在计费侧的形态、退款与信用额度** → [`03-saas-platform/02-billing-and-metering.md §4、§9–§10`](../03-saas-platform/02-billing-and-metering.md#4-去重与幂等最容易讲错的一节)、[`04-usage-based-billing.md`](04-usage-based-billing.md)
 - **idempotency / reconciliation / compensating transaction 的英文用法与发音** → [`07-interview/04-glossary.md`](../07-interview/04-glossary.md)
 
 ---
@@ -510,7 +516,7 @@ v3 · 独立的资金与清算系统
 ## 面试官会追问
 
 1. 调渠道超时了，你把状态置成什么？为什么不是 failed？**如果置成了 failed，这个错误会被什么机制发现？**
-2. 幂等键谁生成？客户端传 UUID 错在哪？相同 key 不同 body 你返回什么？并发同 key 的第二个请求 —— 等它还是拒它？
+2. 幂等键谁生成？随机 UUID 在“每次重试都新建”和“一次生成、持久复用”两种用法下有什么区别？相同 key 不同 body 怎么处理？`in_progress` 的 owner 崩溃后谁能接管？
 3. 幂等记录保留多久？24 小时够吗？为什么争议窗口会影响这个数字？
 4. 为什么不能用一个 balance 字段？如果我坚持要用，你能给我一个检测它是否已经被写坏的办法吗？
 5. 用户支付 $100、渠道扣费 $3.20、平台抽佣 $5，把分录写给我。`channel_receivable` 最后应该是多少，为什么这个数字重要？
@@ -532,4 +538,6 @@ v3 · 独立的资金与清算系统
 
 ---
 
-**下一篇** → [16-search-autocomplete.md](16-search-autocomplete.md)：一个必须每小时变一次的东西，怎么做成永远不变的东西来服务。
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**案例顺读下一篇** → [16-search-autocomplete.md](16-search-autocomplete.md)：一个必须每小时变一次的东西，怎么做成永远不变的东西来服务。

@@ -1,7 +1,7 @@
 # 05 · 英文话术库：把想清楚的东西说得像 Senior
 
-> 这本手册前 41 篇教你**怎么想**。这一篇只教**怎么说**。
-> 面试官不给你脑子里的东西打分，只给**出口的那部分**打分 —— 而非母语者平均要在这一步损失掉 30%。
+> 这本手册的技术章节教你**怎么想**。这一篇只教**怎么说**。
+> 面试官无法给你没有表达出来的推理打分；对任何使用非母语面试的人，清晰、可辩护的表达都需要单独练习。这里不假设一个虚假的“平均损失百分比”。
 > 前提：技术你已经懂了，卡的是把一个正确的判断说成一句有分量的话。
 
 ---
@@ -107,7 +107,7 @@ L6  "I'd put a cache here — 60s TTL with jitter — and it stops working
 
 **⑤ 每个数字后面跟一句 "so what"**
 
-- "45k writes a second means a single Postgres primary is out — those top out around 20k. So sharding isn't a v2 thing, it's day one."
+- "Our load test for this transaction shape, index set, hardware, and latency SLO tops out at 20k writes a second on one Postgres primary. We need 45k, so a single primary is out for this workload."
 - "That's about eight thousand dollars a month in egress alone, more than the compute. So the interesting optimization isn't CPU, it's where the bytes cross the network."
 
 中文注解：**算了不解释等于白算。** 每个数字必须落到一个架构判断上，`That means…` / `So…` 是强制自己落地的开关。
@@ -141,14 +141,14 @@ L6  "I'd put a cache here — 60s TTL with jitter — and it stops working
 
 **③ 口述走一遍主链路（画完必须做，很多人跳过）**
 
-> "Let me trace one write end to end. Client posts with an idempotency key, gateway authenticates, the write service checks the key against Redis, writes to the primary, drops an event in the outbox table in the same transaction, returns 201. A relay tails the outbox and publishes to Kafka. **Nothing downstream is in the user's latency path.**"
+> "Let me trace one write end to end. The client posts with an idempotency key, the gateway authenticates, and the write service inserts that key with the business result into the primary under a unique constraint. In the same transaction it applies the write and inserts an outbox event, then returns 201. A relay tails the outbox and publishes to Kafka. Redis can cache completed responses, but the database record is the durable dedupe boundary. **Nothing downstream is in the user's latency path.**"
 
 中文注解：最后一句才是这段话的价值 —— 它把一串组件变成一个**关于延迟的论断**。图是死的，链路是活的。
 
 **④ 主动认领你知道的问题 / 把选择权交出去**
 
 - "I'm drawing a synchronous double-write here, and I know that's wrong — it multiplies the failure rates. I'm doing it to get the main path across; I'll replace it with an outbox in the deep dive."
-- "That's the skeleton. The two hardest parts are hot partitions and cache coherence. I think hot partitions is the real problem — I'd start there, unless you'd rather see something else."
+- "That's the skeleton. The two hardest parts are hot partitions and cache coherence. I think the hot-partition problem is the harder one — I'd start there, unless you'd rather see something else."
 
 中文注解：**主动暴露 > 被抓到** —— 面试官不必花力气"抓"你，你们变成同一边的人，协作感是评分表上的隐藏项。第二句里 `I think hot partitions is the real problem` 是排序判断：你提名的深挖点必须是这题最难的部分，不是你最熟的部分，**选错了他会知道你不知道难在哪**。
 
@@ -170,7 +170,7 @@ cost     →  "The cost is [specific downside]."
 boundary →  "I'm fine paying it because [X]. If [condition] flipped, I'd switch to B."
 ```
 
-> "I'd go with an eventually consistent read replica for the feed. We said 20-to-1 reads and a couple seconds of staleness is fine, so replicas buy us roughly 20x the read capacity for the price of one extra node type. The cost is that a user can post and not see their own post — so I'd add read-your-writes by pinning that session to the primary for five seconds. If staleness turned out to be unacceptable somewhere, I'd move **that specific path** to the primary, not the whole system."
+> "I'd go with an eventually consistent read replica for the feed. We said 20-to-1 reads and a couple seconds of staleness is fine, so replicas add read capacity without putting every read on the primary. The cost is that a user can post and not see their own post. I'd return the commit position with the write and keep that session on the primary until a replica has caught up; a fixed five-second pin would only be a heuristic, not a guarantee. If staleness turned out to be unacceptable somewhere, I'd move **that specific path** to the primary, not the whole system."
 
 中文注解：注意最后一句 —— **回退方案限定在一条链路上，而不是整个系统**。能把让步收窄到最小范围，是 Senior 和 Mid 最明显的语言差别。
 
@@ -241,7 +241,7 @@ boundary →  "I'm fine paying it because [X]. If [condition] flipped, I'd switc
 
 **C · 有依据地坚持（最难，也最加分）**
 
-- "That's fair — though I'd still lean toward the async path here, because the failure mode of synchronous is that one slow downstream takes the whole write path down with it. We said earlier that a 30-second delay is acceptable. If that's not actually true, I'd flip to sync-with-job-id plus SSE for progress."
+- "That's fair — though I'd still lean toward the async path here, because the failure mode of synchronous is that one slow downstream takes the whole write path down with it. We said earlier that a 30-second delay is acceptable. If the user must see progress immediately, I'd still accept the job asynchronously with a 202 and job ID, then stream progress over SSE. If they must receive the final result in the original response, I'd need to shorten or remove the slow dependency instead."
 - "I hear you, and I think we're optimizing for different things. If the priority is simplicity for a three-person team, you're right, the single service wins — I was optimizing for blast radius. Which one matters more here?"
 
 中文注解：坚持的公式是 **承认对方合理（That's fair / I hear you）→ 给机制层面的理由（the failure mode of Y is…）→ 引用之前确认过的约束（we said earlier…）→ 给前提变化后的方案（If that's not true, I'd…）**。四段齐全，你就不是固执，是在辩护一个立场。第二句更进一步：把分歧归因到**优化目标不同**再抛回去，几乎总能问出他真正的评分点。
@@ -518,5 +518,7 @@ boundary →  "I'm fine paying it because [X]. If [condition] flipped, I'd switc
 
 ---
 
-**下一篇** → [06-mock-interview.md](06-mock-interview.md)：45 分钟英文逐字稿，看这些句式在真实节奏里怎么落地。
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**面试专章顺读下一篇** → [06-mock-interview.md](06-mock-interview.md)：45 分钟英文逐字稿，看这些句式在真实节奏里怎么落地。
 **回看框架** → [01-interview-framework.md](01-interview-framework.md)｜**题库自测** → [02-question-bank.md](02-question-bank.md)｜**数字速查** → [03-cheatsheet.md](03-cheatsheet.md)｜**术语补漏** → [04-glossary.md](04-glossary.md)

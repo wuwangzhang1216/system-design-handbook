@@ -2,6 +2,8 @@
 
 > 计量系统的误差是**有方向的**：丢事件永远是你少收钱，重复事件永远是客户投诉。
 > 所以架构目标不是"准确"，是"**在两个方向上都有可审计的收敛机制**"。
+>
+> **阅读分层**：§2–§7 是 Core，AI 定价矩阵与结果型定价是进阶。带厂商名、价格、吞吐与法规的数字是 **2026-08 时间快照/示例**，实现或签约前必须复核现行官方条款。
 
 ---
 
@@ -17,11 +19,11 @@
 
 | 概念 | 一句话 | 详见 |
 |---|---|---|
-| 幂等 / 幂等键 | 同一操作做多次和做一次效果相同；幂等键就是用来识别"这是同一次操作"的那个标识 | [00-concepts §12](../00-foundations/00-concepts.md)、[00/01 §5](../00-foundations/01-fundamentals.md) |
-| 最终一致 | 停止写入后所有副本最终收敛，中间可能读到旧值，且没有时间上界 | [00-concepts §6](../00-foundations/00-concepts.md) |
-| 背压 | 处理不过来时向上游反向施压（拒绝或阻塞），而不是无限排队 | [00/01 §6](../00-foundations/01-fundamentals.md) |
-| 日志型总线与分区键 | Kafka 这类只追加、可重放的消息总线；分区键决定一条消息进哪个分区，同分区内有序 | [01/03 §1–2](../01-building-blocks/03-messaging-and-streams.md) |
-| 水位线与迟到事件 | 流处理用来宣告"这个时间窗口可以关了"的那条线；晚于它到达的事件就是迟到事件 | [01/03 §6](../01-building-blocks/03-messaging-and-streams.md) |
+| 幂等 / 幂等键 | 同一操作做多次和做一次效果相同；幂等键就是用来识别"这是同一次操作"的那个标识 | [00-concepts §12](../00-foundations/00-concepts.md#12-本章术语速查)、[00/01 §5](../00-foundations/01-fundamentals.md#5-幂等idempotency分布式系统的第一公民) |
+| 最终一致 | 停止写入后所有副本最终收敛，中间可能读到旧值，且没有时间上界 | [00-concepts §6](../00-foundations/00-concepts.md#6-什么是一致性--一个词两种完全不同的意思) |
+| 背压 | 处理不过来时向上游反向施压（拒绝或阻塞），而不是无限排队 | [00/01 §6](../00-foundations/01-fundamentals.md#6-背压backpressure没有它系统就会雪崩cascading-failure) |
+| 日志型总线与分区键 | Kafka 这类只追加、可重放的消息总线；分区键决定一条消息进哪个分区，同分区内有序 | [01/03 §1–2](../01-building-blocks/03-messaging-and-streams.md#1-队列-vs-日志两种根本不同的东西) |
+| 水位线与迟到事件 | 水位线是流处理对“事件时间已经推进到哪里”的单调估计；一条事件到达时，如果它的事件时间已落在当前水位线之前，就属于迟到。水位线不等于 allowed lateness | [01/03 §6](../01-building-blocks/03-messaging-and-streams.md#6-流处理语义与状态) |
 | 租户 / tenant_id | 一套系统同时服务多个互不可见的客户组织，tenant_id 是贯穿所有数据的隔离维度 | [02/03](../02-architecture-patterns/03-multi-tenancy.md) |
 
 **这一章要回答的问题**
@@ -41,6 +43,7 @@
 | 用量计费 | usage-based pricing (UBP) | 按客户实际用了多少收钱，而不是按人头或固定月费 |
 | 阶梯定价 | tiered pricing | 用量落在不同区间时适用不同单价（前 100 万个单位 $5，之后 $3） |
 | 去重窗口 | deduplication window | 系统还记得"这个事件 ID 我见过"的那段时长；超出它的重复事件无法被识别 |
+| 允许迟到期 | allowed lateness | 水位线首次越过窗口末端后，窗口状态还保留多久、迟到事件还能否修正结果的策略；它不参与计算水位线 |
 | 补收 | true-up | 把本期算漏的用量放进下一期账单补上，而不去改已经出过的账单 |
 | 对账 | reconciliation | 拿两份本应相等的数字逐笔比对，并要求每一条差异都能被解释 |
 | 成本护栏 | cost guardrail | 在钱花出去之前就能拦住请求的硬性上限，与"事后告警"相对 |
@@ -88,8 +91,8 @@
 
 | # | 步骤 | 失败模式 | 方向 | 对策 |
 |---|---|---|---|---|
-| 0 | 事件产生 | 进程崩溃、事件还在内存 | **少收钱** | **先落本地 WAL（write-ahead log，预写日志：改内存或返回用户之前，先把这条事件顺序追加进一个只增不改的磁盘文件，崩溃后照它重放，见 [01/01](../01-building-blocks/01-storage-engines.md)）再返回用户**；异步刷入总线 |
-| 0 | 事件产生 | 客户端重试生成新 UUID | **多收钱** | 幂等键（idempotency key）必须由**业务语义派生**，见 §4 |
+| 0 | 事件产生 | 进程崩溃、事件还在内存 | **少收钱** | 在返回“业务已完成”前，把 usage 与业务结果原子写入 outbox；无业务库的网关才使用可恢复、受监控的 WAL spool。流式请求需另行定义中断与估算语义 |
+| 0 | 事件产生 | 客户端在每次重试时重新生成 UUID | **多收钱** | 首次发送前生成并持久化稳定 operation key，所有重试复用；事件 ID 再由它派生，见 §4 |
 | 1 | 投递 | 总线不可用 | 少收钱 | 本地磁盘缓冲 + 有界队列（bounded queue）+ **反压（backpressure）到业务路径的开关必须存在但默认关** |
 | 2 | 去重（deduplication） | 重复超出去重窗口 | 多收钱 | 去重窗口 = 你能容忍的客户端重放延迟上限 |
 | 3 | 聚合 | 迟到事件（late-arriving events）晚于窗口关闭 | 少收钱 | 允许迟到期 + true-up，见 §5 |
@@ -98,7 +101,7 @@
 | 6 | 出账 | 重复出账 | 多收钱 | `(tenant, period, invoice_version)` 唯一约束（unique constraint） |
 | 7 | 对账 | 与上游 provider 账单对不上 | 少收钱 | 三方对账，见 §9 |
 
-**两条结构性原则：** ① **计量必须与业务写路径解耦** —— 绝不在同步请求路径里做去重查询或调用计费 SaaS，那等于把计费系统的可用性绑进产品可用性；API 层只负责可靠投递到 log，去重与聚合放流处理层。② **原始事件湖是唯一真相源（source of truth），聚合结果是可重算的派生物** —— 任何口径变更、价格追溯、客户争议（dispute）都靠 replay 解决。**没有事件湖的计费系统无法处理争议**，最后只能靠客服送额度。
+**两条结构性原则：** ① **计量处理与业务请求解耦，但事件产生不能与业务事实脱节**：优先在业务提交事务内写 outbox，再异步投递；不要在同步路径调用计费 SaaS。② **不可变原始计量事件是计费侧的规范事实层，聚合结果可重算**；它仍要与业务记录和供应商 usage/账单对账，不能把事件湖称作整个业务的唯一真相。口径变更、价格追溯和争议靠带版本的 replay + 对账共同解决。
 
 ---
 
@@ -109,7 +112,7 @@
 | 字段 | 类型 | 说明 / 为什么必须有 |
 |---|---|---|
 | `id` | uuid | 幂等键。与 `source` 组成去重主键（[CloudEvents](https://cloudevents.io/) 惯例） |
-| `source` | string | 产生方，如 `gateway-cell3-pod7`。**去重是 `(source, id)` 而不是单 `id`** |
+| `source` | string | **稳定的逻辑生产者命名空间**，如 `urn:acme:llm-gateway`；不得含 pod / 进程 / 重试目标。去重键是 `(source, id)`，部署位置变化不能改变它 |
 | `type` | enum | `llm.completion` / `tool.call` / `sandbox.session` / `search.query` / `storage.gb_hour` |
 | `time` | ts(µs) | **事件时间（event time）**，用于窗口聚合（windowed aggregation）与价格版本选取 |
 | `ingest_time` | ts | 到达时间。`ingest_time - time` = 迟到程度，必须监控其 p99 |
@@ -119,7 +122,7 @@
 | `session_id` / `run_id` / `agent_id` | string | Agent 场景的成本归因与**单会话硬上限**依据 |
 | `provider` / `model` | string | `anthropic` / `claude-opus-5` |
 | `model_version` | string | 快照版本。价格和 tokenizer 都跟版本走 |
-| `tokenizer_version` | string | ⚠ **必须有**。Claude 4.7+ 对同样文本约多产生 **+30% token**（Opus 4.7/4.8/5、Sonnet 5、Fable 5；Sonnet 4.6 及更早为旧 tokenizer）。没记版本，历史重算一定错 |
+| `tokenizer_version` | string | 本地估算或预算使用了 tokenizer 时必须记录。模型迁移后同样文本的 token 数可能显著变化；“约 +30%”只可能是特定语料/版本的观测，不能外推。最终计费仍优先使用 provider 返回的 usage 与计量版本 |
 | `input_tokens` | int64 | **未命中缓存**的输入 |
 | `cache_read_tokens` | int64 | 缓存读（cache read），单价约为输入的 **10%** |
 | `cache_write_5m_tokens` | int64 | 5 分钟 TTL 缓存写，**1.25×** 基础输入价 |
@@ -130,12 +133,12 @@
 | `inference_geo` | string | 数据驻留（data residency）。Anthropic `inference_geo:"us"` 为 **1.1×** 全项；OpenAI 区域化处理 **+10%** |
 | `outcome` | enum | `success` / `client_error` / `provider_error` / `client_disconnect` |
 | `billable` | bool | 由 §8 的策略计算得出，**必须显式存**，不要在出账时临时判断 |
-| `upstream_cost_micros` | int64 | 你付给 provider 的成本（微分单位整数）。毛利分析的地基 |
+| `provider_usage_ref` | string? | 可选：供应商返回的 usage / request 引用，用于三方对账；原始事实事件不烧入会随时间变化的价格 |
 | `schema_version` | int | 事件格式演进 |
 
-> 单价数据来自各厂商定价页 2026-07-30 抓取（[Anthropic](https://docs.claude.com/en/docs/about-claude/pricing) / [OpenAI prompt caching](https://platform.openai.com/docs/guides/prompt-caching) / [Gemini caching](https://ai.google.dev/gemini-api/docs/caching)），**2026 年中量级，随时变动**。
+> 单价示例来自各厂商定价页的历史时间快照（[Anthropic](https://docs.claude.com/en/docs/about-claude/pricing) / [OpenAI prompt caching](https://platform.openai.com/docs/guides/prompt-caching) / [Gemini caching](https://ai.google.dev/gemini-api/docs/caching)）。它们只用于展示 schema 为什么要拆维度；**不得直接当作现行报价或合同口径**。
 
-**三个非显然的设计点：** ① `upstream_cost_micros` 必须和用量在同一条事件里 —— 分开算意味着你永远无法在秒级知道毛利，只能月末发现亏了。② 绝不用自己的 tokenizer 估算来计费，用 provider 返回的 `usage` 字段；自估在多模态输入、工具定义、思考 token 上会系统性偏差。③ **成本口径与计费口径要分离**：`upstream_cost_micros` 是成本，`billable_units` 是你卖给客户的单位，两者可以完全不同（你按 outcome 卖但成本按 token 算）。混在一起的系统改一次定价要动整条管道。
+**三个非显然的设计点：** ① **遥测记录事实，不记录估值**：事件保存分项 usage、实际 provider/model、发生时间与可对账引用；成本由后端用 `(provider, model, service_tier, event_time, price_version)` 查不可变价目表派生，既能近实时算毛利，也能在合同价修正后重算。② 对转售托管 API 的正式账单，以 provider 返回的 `usage` 为准；本地 tokenizer 只能在流中断时作为带 `usage_source=estimated` 的暂估，不能冒充供应商事实。③ **成本口径与客户计费口径要分离**：provider usage 是成本输入，`billable_units` 是卖给客户的单位，两者可以完全不同。混在一起的系统改一次定价就要动整条管道。
 
 ---
 
@@ -157,20 +160,21 @@
 
 > ❌ **"用了幂等键就不会重复计费"**
 
-幂等只保证**同一个 key 不重复入账**，它**不保证客户端在重试时生成了同一个 key**。真实的失效模式是：客户端超时重试，每次 `uuid4()` 一个新 ID ⇒ 三次重试 = 三条事件 = 三倍收费，而且**你的幂等层完全正常工作**。
+幂等只保证**同一个 key 不重复入账**，它**不保证客户端在重试时复用了同一个 key**。真实的失效模式是：客户端超时重试，每次都重新调用 `uuid4()` ⇒ 三次重试 = 三条事件 = 三倍收费，而且**你的幂等层完全正常工作**。随机 UUID 本身完全可以用；错的是把“每一次网络尝试”都铸成一个新业务操作。
 
-**正确做法：幂等键必须由业务语义派生，且在重试路径上稳定。**
+**正确做法：发起方在首次发送前生成并持久化 operation key，且在同一次业务操作的所有重试中复用；计量事件 ID 再由这个稳定身份与收费步骤派生。**
 
 ```python
-# ❌ 错
-event_id = uuid4()
+# ❌ 错：这个函数在每次 retry attempt 里重新运行
+client_operation_key = uuid4()
 
-# ✅ 对：从不会因重试而变化的业务标识派生
-event_id = uuidv5(NS, f"{tenant_id}:{request_id}:{attempt_semantic_step}")
-#                              ↑ 由最外层入口生成一次，全链路透传（含重试）
+# ✅ 对：调用方/SDK 在首次发送前生成一次并持久化；随机 UUID 可以用
+client_operation_key = operation_store.load_or_create(client_action_ref)
+# 之后每次 HTTP/provider 重试都读取同一个 key；semantic_step 区分同一操作里的不同收费事实
+event_id = uuidv5(NS, f"{tenant_id}:{client_operation_key}:{meter}:{semantic_step}")
 ```
 
-**这条规则对上游 provider 也成立**：调用 LLM API 时透传你自己的幂等键，否则你重试一次就真的被收两次钱。
+如果调用方没有稳定 operation key，网关每次入口生成一个新 `request_id` **无法识别 HTTP 级重试**；它只对该次请求内部的 provider 重试稳定。支持幂等键的上游应透传同一个键；不支持的上游在“超时但可能已接受”时存在歧义，必须查状态/对账，不能宣称 exactly-once。
 
 **事件顺序**：不要依赖它。分区键选 `tenant_id` 保证同租户有序即可，跨租户无序无所谓。真正需要顺序的是**同一 `session_id` 内的预扣/结算配对**，把它们放同一分区。
 
@@ -194,7 +198,23 @@ event_id = uuidv5(NS, f"{tenant_id}:{request_id}:{attempt_semantic_step}")
                        超出去重窗口(32d) ⇒ 无法安全计入，只能丢弃 + 告警
 ```
 
-**水位线（watermark：流处理用来宣告"这个时刻之前的事件我认为都到齐了"的那条线，见 [01/03 §6](../01-building-blocks/03-messaging-and-streams.md)）策略**：`watermark = max(event_time) - allowed_lateness`。水位线越过窗口末端时**发出初步结果**，之后到达的迟到事件产生**增量修正（retraction + 新值）**，直到账期关闭。**账期关闭后的迟到事件只有三种处理方式，必须三选一并写进产品条款：**
+**先把两个经常被混写的参数分开**：watermark 是“事件时间进度”的估计；allowed lateness 是“首次出结果后还愿意保留状态、接受修正多久”的产品与存储策略。不能写成 `watermark = max(event_time) - allowed_lateness`。本题可用下面的起点，再按生产延迟分布调参：
+
+```text
+每个活跃分区 p：
+  wm_p = monotonic(max_valid_event_time_seen_p - out_of_order_bound)
+全局窗口水位线：
+  wm_global = min(wm_p for p in active_partitions)
+```
+
+`out_of_order_bound` 来自同一数据面链路的乱序/投递延迟观测（例如 p99.9 再留安全带），不是 allowed lateness。取所有**活跃**分区的最小值，是因为任意一个慢分区都可能还有更早事件；用全局最大值会让快分区替慢分区提前关窗。分区扩缩或 rebalance 时要随 checkpoint 恢复各自单调水位，不能从当前第一条消息重新起算。
+
+**空闲分区与未来时间戳是两个必须显式处理的坑**：
+
+- 一个长期无流量的分区会把 `min(...)` 永久钉住。只有在消费位点已追平、连续超过配置的 idle timeout 且来源健康时，才把它标成 idle、暂时排除；恢复流量后，其旧事件按迟到策略处理并告警，不能偷偷改写已经关闭的账期。
+- 单条未来时间戳会把 `max_event_time` 推到未来。计量事实应优先由受信服务端赋 `event_time`，并校验 `event_time <= ingest_time + max_future_skew`；越界事件隔离/修正并告警，绝不能参与水位推进。历史 backfill 走单独标记的回填通道，也不能冒充实时分区进度。
+
+当 `wm_global` 首次越过窗口末端时**发出初步结果**；此后在 allowed lateness（例如 24–72 h）内到达的事件产生**增量修正（retraction + 新值）**。allowed lateness 到期可以清理流处理状态，但财务上的最终截止仍是账期关闭；两者可以不同。若窗口状态已清而账期尚未关闭，后来的事件要走从 canonical facts 重算该桶/账期的批量修正路径，不能假装流式状态还在。**账期关闭后的迟到事件只有三种处理方式，必须三选一并写进产品条款：**
 
 | 策略 | 优点 | 代价 | 适用 |
 |---|---|---|---|
@@ -204,7 +224,7 @@ event_id = uuidv5(NS, f"{tenant_id}:{request_id}:{attempt_semantic_step}")
 
 ⚠ **公开资料里找不到主流计费厂商对"账期关闭后迟到事件如何处理"的官方 SLA。** 选型时必须实测，不要相信文档没写的东西。
 
-**要监控的两个指标**：`late_event_ratio`（迟到事件占比，健康 < 0.1%；突增 = 某个数据面 cell 的投递链路堵了）、`revenue_adjustment_ratio`（true-up 金额 / 总收入，> 0.5% 说明 allowed lateness 设短了）。
+**至少监控这几类指标**：`watermark_lag`（按分区看，避免全局最小值掩盖坏分区）、`idle_partition_count/transitions`、`future_timestamp_quarantined`、`late_event_ratio`（突增通常表示某个数据面 cell 的投递链路堵了）和 `revenue_adjustment_ratio`（true-up 金额 / 总收入；持续偏高才说明 allowed lateness 或关账策略需要重估）。健康阈值必须从自己的历史分布与误差预算推导，不把示例百分比当通则。
 
 ---
 
@@ -232,7 +252,7 @@ CREATE TABLE invoices (
 );
 ```
 
-**"恰好一次计费"（exactly-once billing）的真相**：它不存在于传输层，只存在于**应用层的幂等收敛** —— 工程等价物是 `至少一次投递 + 幂等应用 + 可对账的最终收敛`。面试时说"我们做到了 exactly-once 计费"会被追问到崩溃。**支付环节**必须带幂等键（就是 `invoices.idem_key`），且**先落"支付意图"再调用**，绝不先调用后记账 —— 否则网络超时时你不知道钱扣没扣。
+**"恰好一次计费"（exactly-once billing）的真相**：消息系统可在自己的事务作用域内提供 exactly-once processing，但跨计量、账本与支付渠道后，常见业务保证是 `至少一次投递 + 明确窗口内的幂等应用 + 可对账收敛`。所以必须先声明边界，不能只说一句“端到端 exactly-once”。**支付环节**要用稳定业务操作 ID，并先持久化支付意图再调用渠道；否则网络超时时无法判断钱是否已扣。
 
 ---
 
@@ -244,73 +264,56 @@ CREATE TABLE invoices (
 |---|---|---|---|
 | **速率**（rate） | 单位时间的量 | 令牌桶（token bucket：以固定速率往桶里放令牌，每个请求取走一个，桶空就拒绝）/ 滑窗（sliding window） | RPM、TPM |
 | **累计量**（counter） | 周期内总量 | 分布式计数 + 租约 | 月 token 额度、预算 $ |
-| **并发**（gauge） | 同时在跑的数量 | **信号量（semaphore：一个有上限的计数器，占用时 +1、释放时 −1，到顶就拒绝）+ 租约（lease：带过期时间的占用凭证，持有者必须靠心跳续期，不续就自动作废归还，见 [01/05 §4](../01-building-blocks/05-consensus-and-coordination.md)）+ TTL 心跳（heartbeat）** | 并发沙箱数、并发 Agent 数 |
+| **并发**（gauge） | 同时在跑的数量 | **信号量（semaphore：一个有上限的计数器，占用时 +1、释放时 −1，到顶就拒绝）+ 租约（lease：带过期时间的占用凭证，持有者必须靠心跳续期，不续就自动作废归还，见 [01/05 §4](../01-building-blocks/05-consensus-and-coordination.md#4-租约lease比锁更好的抽象)）+ TTL 心跳（heartbeat）** | 并发沙箱数、并发 Agent 数 |
 | **绝对上限**（cap） | 单个实体的硬顶 | 本地即可判定 | 单会话最大 token、单请求最大输出 |
 
 ⚠ **并发配额不能用令牌桶。** 并发是 gauge（当前值，随请求开始和结束上下浮动）不是 counter（只增不减的累计值）：进程崩溃会让计数永久泄漏。必须用带 TTL 的租约 + 心跳续期，崩溃后租约自动过期归还。这是配额系统里最常见的实现错误。
 
-### 分布式近似计数（approximate distributed counting）：本地令牌桶 + 周期同步（伪代码）
+### 分布式近似计数（approximate distributed counting）：本地额度租片 + 中心结算
 
-核心思想：**每个实例向中心"租"一段额度，本地扣减，周期归还与续租。** 用有界的过量发放（over-issuance）换掉每请求一次的远程调用。
+核心思想：**每个实例向中心预留一段可消费额度，本地扣减，周期上报累计消费。** 注意它和“并发槽租约”不同：实例死掉意味着并发槽结束，可以自动释放；已经发出的 token / 金额是消耗品，TTL 到期**不能把整段额度自动复活**。
 
 ```python
-class LeasedQuota:
-    """全局配额 Q，M 个实例。过量发放上界 = M × lease_size —— 这个数你必须能算出来。"""
+# 概念伪代码：省略了本地原子锁、RPC 重试、持久化 schema 与鉴权，不能直接粘贴运行。
+class QuotaSlice:
+    def refresh(self, need):
+        # 中心在同一事务中：检查 remaining、扣除 grant、创建 (slice_id, epoch, grant)。
+        # grant 一经发出就已从全局可用额度中预留，多个实例不能重复拿到。
+        self.slice = quota.acquire_slice(
+            tenant=self.tenant, meter=self.meter,
+            want=self.target_size(need), ttl=LEASE_TTL)
+        self.consumed = 0
+        self.reported = 0
 
-    def __init__(self, tenant, meter, mode):
-        self.local_balance = 0          # 本地持有的额度
-        self.lease_size    = MIN_LEASE  # 自适应，见 refresh()
-        self.burn_ewma     = 0.0        # 燃烧率（单位/秒）的指数滑动平均
-        self.next_refresh  = 0
-        self.mode          = mode       # SOFT | HARD
-        self.stale_since   = None
+    def try_consume(self, n):
+        if self.slice.remaining() < n:
+            self.refresh(n)
+        # 生产实现必须是进程内原子操作。
+        self.consumed += n
+        return ALLOW
 
-    def try_consume(self, n) -> Decision:
-        if self.local_balance >= n:
-            self.local_balance -= n
-            return ALLOW
+    def heartbeat(self):
+        # 中心只接受同 slice_id + epoch 的单调累计值，重复 RPC 不会重复结算。
+        quota.report_cumulative(
+            self.slice.id, self.slice.epoch, consumed_total=self.consumed)
+        self.reported = self.consumed
 
-        # 本地额度不足 —— 只有这时才走远程，热路径上是纯本地操作
-        ok = self.refresh(need=n)
-        if ok and self.local_balance >= n:
-            self.local_balance -= n
-            return ALLOW
-
-        if not ok:                       # 配额服务不可达
-            # 这一行是整个系统最重要的策略决策，不是实现细节：
-            #   SOFT（软限额/降级用）→ fail-open：可用性优先，事后靠对账追回
-            #   HARD（防欺诈/防烧钱）→ fail-closed：正确性优先，宁可拒绝
-            return ALLOW if self.mode == SOFT else DENY_UNAVAILABLE
-
-        return DENY_QUOTA_EXCEEDED
-
-    def refresh(self, need) -> bool:
-        # 自适应租约：够用一个刷新周期，且不至于把全局额度囤死在冷实例里
-        target = max(need, self.burn_ewma * REFRESH_INTERVAL * 1.2)
-        self.lease_size = clamp(target, MIN_LEASE, min(MAX_LEASE, GLOBAL_Q * 0.05))
-        try:
-            granted = quota_service.acquire(          # 中心侧：Redis/Postgres 上的原子扣减
-                tenant=self.tenant, meter=self.meter,
-                want=self.lease_size, hold_ttl=LEASE_TTL)   # TTL 让崩溃实例的额度自动归还
-        except Unavailable:
-            self.stale_since = self.stale_since or now()
-            return False
-        self.local_balance += granted
-        self.next_refresh = now() + REFRESH_INTERVAL
-        return granted > 0
-
-    def on_shutdown(self):
-        quota_service.release(self.tenant, self.meter, self.local_balance)  # 优雅归还
+    def close(self):
+        # 只有正常关闭且最终累计值已确认时，才归还明确未消费的部分。
+        quota.close_slice(
+            self.slice.id, self.slice.epoch, consumed_total=self.consumed)
 ```
 
-**参数怎么定（可直接抄）：**
+中心侧在 slice 过期时将它 **seal**，拒绝旧 epoch 的迟到上报。对 hard cap，崩溃后无法证明未消费的部分继续保持预留（或按全额消费处理），再由独立计量事件对账；不能因 TTL 到期就全部归还。对 soft cap 才可以选择延迟归还并接受可计算的超发风险。这样换来的误差是“短时少放行/额度暂时被占”，而不是已消费额度凭空复活。
+
+**参数示例（必须按业务成本与容忍误差重算）：**
 
 ```
 REFRESH_INTERVAL   1–10 s        越短越准，越长越省
 LEASE_TTL          3 × REFRESH_INTERVAL
 MIN_LEASE          够 1 个典型请求用（LLM 场景 ≈ 单请求 p95 token 数）
 MAX_LEASE          GLOBAL_Q × 5%   ← 防止一个实例囤走大部分额度
-误差上界           M × lease_size / Q，目标 < 2%
+软限额超发/硬限额暂占上界  ≤ 同时未结算 slice 数 × MAX_LEASE
 长尾租户           QPS < 1 的租户直接走远程强一致，不租约（它们不值得优化）
 ```
 
@@ -463,7 +466,7 @@ L3  硬预算（100%）
 **反模式（anti-pattern）速查：**
 
 1. **在同步请求路径里查去重表。** 把计费系统的可用性绑进了产品可用性。
-2. **"幂等键 = 不会重复计费"。** 真正的失效模式是客户端每次重试生成新 UUID。键必须由业务语义派生。
+2. **"幂等键 = 不会重复计费"。** 真正的失效模式是客户端每次重试生成新 UUID。随机 UUID 可以作 operation key，但必须在首次发送前持久化，并由同一业务操作的所有重试复用；事件键再从它与语义步骤派生。
 3. **"计量最终一致，差一点点无所谓"。** 误差方向是单向的，全是你的损失。必须有对账层。
 4. **用 float 存金额。** 阶梯定价 + 大量小额累加 = 必然对不上。
 5. **没有原始事件湖。** 客户第一次争议账单时，你除了道歉送额度没有别的选择。
@@ -478,8 +481,8 @@ L3  硬预算（100%）
 ## 这一章的三句话
 
 1. **计量系统的误差是单向的：丢事件永远是你少收钱，重复事件永远是客户投诉。** 所以"平均误差接近 0"这个目标毫无意义 —— 你要的是两个方向上各自有独立的收敛机制（对账追回少收的，幂等挡住多收的）。
-2. **幂等键只保证"同一个键不重复入账"，它管不住客户端每次重试都生成一个新键。** 所以键必须由业务语义派生、由最外层入口生成一次并全链路透传；在你的服务里 `uuid4()` 出来的键，是一个看起来在工作的摆设。
-3. **原始事件湖是唯一真相源，聚合结果只是可重算的派生物。** 没有事件湖的计费系统无法处理争议 —— 客户第一次质疑账单时，你除了道歉送额度没有第二个选项，而这个选项一年可以用掉你几个点的毛利。
+2. **幂等键只保证“同一个键不重复入账”，管不住每次重试都生成新键。** 最好由调用方提供并复用稳定的业务 operation key；若平台首次接单时生成，则必须把它与业务对象持久绑定并在后续重试取回。单次 HTTP 入口临时 `uuid4()` 只能关联该请求内部的下游重试。
+3. **不可变原始计量事件是计费侧的规范事实层，聚合只是可重算派生物。** 它还必须与业务记录、供应商 usage 和资金流水对账；没有这三方证据，争议时既无法证明，也无法安全重算。
 
 ---
 
@@ -488,7 +491,7 @@ L3  硬预算（100%）
 1. 计量事件丢了 0.5% 会怎样？重复了 0.5% 会怎样？两者哪个更可怕、为什么？
 2. 客户端超时重试，你怎么保证不重复计费？幂等键从哪来？
 3. 账期已经关闭了，一条 5 天前的用量事件到了，怎么办？给三种策略和各自的代价。
-4. 你说你做到了 exactly-once 计费 —— 具体是怎么做的？（→ 正确答案是承认它不存在于传输层）
+4. 你说你做到了 exactly-once 计费 —— 保证的作用域、去重窗口和外部支付未知结果分别怎么处理？
 5. 一次 LLM 调用有几个计量项？缓存写和缓存读的价差是多少？Batch 能不能和 Fast 叠加？
 6. 100 个网关实例共享一个租户的 TPM 配额，怎么实现？误差上界是多少？
 7. 配额服务挂了，你放行还是拒绝？（→ 必须区分软限额和硬限额）
@@ -500,4 +503,6 @@ L3  硬预算（100%）
 
 **完整设计题** → [`06-case-studies/04-usage-based-billing.md`](../06-case-studies/04-usage-based-billing.md)：本章的机制在 10 万租户 / 1.5 亿事件每天的规模下怎么落地、怎么估算、怎么答。
 
-**下一篇** → [03-identity-and-authz.md](03-identity-and-authz.md)
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**目录顺读下一篇** → [03-identity-and-authz.md](03-identity-and-authz.md)

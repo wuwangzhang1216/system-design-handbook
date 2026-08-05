@@ -12,21 +12,21 @@
 **先确认你能回答这三个问题**
 
 1. 为什么"先 SELECT 查余量、判断够不够、再 UPDATE 扣减"放进事务里**仍然**会超卖？数据库的默认隔离级别挡住了什么、没挡住什么？
-   答不出 → 先读 [00-concepts §7 事务与隔离级别](../00-foundations/00-concepts.md)
+   答不出 → 先读 [00-concepts §7 事务与隔离级别](../00-foundations/00-concepts.md#7-事务与隔离级别)
 2. 缓存的 TTL 是什么？"允许数据陈旧 1–3 秒"为什么能把 10 Gbps 的回源变成 1 QPS？
    答不出 → 先读 [`02-caching.md`](../01-building-blocks/02-caching.md) §1、§6
 3. Little's Law：等待室放行 2,000 人/s，你前面排了 10 万人，你要等多久？这个数字为什么必须给用户看见？
-   答不出 → 先读 [00-concepts §2 延迟 / 吞吐 / 并发](../00-foundations/00-concepts.md)
+   答不出 → 先读 [00-concepts §2 延迟 / 吞吐 / 并发](../00-foundations/00-concepts.md#2-延迟吞吐并发--三个最常被混淆的词)
 
 **这道题会用到的构件**
 
 | 构件 | 用在哪 | 详见 |
 |---|---|---|
 | 条件更新 vs 分布式锁、fencing token | §4.1 占座语句、§4.2 三种实现、§4.3 为什么不用锁 | [`05-consensus-and-coordination.md`](../01-building-blocks/05-consensus-and-coordination.md) §3、§4 |
-| 隔离级别与并发扣减 | §4.2 悲观锁 / 乐观 CAS / 唯一约束的吞吐差 | [00-concepts §7](../00-foundations/00-concepts.md) |
+| 隔离级别与并发扣减 | §4.2 悲观锁 / 乐观 CAS / 唯一约束的吞吐差 | [00-concepts §7](../00-foundations/00-concepts.md#7-事务与隔离级别) |
 | CDN、缓存键、`stale-while-revalidate` | §4.4 第 0 层静态化：座位图与等待室位次 | [`02-caching.md`](../01-building-blocks/02-caching.md) §6 |
 | 负载卸载与准入控制 | §4.4 虚拟等待室 + 令牌准入 = 第 1、2 层漏斗 | [`03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) §6、§7 |
-| 幂等键与对账 | §4.5 支付回调迟到时的"复活"与三方比对 | [01-fundamentals §5](../00-foundations/01-fundamentals.md)、[`02-billing-and-metering.md`](../03-saas-platform/02-billing-and-metering.md) §4、§9 |
+| 幂等键与对账 | §4.5 支付回调迟到时的"复活"与三方比对 | [01-fundamentals §5](../00-foundations/01-fundamentals.md#5-幂等idempotency分布式系统的第一公民)、[`02-billing-and-metering.md`](../03-saas-platform/02-billing-and-metering.md) §4、§9 |
 
 **这道题的一句话本质**
 
@@ -97,7 +97,8 @@
   ├─ 单条自动提交的 UPDATE                  → 0.5–2 ms  ⇒ 单行 500–2,000 TPS
   └─ SELECT FOR UPDATE + 应用逻辑 + UPDATE  → 2–10 ms（含 RTT）⇒ 单行 100–500 TPS
 选座场景：5 万座位分散在 5 万行 ⇒ 没有单行热点，上限变成"整库写 TPS"
-  单 Postgres 主库小事务写 1–2 万 TPS（量级）⇒ 5 万座位 ÷ 1 万 TPS = 5 秒卖光
+  假设目标硬件对“单行条件更新 + 必要索引”的专项压测得到 1 万 TPS 安全 goodput
+  ⇒ 5 万座位 ÷ 1 万 TPS = 5 秒卖光（这是本题输入，不是 Postgres 的通用上限）
 ```
 
 > **这个数字意味着什么**：**只要削峰做对，一个单主库 5 秒就能把 5 万张票卖光。** 库存层从来不是瓶颈 —— 任何以"我要用 Redis 扛 12 万 QPS 扣库存"开场的答案，都是在解一个不存在的问题。
@@ -122,7 +123,7 @@
 
 ## 3. 高层设计
 
-**最简单能工作的版本是一张表 + 一条 SQL**：`用户 → API → UPDATE seat ... WHERE booking_id IS NULL AND hold_expire_at < now()`，影响 0 行即抢失败。这个版本在 2,000 人抢 500 张票时**完全够用**。下面加的每一层，都要说得出它挡住了哪个具体的数字。
+**最简单能工作的版本是一张表 + 一条 SQL**：`用户 → API → UPDATE seat ... WHERE booking_id IS NULL AND (hold_expire_at IS NULL OR hold_expire_at < now())`，影响 0 行即抢失败。这个版本在本题较小规模下够用；下面加的每一层，都要说得出它挡住了哪个具体数字。
 
 ```
  50 万人 ─▶ ┌ 第 0 层 静态化 CDN（TTL 1–3 s）演出页 / 座位图 / 剩余量 / 等待室位次 ┐
@@ -194,6 +195,8 @@ RETURNING hold_id;
 -- 0 行 = 抢失败。返回 409 + seat_taken，不带 Retry-After，客户端不重试。
 ```
 
+**一次购买多张座位时必须 all-or-none**：在同一事务里按 `(event_id, seat_id)` 升序锁定/更新全部目标座位，检查 `RETURNING` 行数恰好等于请求数量；少一行就整体回滚。固定锁顺序避免两个买家以相反顺序占 A12/A13 形成死锁。不要把 N 张座位拆成 N 个独立成功的 API 调用。
+
 **所有时间比较用数据库的 `now()`，不用应用服务器的时间。** 实例间的时钟偏移（clock skew）会让两个实例对"是否过期"给出相反答案；数据库的 `now()` 是单点，天然一致。
 
 #### 保留超时的三种实现
@@ -202,7 +205,7 @@ RETURNING hold_id;
 |---|---|---|---|---|
 | **定时扫描**（scheduled sweep） | 一个扫描周期（30 s） | **扫描器必须活着** | 5 万行表上走部分索引，ms 级；每 30 s 一次 | 扫描器挂 → **库存永久锁死，显示售罄但有空座** |
 | **惰性判定**（lazy expiration） | **0**（读到即算） | **只依赖读时比时间** | 每条语句多一个谓词，≈ 0 | 没人来读 → 座位图显示为已售（**体验问题，不是正确性问题**） |
-| **延迟队列**（delay queue，见 [`03-messaging-and-streams §5`](../01-building-blocks/03-messaging-and-streams.md)） | 秒级 | 队列不丢消息 + 消息可撤销 | 每个 hold 一条消息：单场 5 万 hold = 5 万条在途 | 队列挂 = 退化成定时扫描的失效模式；**悬空消息必须在消费时重新校验状态** |
+| **延迟队列**（delay queue，见 [`03-messaging-and-streams §5`](../01-building-blocks/03-messaging-and-streams.md#5-消息投递的失败处理)） | 秒级 | 队列不丢消息 + 消息可撤销 | 每个 hold 一条消息：单场 5 万 hold = 5 万条在途 | 队列挂 = 退化成定时扫描的失效模式；**悬空消息必须在消费时重新校验状态** |
 
 **量化对比**：单场 5 万个 hold 里约 70% 在到期前就已转成 booking —— 那 3.5 万次定时唤醒是纯浪费；更要命的是悬空消息在消费时必须重新校验座位状态，**等于你还是写了一遍惰性判定**。换来的只有"释放延迟从 30 s 降到 1 s"，而释放延迟根本不影响正确性。⇒ 延迟队列只在 hold 极度分散（全平台几百万个 hold 散在十万场演出上，单场索引扫描的收益不再成立）时才值得。本题不是。
 
@@ -235,7 +238,7 @@ RETURNING hold_id;
 
 ---
 
-### 4.3 为什么不该用分布式锁（参见 [`05-consensus-and-coordination.md §3–§4`](../01-building-blocks/05-consensus-and-coordination.md)）
+### 4.3 为什么不该用分布式锁（参见 [`05-consensus-and-coordination.md §3–§4`](../01-building-blocks/05-consensus-and-coordination.md#3-分布式锁几乎所有实现都是错的)）
 
 | 论点 | 展开 |
 |---|---|
@@ -248,7 +251,7 @@ RETURNING hold_id;
 > "分布式锁在这道题上是一个自我否定的方案。要让它安全，你必须配 fencing token；而 fencing token 的安全性来自**存储端的单调性检查**。你得先让存储层能做条件写 —— 可一旦它能做条件写，那把锁就没用了。锁在这里只贡献三样东西：一次额外的网络往返、一个新的单点故障、以及一个我答不上来的追问。"
 > "A distributed lock is self-defeating here. To make it safe you need a fencing token, and the fencing token's safety comes from a monotonicity check on the storage side. So you first have to give storage the ability to do a conditional write — and the moment storage can do conditional writes, the lock is redundant. All the lock adds is one extra round trip, one new single point of failure, and one interview question I can't answer."
 
-**什么条件下我会改口**：互斥必须**跨异构存储**成立 —— 座位在 Postgres、场馆通行证在另一个团队的服务里、两者必须同生共死，而你无法把它们合进一个事务。那时你需要的也**不是锁**，是 **Saga + 预留（reservation / TCC = Try-Confirm-Cancel：先在每个系统里"试占"一份，全部试占成功再统一确认，任一失败则各自取消）**，见 [`02-event-driven-and-cqrs.md §2`](../02-architecture-patterns/02-event-driven-and-cqrs.md)。锁在这道题的任何版本里都不是答案。
+**什么条件下我会改口**：互斥必须**跨异构存储**成立 —— 座位在 Postgres、场馆通行证在另一个团队的服务里、两者必须同生共死，而你无法把它们合进一个事务。那时你需要的也**不是锁**，是 **Saga + 预留（reservation / TCC = Try-Confirm-Cancel：先在每个系统里"试占"一份，全部试占成功再统一确认，任一失败则各自取消）**，见 [`02-event-driven-and-cqrs.md §2`](../02-architecture-patterns/02-event-driven-and-cqrs.md#2-saga跨服务事务的现实解法)。锁在这道题的任何版本里都不是答案。
 
 ---
 
@@ -266,7 +269,7 @@ RETURNING hold_id;
  ├ 第 2 层 令牌准入（token admission）令牌绑 user+event+admit_at+nonce，一次性
  │   （nonce：一次性随机串，服务端用过即作废 —— 它让令牌不能被复制粘贴给第二个人用）
  │   → 到达库存层：15 万人 × 平均 1.5 次尝试 = 3,000 TPS，持续 75 s
- └ 第 3 层 库存条件更新：单主库上限 1–2 万 TPS ⇒ 余量 3–6 倍 ✅
+ └ 第 3 层 库存条件更新：本题压测安全线 1 万 TPS ⇒ 相对 3,000 TPS 约 3.3× 余量 ✅
      22.5 万次 UPDATE 里成功 5 万，其余全部返回"这个座位刚被选走"
 
  不削峰的对照：12 万 QPS 直接撞库存层 → 连接池瞬间耗尽 →
@@ -277,34 +280,37 @@ RETURNING hold_id;
 
 1. **位次广播必须走 CDN**。50 万人每 5 s 问一次"轮到我了吗" = 10 万 QPS。做法：把"当前放行到第 N 号"写成 1 s TTL 的静态文件推到边缘，客户端拿自己的号本地比较，回源 1 QPS。
 2. **令牌必须签名并绑定身份**。不签名的令牌 = 黄牛直接构造请求跳过队列，整个准入层白做。
-3. **队列位次必须对用户可见**。看不见位次的队列会让用户疯狂刷新，正好抵消削峰。预计等待时间用 Little's Law（并发 = 吞吐 × 停留时间，反解出停留时间）估：`等待 ≈ 前面的人数 / 放行速率`，见 [`02-capacity-estimation.md §3`](../00-foundations/02-capacity-estimation.md)。
+3. **队列位次必须对用户可见**。看不见位次的队列会让用户疯狂刷新，正好抵消削峰。预计等待时间用 Little's Law（并发 = 吞吐 × 停留时间，反解出停留时间）估：`等待 ≈ 前面的人数 / 放行速率`，见 [`02-capacity-estimation.md §3`](../00-foundations/02-capacity-estimation.md#3-排队论queueing-theory为什么-80-利用率utilization是危险的)。
 
-**自建还是买（2026）**：等待室的全部价值在于"位于你的源站之前"，而这正好是 CDN / 边缘厂商的位置。托管选项：[Cloudflare Waiting Room](https://developers.cloudflare.com/waiting-room/)、[Virtual Waiting Room on AWS](https://docs.aws.amazon.com/solutions/latest/aws-virtual-waiting-room/welcome.html)、[Queue-it](https://queue-it.com/)、Queue-Fair、CrowdHandler。
+**自建还是买**：等待室的全部价值在于“位于你的源站之前”，而这正好是 CDN / 边缘厂商擅长的位置。可先评估现成产品，例如 [Cloudflare Waiting Room](https://developers.cloudflare.com/waiting-room/) 与 [Queue-it](https://queue-it.com/)；再根据接入方式、流量上限、排队公平性、定制规则、数据驻留和成本做选型。AWS 曾提供一个开源参考实现，但[官方仓库已于 2025-11-04 归档](https://github.com/aws-solutions/virtual-waiting-room-on-aws)，现在只适合用来理解组件和令牌流程，不应当作仍在维护的产品候选。
 ⇒ **自建虚拟等待室的 ROI 在多数场景下是负的。** 说"我会先用托管的，只在需要把队列语义和业务规则深度耦合时才自建"，比现场设计一个分布式队列更像 Staff。
 
 ---
 
 ### 4.5 支付超时与库存释放的一致性（这是必答题）
 
-**问题**：hold 到期释放了，支付回调才到。钱收了，座位没了。先做选择，再谈兜底：
+**问题**：hold 到期释放了，支付回调才到。钱收了，座位没了。关键不是把 TTL 猜得足够长，而是明确 `UNKNOWN` 期间库存是否仍被 fenced：
 
-| 策略 | 描述 | 结构性超卖风险 | 座位周转 | 什么时候选 |
+| 策略 | UNKNOWN 怎么处理 | 结构性代价 | 座位周转 | 什么时候选 |
 |---|---|---|---|---|
-| **A. hold 时长 > 支付 deadline + 余量** | hold 15 min，支付网关 deadline 10 min，留 5 min 安全带 | 0 | 慢（座位被锁 15 min） | **默认** |
-| **B. 到期即释放，支付成功后"复活" hold** | 回调时重新尝试占座 | 需要处理"已被别人买走" | 快 | 库存极度紧张、周转率是核心指标 |
-| **C. 下单即出票，超时取消** | 支付前座位就是 `booked` | 0 | 最慢（取消率高时座位长期不可售） | 低竞争场景（会议、餐厅订位） |
+| **A. 冻结到支付状态解析** | 正常 hold 可设 15 min；一旦支付超时进入 `UNKNOWN`，原子延长/取消普通过期，直到主动查单、webhook 或结算文件给出终态 | 不会因迟到成功把一张票卖给两人；渠道长期未知时会占住库存，需要告警与人工升级 | 慢 | **默认：稀缺、有编号、不能双卖的库存** |
+| **B. 到达声明的未知期限后释放** | 产品明确选择一个不确定性窗口；窗口后允许别人购买，迟到成功只能自动退款和补偿，不能抢回座位 | “已付款但无票”成为可量化的正常补偿路径 | 快 | 周转价值高于补偿成本，且产品/客服明确接受 |
+| **C. 下单即出票，超时后再取消** | 支付前座位已是 `booked`，只有确认失败或取消流程才能释放 | 不双卖，但取消率高时座位会长期不可售 | 最慢 | 低竞争场景（会议、餐厅订位） |
 
-**选 A 为主 + B 为兜底。** A 把竞态窗口从"常态"压成"罕见"，但**压不到零** —— 支付网关的 webhook 可以迟到几小时（三方渠道 p99 3–30 s，超时率 0.1–1%，最长要主动查询到 24 h，见 [`07-classic-canon.md` 第 8 题](07-classic-canon.md)）。这条路径会被触发多少次：
+**本文主路径选 A。** `hold 15 min > payment deadline 10 min` 只覆盖正常处理和安全余量；若 10 分钟时渠道状态仍未知，必须在同一状态转换里写入 `payment_state=UNKNOWN` 并延长库存 fence。最长主动查询 24 小时是**查询与升级预算**，不是“24 小时一到就假装失败”的 TTL。只有渠道明确失败/取消，或业务完成了可证明安全的退款/撤销流程，才能释放。
+
+下面的算例与时序图专门展示**如果产品选择 B**，迟到成功补偿路径会被触发多少次：
 
 ```
 3,000 万张/年 × 0.5% 状态未知 = 15 万次/年
 其中真正撞上"座位已被别人买走"的（只发生在热门场次售罄边缘）≈ 1%
   ⇒ 约 1,500 次/年 ≈ 每天 4 次
 ```
-> **这个数字意味着什么**：每天 4 次，正好是"必须自动化、绝不能靠人工工单"的量级。每天 0.01 次可以人工，每天 400 次会压垮客服。4 次是那个必须写代码的中间地带。
+> **这个数字意味着什么**：每天约 4 次已经是持续发生的正常路径，至少要有自动检测、可审计状态和一键处理；是否全自动退款还取决于金额、渠道能力、误判风险与客服 SLO。不要把 0.01 / 4 / 400 当跨业务通用阈值。
 
 ```sql
--- 复活（revive）：一条语句，两个出口。支付回调处理，幂等键 = hold_id（不是随机 UUID）
+-- 策略 B 的复活（revive）：一条语句，两个出口。
+-- 幂等键用稳定的 hold_id；随机 UUID 也可用，但必须首次发送前持久化并在所有重试中复用。
 UPDATE seat SET booking_id = :order, hold_id = NULL, hold_expire_at = NULL
  WHERE event_id = :ev AND seat_id = :seat
    AND booking_id IS NULL                            -- 没被别人买走
@@ -314,7 +320,7 @@ RETURNING seat_id;
 -- 0 行 ⇒ 座位已被别人买走。唯一合法出路：全额退款 + 通知 + 补偿（优先购买权/代金券）
 ```
 
-**绝不能把座位从已经付了钱的第二个买家手里抢回来。** 这句话要明确说出口 —— 它是产品原则，不是技术选择。表格只能列出"有哪几种处理"，画不出"处理方式由到达时刻单向决定"，所以这里补一张时序图：
+**选择 B 后，绝不能把座位从已经付了钱的第二个买家手里抢回来。** 这句话要明确说出口 —— 它是产品原则，不是技术选择。表格只能列出"有哪几种处理"，画不出"处理方式由到达时刻单向决定"，所以这里补一张时序图：
 
 ```mermaid
 sequenceDiagram
@@ -346,7 +352,7 @@ sequenceDiagram
     end
 ```
 
-> 📖 **读图要点**：**没有任何一条边从第 13 步指回第 8 步** —— 一旦 buyer2 在第 8 步付完钱，系统里就不存在"撤销 buyer2 的 booking"这条路径。这条缺失的边就是本节的全部结论：竞态窗口消除不掉，能设计的只有"输的那一方怎么被补偿"。再看第 6 步：它之所以成功，不是因为谁把旧 hold 删掉了，而是读时谓词自己变真了 —— 所以即使扫描器整晚都挂着，第 6 步照样成立。
+> 📖 **读图要点**：这是策略 B 主动接受的竞态，不是所有票务系统不可避免的事实。**没有任何一条边从第 13 步指回第 8 步** —— 一旦 buyer2 在第 8 步付完钱，系统里就不存在"撤销 buyer2 的 booking"这条路径。策略 A 用 `UNKNOWN` fence 避免第 6 步发生；策略 B 允许第 6 步换周转率，就必须把"输的那一方怎么被退款和补偿"设计成正常路径。
 
 #### 对账：每小时三方比对（`seat.booking_id × order × 支付流水`）
 
@@ -372,7 +378,7 @@ sequenceDiagram
 | 削峰必要性 | 高（用户要看图、要选、会犹豫，天然被摊开） | **极高**（没有选择过程，所有人在同一毫秒撞同一行） |
 | 分桶代价 | 不需要 | 余量碎片化，见下 |
 | 退票 | 座位回到原位 | 计数器 `+1` |
-| hold 的意义 | 锁住一个具体资源 | 锁住一个额度 —— 更接近配额租约（见 [`04-usage-based-billing.md §10`](04-usage-based-billing.md)） |
+| hold 的意义 | 锁住一个具体资源 | 锁住一个额度 —— 更接近配额租约（见 [`04-usage-based-billing.md §10`](04-usage-based-billing.md#10-深挖六实时配额quota检查)） |
 
 #### GA 分桶数怎么算（这里有个反直觉的结论）
 
@@ -401,24 +407,28 @@ sequenceDiagram
 ③ 行为级：设备指纹 + IP 段 + 行为模型      覆盖最广，误杀率就是它的全部代价
 ```
 
-**实现陷阱：限购计数必须和 hold 在同一个事务里。** 否则并发下同一个人能同时持有 8 个 hold。
+**实现陷阱：限购资格必须和 hold 在同一个事务里，而且必须有完整生命周期。** 只把 `held += n` 与 hold 一起提交、却不在过期/支付失败时幂等释放，会让用户永久失去配额。
 
 ```sql
 BEGIN;
-  UPDATE user_event_quota SET held = held + :n
-   WHERE user_id = :u AND event_id = :ev AND held + :n <= 4
-  RETURNING held;                      -- 0 行 ⇒ 超限，直接回滚
-  UPDATE seat SET ... ;                -- §4.1 那条语句
+  SELECT 1 FROM user_event_quota
+   WHERE user_id = :u AND event_id = :ev FOR UPDATE;  -- 每个用户/场次一个裁决点
+
+  -- 在同一锁内惰性关闭该用户已过期 reservation；后台 sweeper 只做清理加速
+  UPDATE quota_reservation SET state = 'expired'
+   WHERE user_id = :u AND event_id = :ev AND state = 'held' AND expires_at < now();
+
+  -- active held + 已购买数量 + 本次 n 必须 <= 4；不满足就回滚
+  SELECT COALESCE(sum(n) FILTER (WHERE state IN ('held','booked')), 0) ...;
+  INSERT INTO quota_reservation(user_id,event_id,hold_id,n,state,expires_at)
+  VALUES (:u,:ev,:hold,:n,'held',now()+interval '15 minutes');
+
+  UPDATE seat SET ... ;                -- 按 seat_id 固定顺序，返回行数必须等于 :n
 COMMIT;
 ```
-这确实引入了第二个热点行，但它是 **per-user 的**，天然分散在 15 万个买家上，不构成瓶颈。
+支付成功时在库存事务内把 reservation 从 `held→booked`；支付失败/用户取消时条件更新为 `released`。重复 webhook、重复释放和 sweeper 重放都由 `(user_id,event_id,hold_id)` 唯一键与状态条件保证幂等。裁决行是 per-user 的，天然分散；清理器挂掉也不会导致配额永久泄漏，因为下一次尝试会在锁内惰性关闭过期 reservation。
 
-**2026 年的监管现实**（这一段能把答案从"技术方案"抬到"产品与合规"）：
-
-- 美国：BOTS Act 之上，2025-03-31 的行政令要求 FTC 强化执法（[Wiley 解读](https://www.wiley.law/alert-Executive-Order-on-Ticket-Resale-Market-Calls-for-Greater-FTC-Enforcement)）；2025-09 FTC 联合七个州起诉 Live Nation / Ticketmaster，**指控之一正是"允许经纪商批量购票、绕过限购上限"**。
-- 英国：2026-05-14 King's Speech 提出 **Draft Ticket Tout Ban Bill**（禁止高于原价转售、限制转售平台服务费、禁止个人转售超过其原始限购量），但仅以草案形式做立法前审查，普遍预计 **2027–28 会期**才可能成法（[TicketNews](https://www.ticketnews.com/2026/05/uk-ticket-resale-price-cap-reportedly-pushed-back-as-debate-over-consumer-harm-intensifies/)、[Music Ally](https://musically.com/2026/05/14/uk-ticket-touting-ban-will-only-be-draft-legislation-for-now/)）。
-
-⇒ **设计含义：限购正在从产品策略变成可被起诉的合规要求。** 你的系统必须能**证明**每一单的限购判定过程 —— 限购决策要留结构化审计日志（谁、哪场、判定输入、判定结果、规则版本），而不只是一个 boolean。这是 Staff 级的那一层。
+**合规边界**：票务限购、自动化购票和转售规则会随销售辖区与生效日期变化，本章不把某次执法或草案当成永久规则。稳定的设计要求是让规则可配置、可追溯：保存谁、哪场、判定输入、结果、规则版本与证据来源。上线前由法务依据官方法规、合同和销售地区确认具体限额与保留期；面试中说明这条验证路径即可。
 
 ---
 
@@ -431,8 +441,8 @@ COMMIT;
 | **支付回调迟到，座位已售** | 用户付了钱没座位 | `payment_succeeded_without_seat` 计数 > 0（应该是每天个位数） | 自动全额退款 + 通知 + 补偿。**绝不从第二个买家手里收回** |
 | **支付网关不可用** | 大量 hold 到期，票"看起来卖不掉" | 支付创建成功率骤降 | 暂停放行新令牌（别让人排队进来发现付不了）；已有 hold **自动延长一次**并告知用户 |
 | **客户端自动重试放大** | 峰值再 ×3，削峰白做 | 同一 `user_id` 5 s 内 > 5 次下单请求 | 抢失败返回**终态** 409 + `seat_taken`，**不带 `Retry-After`**；客户端按错误码决定不重试 |
-| **座位图 CDN 未命中 / TTL 配错** | 10 Gbps 回源，源站被自己人打死 | CDN 命中率 < 90%、origin 出网带宽陡增 | 强制缓存 + `stale-while-revalidate`；座位状态本来就允许陈旧（见 [`02-caching.md §6`](../01-building-blocks/02-caching.md)） |
-| **热门场次与普通场次同分片** | 一场演唱会把分片打满，同分片所有演出跟着挂 | 单分片写 TPS / CPU 远高于其他分片 | 分片键 `hash(event_id)` 可隔离场次；**超大场次提前迁到独立 cell**（见 [`05-scaling-playbook.md §7`](../05-reliability/05-scaling-playbook.md)） |
+| **座位图 CDN 未命中 / TTL 配错** | 10 Gbps 回源，源站被自己人打死 | CDN 命中率 < 90%、origin 出网带宽陡增 | 强制缓存 + `stale-while-revalidate`；座位状态本来就允许陈旧（见 [`02-caching.md §6`](../01-building-blocks/02-caching.md#6-cdn-与边缘缓存)） |
+| **热门场次与普通场次同分片** | 一场演唱会把分片打满，同分片所有演出跟着挂 | 单分片写 TPS / CPU 远高于其他分片 | 分片键 `hash(event_id)` 可隔离场次；**超大场次提前迁到独立 cell**（见 [`05-scaling-playbook.md §7`](../05-reliability/05-scaling-playbook.md#7-单元化cell--cell-based-architecture从扩展变成复制)） |
 | **时钟漂移导致过期判断不一致** | 两个实例对同一个 hold 给出相反结论 | NTP offset 告警 | **时间比较一律用数据库 `now()`**。这一条比监控 NTP 可靠 |
 
 ---
@@ -489,7 +499,7 @@ v3  库存层产品化：抽成通用的"有限资源预留服务"（座位 / �
 | **1** | "用 Redis 分布式锁锁座位，拿到锁的人才能改库存。" | 面试官下一句必是"持锁进程 GC 暂停 30 秒后醒来继续写呢"。没有 fencing token 就接不下去 —— 而这题**根本不需要面对这个问题** | "互斥下推到存储层：单条条件更新。它在引擎内原子，不需要锁，因此'持锁者崩溃'这一整类问题不存在。"（见 §4.3） |
 | **2** | "先查余量 / 先查座位状态，够就扣。" | 典型的 check-then-act，并发下必然超卖。这是判断候选人有没有真写过并发代码的一道单选题 | "永不 check-then-act。`UPDATE ... WHERE booking_id IS NULL AND hold_expire_at < now()`，看影响行数：0 行就是抢失败。" |
 | **3** | "起一个定时任务，每分钟扫一遍把过期的 hold 释放掉。" | 把正确性绑在一个后台进程的存活上。扫描器 OOM 一次，5 万座位卡死、页面显示售罄而实际有空座 —— 且**没有任何兜底** | "惰性判定管正确性（读时比时间），扫描器只管刷新座位图。扫描器挂三天，库存依然是对的。"（见 §4.1） |
-| **4** | "hold 到期就释放；万一支付晚到了，把座位从后来的买家手里收回来就行。" | 把一次技术故障变成两次客诉。而且第二个买家已经拿到二维码、可能已经出发了 | "hold 设得比支付 deadline 长一个安全余量，把窗口压到每天几次；剩下的几次只有一条合法出路：全额退款 + 补偿。**已付款的座位不可撤销。**"（见 §4.5） |
+| **4** | "hold 到期就释放；万一支付晚到了，把座位从后来的买家手里收回来就行。" | 把一次技术故障变成两次客诉。而且第二个买家已经拿到二维码、可能已经出发了 | "默认让支付超时进入 `UNKNOWN` 并继续 fence 座位，直到查单、回调或对账给出终态；若产品为周转率明确选择到期释放，迟到成功只能全额退款 + 补偿。**已付款的第二张票不可撤销。**"（见 §4.5） |
 
 另外一条同样常见但更隐蔽的：❌「用 Kafka 把下单请求排成队，一条一条消费扣库存」—— 听起来像削峰，实际是把**同步的失败**变成**异步的失败**：用户提交后要等几十秒才知道没抢到，且队列积压时给不出位次。**真正的削峰发生在请求到达之前，不是之后。**
 
@@ -536,4 +546,6 @@ v3  库存层产品化：抽成通用的"有限资源预留服务"（座位 / �
 
 ---
 
-**下一篇** → [15-payment-system.md](15-payment-system.md)：钱不能丢也不能重复扣，而难点不在你的系统内部 —— 在你和三方渠道状态不一致时怎么收敛。
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**案例顺读下一篇** → [15-payment-system.md](15-payment-system.md)：钱不能丢也不能重复扣，而难点不在你的系统内部 —— 在你和三方渠道状态不一致时怎么收敛。

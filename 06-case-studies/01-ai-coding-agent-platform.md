@@ -2,6 +2,8 @@
 
 > 这道题的胜负手不在 Agent 循环，在两件基础设施上：**仓库物化（repo materialization）的冷启动（cold start）**决定用户第一眼看到什么，**前缀缓存（prefix caching）的字节稳定性**决定你亏不亏钱。
 > 剩下的 —— 沙箱、队列、计费 —— 都是把这两件事撑住的配套。
+>
+> **案例边界**：架构推导可复用，模型/沙箱价格、延迟、配额与实验比例是 **2026-08 条件化样本**。把数字带回公式，用自己的 provider 合同和生产分布重算。
 
 ---
 
@@ -13,18 +15,18 @@
 
 **先确认你能回答这三个问题**
 
-1. Little's Law（并发 = 吞吐 × 延迟）怎么用？峰值 17 任务/秒、平均任务墙钟 8 分钟，此刻同时在跑多少个沙箱？
-   答不出 → 先读 [00-concepts §2 延迟/吞吐/并发](../00-foundations/00-concepts.md)、[02-capacity-estimation §5 AI Agent 平台估算示例](../00-foundations/02-capacity-estimation.md)
+1. Little's Law（并发 = 吞吐 × 延迟）怎么用？峰值 17 任务/秒、平均任务墙钟 10 分钟，此刻同时在跑多少个沙箱？
+   答不出 → 先读 [00-concepts §2 延迟/吞吐/并发](../00-foundations/00-concepts.md#2-延迟吞吐并发--三个最常被混淆的词)、[02-capacity-estimation §5 AI Agent 平台估算示例](../00-foundations/02-capacity-estimation.md#5-专项选读ai-agent-平台估算)
 2. 前缀缓存（prefix caching）命中的前提是"前缀逐字节相同"。把每轮都在变的检索结果拼在 system prompt 后面，账单会变成几倍？为什么全程不报错？
-   答不出 → 先读 [08-cost-and-latency §4 Prompt caching](../04-ai-agent-systems/08-cost-and-latency.md)、[01-llm-serving-infra §6 前缀缓存与缓存感知路由](../04-ai-agent-systems/01-llm-serving-infra.md)
+   答不出 → 先读 [08-cost-and-latency §4 Prompt caching](../04-ai-agent-systems/08-cost-and-latency.md#4-prompt-caching三家机制差异与工程约束)、[01-llm-serving-infra §6 前缀缓存与缓存感知路由](../04-ai-agent-systems/01-llm-serving-infra.md#6-前缀缓存与缓存感知路由网关设计的真正约束)
 3. 一个已经跑了 25 分钟的任务，承载它的进程被驱逐（eviction）了，从哪里继续？"有状态 vs 无状态"和 checkpoint 各解决这里的哪一半？
-   答不出 → 先读 [00-concepts §9 有状态 vs 无状态](../00-foundations/00-concepts.md)、[03-agent-runtime §7 长任务与可恢复执行](../04-ai-agent-systems/03-agent-runtime.md)
+   答不出 → 先读 [00-concepts §9 有状态 vs 无状态](../00-foundations/00-concepts.md#9-有状态-vs-无状态)、[03-agent-runtime §7 长任务与可恢复执行](../04-ai-agent-systems/03-agent-runtime.md#7-长任务与可恢复执行)
 
 **这道题会用到的构件**
 
 | 构件 | 用在哪 | 详见 |
 |---|---|---|
-| Little's Law、单位经济（unit economics） | §2.2 推出 8,160 并发沙箱、§2.6 毛利结构 | [00-concepts §2](../00-foundations/00-concepts.md)、[`02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §5、§6 |
+| Little's Law、单位经济（unit economics） | §2.2 推出约 10,200 峰值并发沙箱、§2.6 毛利结构 | [00-concepts §2](../00-foundations/00-concepts.md#2-延迟吞吐并发--三个最常被混淆的词)、[`02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §5、§6 |
 | Agent 循环、终止条件、可恢复执行、沙箱 | §4.2 长任务 checkpoint 与重放、§4.5 microVM 边界 | [`03-agent-runtime.md`](../04-ai-agent-systems/03-agent-runtime.md) §2、§6、§7 |
 | 前缀缓存与上下文组装顺序 | §4.3 让前缀字节稳定 —— 本题最大的省钱旋钮 | [`08-cost-and-latency.md`](../04-ai-agent-systems/08-cost-and-latency.md) §4、[`02-context-engineering-and-rag.md`](../04-ai-agent-systems/02-context-engineering-and-rag.md) §9 |
 | 致命三要素（lethal trifecta）与出网管控 | §4.5 编码 Agent 天然把三条占满 | [`07-agent-security.md`](../04-ai-agent-systems/07-agent-security.md) §2、§5 |
@@ -52,7 +54,7 @@
 | 7 | 模型自建还是调 API？ | v0/v1 调 API，多 provider | 决定成本模型与配额瓶颈（见 §4.4） |
 | 8 | 数据能不能用于训练？ | **不能**，合同禁止 | 决定 provider 选型与 ZDR 条款 |
 | 9 | 合规？ | SOC 2 Type II 必需，EU 数据驻留（data residency）是 v2 的销售阻塞项 | 决定 cell 化时间点 |
-| 10 | SLO？ | 受理（admission，拿到沙箱并开始跑）p95 **< 5 s**；任务完成率（产出可合并 PR）≥ **40%** | 5 s 是整个 §4.1 的设计约束 |
+| 10 | 延迟与质量目标？ | 候选阈值：异步 API 接单 1s、热仓库 execution-start 5s、全体仓库 60s；分别把 SLO 写成“至少 X% 有效事件在阈值内”，并报告冷启动占比。任务完成率示例目标另算 | 单一“受理 <5s”会被冷仓库路径直接推翻；p95 只作分布诊断 |
 | 11 | 定价？ | 席位（seat-based）+ 用量（usage-based）混合 | 决定计量管道（metering pipeline）是不是一等公民（是） |
 | 12 | 失败的任务收不收钱？ | 模型失败不收，用户取消收一半 | **必须写进合同并对租户可见**，否则出账争议无解 |
 
@@ -70,20 +72,21 @@
 ────────────────────────────────────────────────
 任务量  = 60,000 × 6            = 360,000 任务/天
 平均速率 = 360,000 / 86,400      ≈ 4.2 任务/秒
-峰谷比   = 4×（开发者高度集中在工作时段，跨时区打平后仍有 4×）
+峰均比   = 4×（开发者高度集中在工作时段，跨时区打平后仍有 4×）
 峰值速率 ≈ 17 任务/秒
 ```
 
 ### 2.2 沙箱并发（Little's Law）
 
 ```
-L = λ × W ，平均任务墙钟 W ≈ 8 min = 480 s（p50 4 min，长尾拉高均值）
-  峰值并发沙箱 = 17  × 480 ≈ 8,160        平均并发 = 4.2 × 480 ≈ 2,016
+L = λ × W；必须取同一稳定窗口的完成率与平均墙钟时间。
+场景先假设峰值窗口的平均任务墙钟 W_peak ≈ 10 min = 600 s（示例：p50 4 min，长尾拉高均值）
+  峰值窗口平均在途 ≈ 17 × 600 ≈ 10,200   全日平均在途 ≈ 4.2 × 600 ≈ 2,520
 每沙箱 4 vCPU / 8 GiB（跑 npm ci + 测试的最低配）
-  峰值 vCPU = 32,640 → 单机 64 核、装箱率 70% → 32,640/(64×0.7) ≈ 730 台
+  峰值 vCPU = 40,800 → 单机 64 核、装箱率 70% → 40,800/(64×0.7) ≈ 911 台
 ```
 
-> **面试要说的一句**："8,160 个并发沙箱是这道题的物理规模。任何'每个用户一个常驻容器（always-on container）'的方案在这个数字面前直接死掉 —— 因为其中 **83% 的时间沙箱在等模型返回**（25 轮 × [模型 20 s + 工具 3 s]，扣掉启动与最终构建），你在为空转（idle burn）付钱。"
+> **先做一致性自检**：`25 × (20s 模型 + 3s 工具) = 575s`，已接近 600s 均值；其中模型等待 `500/600 ≈ 83%`。这就是为什么不能同时写“平均 8 分钟”又引用这组轮次延迟。约 10,200 只是“峰值窗内 W 仍为 600s”这一场景假设下的一阶起点，不是确定容量锚点；真实规划要从峰值窗口的联合 trace 估计 `λ`、`W` 与资源占用，并重放突发和长尾，不能把跨窗口均值或两个独立 p95 相乘。
 
 ### 2.3 Token 量（成本大头）
 
@@ -210,9 +213,9 @@ L = λ × W ，平均任务墙钟 W ≈ 8 min = 480 s（p50 4 min，长尾拉高
 
 ## 4. 深挖
 
-### 4.1 沙箱生命周期与仓库物化（受理 p95 < 5 s 怎么达成）
+### 4.1 沙箱生命周期与仓库物化（热仓库 start p95 < 5 s 怎么达成）
 
-时间预算是倒着推的：
+下面的 5 秒预算只适用于**已命中 mirror/快照的热仓库 cohort**。API 接单已在 1 秒内完成；L0 冷克隆走异步排队并单独报告 start SLI，不能拿缓存命中样本掩盖全体 p95。
 
 ```
    5,000 ms 总预算
@@ -240,16 +243,17 @@ snapshot_key = sha256(repo_id ‖ base_image_digest ‖ git_commit_sha ‖
                       hash(package-lock.json|Cargo.lock|go.sum|poetry.lock) ‖ toolchain_version)
 ```
 
-**容量与撞墙条件**：80,000 个仓库 × 250 MB 均值 = 20 TB。不可能全缓存。按活跃度长尾，缓存 top 5%（4,000 个仓库）≈ 1 TB/区域本地 NVMe，可覆盖约 70–80% 的任务。**信号是 L0 冷克隆占比 > 5%** —— 说明缓存容量或淘汰策略（eviction policy）该调了（用 LFU 而不是 LRU，因为一次性 demo 仓库会污染 LRU，参见 [缓存篇](../01-building-blocks/02-caching.md)）。
+**容量与撞墙条件示例**：80,000 个仓库 × 250 MB 均值 = 20 TB。若 top 5%（4,000 个）约 1 TB/区域并覆盖 70–80% 任务，那么仍有 20–30% 走慢路径，平台全体 p95 不可能 <5s。需要按热/冷 cohort 分 SLO、增加按需 mirror 或接受更慢的全体 p95。LFU/LRU 选择也应由重用间隔与扫描污染实测。
 
 **预热池（warm pool）要多大**（不要拍脑袋，用排队论 queueing theory）：预热池只需吸收「到达率突增」，不是全部到达率 —— 稳态下释放率 ≈ 到达率。
 
 ```
-净缺口 = (P99 突发 8.4/s − 稳态 4.2/s) × 补池时间 40 s ≈ 168，留 1.8× 余量 → 300 台
-成本   = 300 × 4vCPU8GiB × $0.30/h ≈ $90/h ≈ $2,160/天 = 日总成本($651k)的 0.33%
+净缺口 = (短时 P99 25/s − 已配峰值 17/s) × 补池时间 40s = 320
+留 1.25× 保护 → 约 400 个 warm slot（示例；按到达 trace 仿真）
+成本   = 400 × 单 slot 小时价；需按实际计费语义重算，不能把整机 $0.30/h 当单 sandbox 价格
 ```
 
-**什么时候不要做预热池**：任务时长 > 10 min 时，40 s 冷启动只占 6.7%，用户根本感知不到，预热池 ROI 接近零。**预热池是给短任务和交互式会话准备的。**
+**什么时候不要做预热池**：不要用“冷启动 / 总任务时长占比”替代用户体验。即使任务跑 30 分钟，用户也可能在意 40 秒无反馈。应比较 start SLO、放弃率/转化、warm slot 成本和可接受排队；异步后台任务且用户不等首反馈时，预热池价值才可能很低。
 
 **沙箱在等模型时怎么办**：83% 的时间沙箱在空转，而 Cloudflare Containers 的计费语义是**内存与磁盘按已配置资源计费、CPU 只按实际活跃计费**，Modal Sandbox 单价约为普通 compute 的 3× —— 按"普通 compute 单价 × 沙箱时长"做的预算会系统性低估。自建 Firecracker 的做法是等待期把 vCPU quota 降到 0.1 核（cgroup 动态调整），**内存不动**（swap 掉 `node_modules` 的 page cache 会让恢复更慢）；托管方案则在单次模型调用预计 > 30 s 时触发 pause/resume（standby 恢复约 25 ms 量级），低于 30 s 不值得 —— 恢复抖动比省下的钱贵。
 
@@ -286,9 +290,11 @@ CREATE INDEX ON run_step (run_id, status) WHERE status = 'pending';
 
 ```
  worker 崩溃 / 沙箱被抢占 / AZ 故障
-   └▶ lease 过期（30 s，Postgres 行锁 + heartbeat 续约）→ 调度器重新派发 run_id
+   └▶ lease 过期（示例 30s；lease row 的 `owner, epoch, expires_at` 用短事务 CAS 获取/续约，
+        **不持有长期 Postgres 行锁**）→ 调度器以更高 lease_epoch 重新派发 run_id
         │
-        ├ ① 读 run_step，定位最后一个 status='committed' 的 step_seq = k
+        ├ ① 每次 journal 提交原子校验当前 lease_epoch（fencing），旧 worker 即使复活也不能再提交；
+        │     读 run_step，定位最后一个 status='committed' 的 step_seq = k
         │     若 step k+1 为 'pending'：
         │       model_call        → 直接重发（无副作用，重复只是花钱）
         │       tool_call（只读）  → 直接重放
@@ -370,7 +376,7 @@ CREATE INDEX ON run_step (run_id, status) WHERE status = 'pending';
 企业档 API 组织的 TPM 典型在 **1–20 M** 量级。**你差两到三个数量级。** 所以在这个规模上：
 
 - 必须谈 **provisioned throughput / 承诺容量合同**，而不是用标准配额。
-- 必须做 **多 provider + 多区域 + 多组织 key 池化（key pooling）**，并且把"模型不可替换"的假设从架构里删掉。
+- 必须谈 provisioned throughput，并做合同允许的多 provider/多区域容量池。只有供应商明确授予多个独立组织/项目配额时才能聚合；**用多个 key/组织绕过限额通常违反条款且无法增加真实后端容量**，不能把 key pooling 当扩容技巧。
 - **缓存读省钱不省配额**：多数厂商的 TPM 按总输入 token 计（缓存读通常照计，以合同为准）。这意味着你的 $ 成本降了 71%，配额压力**一点没降**。这是最容易被漏掉的一条。
 - 可批处理的负载（代码索引、PR 摘要、离线 eval、夜间重跑）全部走 **Batch API**：50% 折扣，且**独立速率限制池、不占同步配额**。这是被严重低估的容量杠杆。
 
@@ -389,7 +395,7 @@ def cost_estimate(task):          # 绝不能用「任务数」—— 任务大�
 
 三条优先级通道：**交互式 > 异步批 > 后台重跑**。交互式**保底 30% 容量**而非绝对优先 —— 绝对优先会让异步任务永久饥饿（starvation），而异步任务恰恰是有 SLA 的那些。
 
-**Token bucket 的特殊难点：LLM 请求的 token 数事前不可知。** 做法是**悲观预扣（pessimistic reservation）+ 事后回补（settlement）**：调用前按 `estimated_input + max_tokens` 在 Redis 里原子 `INCRBY`（Lua 脚本内先比对上限，超了直接拒），响应返回后再 `INCRBY (actual_total − estimated)`（通常是负数）。不做预扣就必然超配额 —— 响应回来之前你不知道用了多少，而并发请求都在同时消耗同一个桶。
+**Token bucket 的特殊难点：输出事前未知。** 先定义 `reserved = estimated_input + max_output_tokens`，原子预留并保存 `reservation_id`；完成后只结算一次 `delta = actual_total - reserved`，取消/超时也按 provider 已确认 usage 结算。若 `actual_total < reserved`，delta 为负并归还差额；不能拿 `actual-estimated_input` 结算，否则预留的输出上限永远没有被归还。全局额度要用中心切片/租约控制，本地桶只能给出有界近似。
 
 ### 4.5 安全：编码 Agent 天然凑齐"致命三要素"
 
@@ -446,17 +452,21 @@ Simon Willison 的 [lethal trifecta](https://simonwillison.net/2025/Jun/16/the-l
 
 **计量事件用 CloudEvents，`source` + `id` 做去重**（OpenMeter 的事实标准，默认去重窗口 32 天）：
 
+下面是合法 JSON；解释写在代码块外，避免把带注释的 JSONC 误当线上 payload：
+
 ```json
 { "specversion": "1.0",
-  "source": "model-gateway/us-east-1/pod-7",   // source + id 构成去重键
-  "id": "run_8f2a:step_17:model",              // = (run_id, step_seq, kind)，天然幂等
+  "source": "urn:acme:model-gateway",
+  "id": "run_8f2a:step_17:model",
   "type": "usage.model_call", "time": "2026-07-30T09:12:33.417Z",
   "subject": "tenant/acme",
   "data": { "run_id": "run_8f2a", "model": "claude-opus-5",
             "input_tokens": 1200, "cache_creation_input_tokens": 0,
             "cache_read_input_tokens": 38000, "output_tokens": 640,
-            "cost_micros": 41500 } }
+            "provider_usage_ref": "usage_01J..." } }
 ```
+
+`source` 是稳定逻辑生产者，不含 pod/进程；`id` 从 `(run_id, step_seq, kind)` 派生并在重试中保持不变。原始事件记录 provider/model/tier、usage 与事件时间；价格用带生效时间的 `price_version` 在评级层计算。把 `cost_micros` 固化在原始遥测里，会在调价、折扣或账单校正后无法重放。
 
 ⚠ **`input_tokens` 不是总输入。** 总输入 = `input_tokens` + `cache_creation_input_tokens` + `cache_read_input_tokens`。只记第一项会把用量少算 95%，而且在长会话里错得最离谱。这是计量管道最常见的一等 bug。
 
@@ -464,22 +474,30 @@ Simon Willison 的 [lethal trifecta](https://simonwillison.net/2025/Jun/16/the-l
 
 | 层 | 位置 | 延迟 | 精度 | 作用 |
 |---|---|---|---|---|
-| 本地令牌桶（token bucket） | Model Gateway 进程内 | < 1 ms | 近似（分片） | **硬拦截** |
+| 本地令牌桶（token bucket） | Model Gateway 进程内 | < 1 ms | 近似（分片） | 快速拦截；超支上界由中心切片大小决定，不是全局强一致硬限额 |
 | Redis 计数器 | 每次调用后异步 incr | ~50 ms | 秒级准确 | 软阈值告警、降级触发 |
-| ClickHouse 聚合 | 事件流下游 | 分钟级 | 精确 | 出账、对账、分析 |
+| ClickHouse 聚合 | 事件流下游 | 分钟级 | 在完整事件 + 去重 + 对账后收敛 | 出账、对账、分析 |
 
-**硬护栏必须在网关本地**，不能等 ClickHouse —— **一个死循环的 Agent 能在 60 秒内烧掉 $500**。
+单 run 的步数/token/wall-clock 硬上限应在网关/运行时本地快速执行；跨实例的租户日预算用中心预留切片把超支上界限制住，不能只靠各进程本地桶。ClickHouse 只做事后聚合。事故成本速度取决于模型与并发，`60 秒 $500` 只能是特定压测示例。
 
-熔断（circuit breaker）阈值（可以直接抄）：
+熔断/预算护栏的声明式示例（字段不是某个现成产品的配置 schema，数值必须校准）：
 
 ```yaml
-per_run:  max_input_tokens: 3_000_000   # ≈ $4，覆盖 p99 任务
-          max_steps: 200 ; max_wall_clock: 60m
-          no_progress_abort: 12 steps   # 连续 12 步无新 git commit / 无文件变更 → 中止
-per_tenant_day:  budget = seats × $20 × 1.5
-          80%  → 告警 + 通知租户管理员
-          100% → 降级：新任务强制路由到 Sonnet/Haiku 档
-          130% → 拒绝新 run（在途 run 全部放行跑完，绝不半途杀）
+per_run:
+  max_input_tokens: 3_000_000
+  max_steps: 200
+  max_wall_clock_seconds: 3600
+  no_progress_steps: 12
+per_tenant_day:
+  budget_formula: "seats * 20.00 * 1.5"
+  actions:
+    - at_fraction: 0.80
+      action: notify_tenant_admin
+    - at_fraction: 1.00
+      action: route_new_runs_to_approved_lower_cost_tier
+    - at_fraction: 1.30
+      action: reject_new_runs
+  inflight_policy: "continue only within each run's hard limits; allow operator cancel"
 ```
 
 `no_progress_abort` 是专门针对死循环的：MAST 分类里「步骤重复 15.7%」「不知道终止条件 12.4%」合计占失败的近三成，而这两类**在 token 上是无上限的**。
@@ -524,7 +542,7 @@ failed_run_cost_ratio = 失败 run 的花费 / 总花费
 | **上下文超限** | 请求被截断或直接报错 | 触发 `clear_tool_uses` 压缩；仍超则拆任务 | 压缩要算账（§4.3 公式）；把真相外部化到 git + progress 文件，让"上下文丢了也能继续"成为常态 |
 | **前缀缓存静默失效** | **账单 4×，无任何报错** | 看 `cache_hit_ratio`，跌破 60% 告警 | prompt 装配写成"字节稳定前缀 + 易变尾巴"两段；system prompt 上 CI 做字节 diff 门禁 |
 | **仓库快照雪崩（thundering herd）** | 发布新 base image → 所有 `snapshot_key` 变化 → 全量 miss → 冷克隆风暴 | 回源（origin fetch）并发信号量（例如全局 200），超出的排队而非直通 | base image **灰度替换（progressive rollout）**：新旧 key 并存，按 5%/25%/100% 逐步切；快照预热在切流之前完成 |
-| **可用区故障** | 一整批 worker + 沙箱同时消失 | lease 过期后自动重派（§4.2） | Orchestrator 无状态化到 journal；沙箱天然可重建；**唯一要跨 AZ 冗余的是 Postgres 和 journal** |
+| **可用区故障** | 一整批 worker + 沙箱同时消失 | lease 过期后以更高 epoch 重派（§4.2） | Postgres/journal、对象产物、队列/路由等所有不可重建状态按 RPO/RTO 跨 AZ；repo mirror 与沙箱可从源重建但要算恢复容量 |
 
 **关于重试**：Agent 平台的重试特别危险 —— 一次失败的 run 重跑要重新烧掉全部 token。所以重试策略是「**同一 run 内的 step 级重试** 允许（便宜），**整 run 重跑**必须走人工或明确的自动阈值（贵）」。这条区分不做，成本会翻倍且没人知道钱花在哪。
 
@@ -544,7 +562,7 @@ failed_run_cost_ratio = 失败 run 的花费 / 总花费
 **v1（做成一门生意）**：自建 Firecracker 池 + 仓库 mirror + CoW 快照 + 预热池（§4.1）；多 provider 路由 + 前缀缓存工程化（§4.3）+ Batch 通道吃掉离线负载；WFQ 公平队列 + 三层预算护栏 + ClickHouse 计量（§4.4、§4.6）；durable execution：journal + 幂等键 + lease 重派（§4.2）。
 - **升级触发信号**：provider TPM 触顶（最先撞的墙）；出现跨区域延迟诉求；单租户用量 > 全平台 15%；开始收到"数据必须留在 EU"的合同。
 
-**v2（企业与规模）**：**Cell 化（cell-based architecture）**，每 cell 500–2,000 租户、单 cell 全挂影响 ≤ 1/N，router 优先选 DNS 型（最简单可靠，不进关键路径）—— 注意 cell 化承诺的是**降低爆炸半径（blast radius）与缩短恢复时间**，不是提升可用性 SLA，这两件事常被混为一谈；数据驻留（EU cell）+ BYOK，注意"**存储在 EU ≠ 在 EU 推理**"，合同里必须分开写死；混合自建推理：索引、embedding、PR 摘要、离线 eval 这类可批处理负载迁到自建，交互式仍走 API。
+**v2（企业与规模）**：Cell 化，每 cell 500–2,000 租户只是容量示例；名义租户半径约 1/K，真实影响按流量、ARR 与关键租户权重复算。DNS 路由要考虑 TTL/缓存和迁移速度，不是天然“不进关键路径”。Cell 降低相关故障半径，不自动提高 SLA；数据驻留、推理区域和 BYOK 分别写合同。
 - **升级触发信号**：合规合同成为销售阻塞项；推理成本 / 收入 > 45%（毛利跌破 50%）；单 cell 故障影响 > 5% 收入。
 
 > **演进的判据不是"做得更好"，是"旧方案在什么信号下失效"。** 上面每一档的触发信号，都是可以做成告警的具体指标 —— 这是 Staff 和 Senior 的分界。
@@ -566,4 +584,6 @@ failed_run_cost_ratio = 失败 run 的花费 / 总花费
 
 ---
 
-**下一篇** → [02-llm-gateway.md](02-llm-gateway.md)
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**案例顺读下一篇** → [02-llm-gateway.md](02-llm-gateway.md)

@@ -2,6 +2,8 @@
 
 > 认证是"你是谁"，授权是"你能干什么"。前者已经被标准化到几乎没有设计空间，后者是每个 SaaS 都会自己重造一遍、并且重造错的那一部分。
 > 到了 Agent 时代，还多了第三个问题：**"你代表谁"**。
+>
+> **阅读分层**：§1–§7 是通用 Full Stack Core；ReBAC 深层实现与 Agent 委派是进阶。协议的 MUST/SHOULD 以所链接 RFC 为准，产品版本与审计时限是时间快照或示例，不替代客户合同与审计师意见。
 
 ---
 
@@ -18,11 +20,11 @@
 
 | 概念 | 一句话 | 详见 |
 |---|---|---|
-| 关键路径 | 用户必须等它完成的那条链；挂在上面的每个依赖都会把自己的可用性乘进去 | [00-concepts §1、§10](../00-foundations/00-concepts.md) |
-| 强一致 vs 最终一致 | 写完之后别人立刻读，是一定读到新值，还是可能读到旧值 | [00-concepts §6](../00-foundations/00-concepts.md) |
-| p99 与尾延迟放大 | 排序后第 99% 的那个耗时；一个请求要打多次下游时，尾部会被放大 | [00-concepts §3](../00-foundations/00-concepts.md)、[00/01 §7](../00-foundations/01-fundamentals.md) |
-| 缓存与缓存键 | 把算过的结果暂存在快的地方；缓存键决定了"什么算同一个问题" | [00-concepts §11](../00-foundations/00-concepts.md)、[01/02](../01-building-blocks/02-caching.md) |
-| 幂等 | 同一操作做多次和做一次效果相同 | [00-concepts §12](../00-foundations/00-concepts.md) |
+| 关键路径 | 用户必须等它完成的那条链；挂在上面的每个依赖都会把自己的可用性乘进去 | [00-concepts §1、§10](../00-foundations/00-concepts.md#1-一个请求到底经历了什么) |
+| 强一致 vs 最终一致 | 写完之后别人立刻读，是一定读到新值，还是可能读到旧值 | [00-concepts §6](../00-foundations/00-concepts.md#6-什么是一致性--一个词两种完全不同的意思) |
+| p99 与尾延迟放大 | 排序后第 99% 的那个耗时；一个请求要打多次下游时，尾部会被放大 | [00-concepts §3](../00-foundations/00-concepts.md#3-为什么平均值是骗人的p50--p90--p99)、[00/01 §7](../00-foundations/01-fundamentals.md#7-尾延迟放大tail-latency-amplification) |
+| 缓存与缓存键 | 把算过的结果暂存在快的地方；缓存键决定了"什么算同一个问题" | [00-concepts §11](../00-foundations/00-concepts.md#11-三个最常见的优化手段各在优化什么)、[01/02](../01-building-blocks/02-caching.md) |
+| 幂等 | 同一操作做多次和做一次效果相同 | [00-concepts §12](../00-foundations/00-concepts.md#12-本章术语速查) |
 | 租户 / tenant_id | 一套系统同时服务多个互不可见的客户组织 | [02/03](../02-architecture-patterns/03-multi-tenancy.md) |
 
 **这一章要回答的问题**
@@ -59,8 +61,8 @@
 | **Authorization（授权 / AuthZ）** | 你能对这个资源做什么 | **你自己的授权服务** | 越权访问（unauthorized access）= 数据泄露（data breach） |
 | **Delegation（委派）** | 谁在代表谁行事 | Token 交换层 | Agent 拿着用户全部权限乱跑 |
 
-**第一条纪律**：认证外包，授权自建。
-认证是标准协议（OIDC），自研没有任何收益且极易出错；授权是业务语义，没有任何现成产品知道你的 `project` 和 `workspace` 是什么关系。
+**第一条纪律**：认证优先采用标准协议与成熟 IdP；授权语义必须由你的产品团队拥有。
+授权引擎可以购买或采用 SpiceDB/OpenFGA/Cedar 等实现，但没有产品会替你定义 `project`、`workspace` 与动作之间的业务关系。“拥有语义”不等于“从零手写密码、令牌或图存储”。
 
 **第二条纪律**：**授权决策（authorization decision）必须发生在服务端，且发生在数据访问路径上。**
 前端隐藏按钮不是授权，网关按 URL 前缀放行不是授权（`/api/projects/{id}` 的 `{id}` 是用户可控的）。
@@ -138,7 +140,7 @@ access token TTL = 你能容忍的"权限已撤销但仍可用"的窗口
 
 **Refresh token 必须做轮换（rotation）+ 重放检测（replay detection）**：每次刷新签发新 refresh token 并作废旧的；如果旧 token 被再次使用 → 判定为泄露 → **撤销整个 token 家族（token family）**并强制重新登录。没有重放检测的轮换等于没做。
 
-**合规口径**：SOC 2 审计里常见的要求是"离职/权限变更后 ≤15 分钟失效"。把这句话直接翻译成 access token TTL ≤ 15 min，比写一堆策略文档有用。
+**审计示例**：不少企业会在控制描述或合同里约定“离职/权限变更后 N 分钟内失效”，`N=15 min` 是常见但并非 SOC 2 统一规定的数字。若请求路径没有 session version、denylist 或 introspection 等在线撤销机制，access token TTL 就是这项承诺的最坏上界；有在线撤销时，应以端到端实测失效分布为准。
 
 ---
 
@@ -155,16 +157,16 @@ access token TTL = 你能容忍的"权限已撤销但仍可用"的窗口
 ```
 IdP (Okta/Entra) ──SCIM POST /Users──> 你的 SCIM 端点 ──> 用户表
                  ──SCIM PATCH /Groups─>                 ──> 组织成员关系
-                 ──SCIM DELETE ───────>                 ──> 停用（不是删除！）
+                 ──SCIM DELETE /Users/{id}─────────────> SCIM 资源删除；内部按保留策略软删/假名化
 ```
 
 **四个必须做对的点**：
-1. **`DELETE` 语义是"停用"（deactivate）不是"删除"**。真删会破坏审计链和历史归属。用 `active: false`。
+1. **不要混淆 `PATCH active:false` 与 `DELETE`。** RFC 7644 的 `DELETE /Users/{id}` 删除的是 SCIM 资源，成功后对该资源的读取应表现为不存在；`active:false` 是停用语义，通常通过 PATCH/PUT 表达。实现可把 DELETE 映射为内部软删/假名化以保留合法需要的历史归属，但必须立刻撤销访问，并遵守隐私删除与保留策略，不能对外继续把它当活跃 SCIM 资源。
 2. **`externalId` 是 IdP 侧主键，必须建唯一索引（unique index）**。用 email 做匹配键会在改邮箱时炸。
 3. **幂等**：IdP 会重放。`PUT /Users/{id}` 必须幂等，`POST` 要用 `externalId` 去重。
 4. **Group → 你的组织模型的映射要显式配置**，不要猜。企业的 AD group 结构和你的 workspace 结构不同构，这是集成时最大的扯皮点。
 
-**去配置（deprovisioning）的 SLA 是审计重点**：SCIM 收到停用 → 用户所有活跃 session/token 必须在 N 分钟内失效。如果你的 access token TTL 是 1 小时，你的实际去配置 SLA 就是 1 小时，不管你的文档怎么写。
+**去配置（deprovisioning）的 SLA 是审计重点**：SCIM 收到停用/删除 → 用户所有活跃 session/token 必须在约定的 N 分钟内失效。没有在线撤销机制时，1 小时 access token TTL 意味着最坏可继续使用约 1 小时；session version、短 TTL、denylist/introspection 可以把真实上界压低，但必须用端到端探针验证。
 
 ---
 
@@ -264,7 +266,7 @@ edit → org->administrate
      → 查 organization:acme#admin@user:alice          ✅ HIT
 ```
 
-**这就是 ReBAC 的价值**：alice 的 admin 权限自动覆盖了 acme 下所有项目，**没有任何一条元组把 alice 和 atlas 直接关联**。用 RBAC 表达同样的语义，你要么给 alice 写 N 条项目级角色（写放大 write amplification：一次逻辑写引发多次实际写，见 [00-concepts §12](../00-foundations/00-concepts.md) —— 这里放大倍数 = 项目数），要么在应用里手写 join（那正是 Zanzibar 要消灭的东西）。
+**这就是 ReBAC 的价值**：alice 的 admin 权限自动覆盖了 acme 下所有项目，**没有任何一条元组把 alice 和 atlas 直接关联**。用 RBAC 表达同样的语义，你要么给 alice 写 N 条项目级角色（写放大 write amplification：一次逻辑写引发多次实际写，见 [00-concepts §12](../00-foundations/00-concepts.md#12-本章术语速查) —— 这里放大倍数 = 项目数），要么在应用里手写 join（那正是 Zanzibar 要消灭的东西）。
 
 ### 6.5 zookie / 一致性：新旧敌人问题
 
@@ -282,9 +284,11 @@ Zanzibar 的核心难点不是图遍历，是**一致性**。两个失效场景�
 | `at_exact_snapshot` | 精确快照 | 中 | 分页遍历时保持一致视图 |
 | `fully_consistent` | 强一致（strong consistency），绕过缓存 | **最高（可 10× 以上）** | 授权变更页面、安全敏感操作 |
 
-**工程结论**：把 ZedToken 存进你的资源行（`resource.authz_token`），读路径带上它。这样"改完权限立刻刷新页面"是正确的，其余请求走低延迟路径。**不要全局开 `fully_consistent`** —— 那等于关掉了 Zanzibar 的全部缓存设计。
+**工程结论**：ZedToken 是一次授权写入的因果水位，不是资源表里一个永远正确的普通字段。调用方应把**本次关系写返回的 token** 随后续内容写/读一起传递，或通过 transactional outbox 把 `(resource_id, authz_token)` 的水位可靠更新；如果权限能在别的服务独立修改，只在 `resource.authz_token` 存一次会漏掉更新。分页请求应把 exact-snapshot token 放进不透明 page token，整次遍历固定同一快照。其余低风险读可走低延迟模式，安全敏感操作使用至少与相关授权写一样新的 token；不要全局开 `fully_consistent`。
 
-### 6.6 2026 年的实现现状
+### 6.6 实现现状（2026-08 时间快照）
+
+下表只帮助理解能力差异；治理状态、版本、性能与 CVE 修复线会变化，选型/上线前必须重查官方 release 与安全公告。
 
 | | [SpiceDB](https://github.com/authzed/spicedb) | [OpenFGA](https://openfga.dev/) |
 |---|---|---|
@@ -315,12 +319,12 @@ Zanzibar 的核心难点不是图遍历，是**一致性**。两个失效场景�
 ### 四个必须做的优化
 
 1. **批量 check**：列表页面用 `CheckBulkPermissions`（SpiceDB）/ `BatchCheck`（OpenFGA），把 50 次 RTT 变成 1 次。**N+1 授权是最常见的性能事故。**
-2. **不要用 `LookupResources` 做主查询**。"列出我能看的所有项目"在资源量大时会退化。正确做法是**先按业务过滤（分页 + tenant_id）拿 100 条候选，再批量 check 过滤**；只有在权限极稀疏时才反过来。
-3. **反规范化（denormalization）/ Leopard 式索引**：Zanzibar 用一个专门的索引服务预计算深层组成员关系。自建的等价物是"把稳定的、扇出（fan-out：一个节点往下连出去的边极多，见 [00/01 §7](../00-foundations/01-fundamentals.md)）巨大的关系（org 成员、team 成员）物化（materialize：把每次都要现算的结果预先算好、存成一张可以直接查的表）成扁平表"，并接受**秒级**的更新延迟。
-4. **两级缓存**：进程内 LRU（TTL 1–5s，按 ZedToken 分桶）+ 授权服务自身的分布式缓存。注意**缓存键必须包含一致性 token**，否则你会缓存出越权。
+2. **列表查询不能“取一页再过滤一次”**。这会返回短页，并让下一页跳过本应可见的资源。默认做法是按业务索引和稳定游标分批扫描候选，批量 check 后继续 over-fetch，直到凑满页面或扫描结束；page token 同时保存业务游标与授权快照 token。权限极稀疏时，从 `LookupResources`/权限索引得到候选，再与业务过滤相交更合适。两条路线都要设扫描上限并返回可继续的游标。
+3. **反规范化（denormalization）/ Leopard 式索引**：Zanzibar 用一个专门的索引服务预计算深层组成员关系。自建的等价物是"把稳定的、扇出（fan-out：一个节点往下连出去的边极多，见 [00/01 §7](../00-foundations/01-fundamentals.md#7-尾延迟放大tail-latency-amplification)）巨大的关系（org 成员、team 成员）物化（materialize：把每次都要现算的结果预先算好、存成一张可以直接查的表）成扁平表"，并接受**秒级**的更新延迟。
+4. **两级缓存**：进程内 LRU（短 TTL，示例 1–5s）+ 授权服务自身的分布式缓存。缓存键必须包含主体、动作、资源、上下文与一致性 token/权限版本；撤权后的高风险操作不能回退到一个无版本的旧 allow。
 
 > **面试金句**：
-> "授权服务的 SLO 必须比它保护的服务更严 —— 因为每个业务请求要打 1–5 次 check，它的可用性是乘进去的，不是加进去的。所以我给它单独的读副本（read replica）和 10ms 的 p95 预算，并且**明确 fail-closed**。有人会说超时就放行以保可用性，那是把一个可用性问题换成了一个数据泄露事件 —— 这两者的赔付曲线完全不同。真正的解法是降级到本地缓存的上一次决策，而不是降级到 allow。"
+> "授权服务的目标通常要比它保护的单个服务更严，因为每个业务请求会做多次 check。超时绝不无条件 allow：低风险读可以在**明确的陈旧容忍窗口内**使用带权限版本、尚未过期的缓存决策；撤权后读、高影响写和没有可验证缓存的请求 fail-closed。缓存是有条件的旧证据，不是绕过授权的后门。"
 
 ### 正确性的三条硬规则
 
@@ -502,20 +506,20 @@ allow(agent:a7 on behalf of user:bob, edit, project:atlas) =
 | **把 ReBAC check 塞进应用 ORM 做本地 join** | 那正是 Zanzibar 要解决的问题：权限图跨服务、跨库，join 不出来且没有一致性语义 | 独立的、可水平扩展的、有一致性 token 的授权服务 |
 | **超时就放行（fail-open）** | 把可用性问题换成数据泄露 | fail-closed + 降级到缓存的上次决策 |
 | **每个 handler 手写权限检查** | 一定会漏 | 中间件/repository 层强制注入，让漏检不可能 |
-| **用 `LookupResources` 当主查询** | 资源多时退化 | 业务分页 + 批量 check 过滤 |
+| **固定取一页业务数据再做权限过滤** | 短页、漏项，游标还会跳过可见资源 | 稳定游标分批 over-fetch + 批量 check；权限稀疏时反向求交集 |
 | **全局 `fully_consistent`** | 关掉了整个缓存层，p99 涨 10× | 只在权限变更后的读带 ZedToken |
 | **Agent 复用人类凭证 / token 透传** | MCP 规范 MUST NOT；下游日志主体错误、无法单独封禁 | token exchange + `act` 声明 |
 | **omnibus scope（`*` / `all` / `full-access`）** | 一旦泄露就是全量 | 渐进式最小权限 + 403 step-up |
 | **在 JWT 里放 PII** | base64 不是加密 | 只放标识符 |
 | **一开始就上 ReBAC** | 多一个关键路径上的有状态服务要运维 | 没有共享/继承语义时，RBAC 表就够 |
-| **SCIM `DELETE` 真删用户** | 破坏审计链与历史归属 | `active: false` |
+| **把 SCIM `DELETE` 当成 `active:false` 的同义词** | 混淆 RFC 资源删除与停用，GET/重建语义会错 | PATCH/PUT 表达停用；DELETE 对外删除资源，内部按合法保留策略软删/假名化并立即撤权 |
 
 ---
 
 ## 这一章的三句话
 
-1. **认证外包，授权自建。** OIDC 是标准协议，自研没有任何收益且极易出错；而没有任何现成产品知道你的 `workspace` 和 `project` 是什么关系 —— 越权恰恰只发生在那个没人替你想过的关系上。
-2. **access token 的 TTL 就是你真实的去配置 SLA。** 文档里写"离职后立即失效"没有意义：SCIM 停用只改了用户表，一个还没过期的自包含 token 在整个 TTL 内照样能用，实际生效时间等于 TTL，不等于你的策略文档。
+1. **认证用成熟标准实现，授权语义由自己负责。** 引擎可以买，`workspace` 与 `project` 的关系模型、默认拒绝和撤权时限不能外包。
+2. **没有在线撤销时，access token TTL 就是去配置 SLA 的最坏上界。** 若声称更快，必须有 session version、denylist/introspection 等机制，并拿 SCIM→最终请求拒绝的端到端分布证明。
 3. **Agent 的正确权限是三个集合的交集**：用户本来就有的权限 ∩ 这个 Agent 被授予的能力上限 ∩ 本次任务批准的范围。只做第一项，就等于把用户的全部权限交给了一个随时可能被提示注入劫持的程序，而下游审计日志里连"是谁干的"都记不对。
 
 ---
@@ -534,4 +538,6 @@ allow(agent:a7 on behalf of user:bob, edit, project:atlas) =
 
 ---
 
-**下一篇** → [04-isolation-and-compliance.md](04-isolation-and-compliance.md)
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**目录顺读下一篇** → [04-isolation-and-compliance.md](04-isolation-and-compliance.md)

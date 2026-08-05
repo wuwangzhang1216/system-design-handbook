@@ -13,19 +13,19 @@
 **先确认你能回答这三个问题**
 
 1. 什么是 check-then-act？"先 SELECT 查这个司机是否空闲、再 UPDATE 把他占住"，两个请求同时来会发生什么？
-   答不出 → 先读 [00-concepts §7 事务与隔离级别](../00-foundations/00-concepts.md)
+   答不出 → 先读 [00-concepts §7 事务与隔离级别](../00-foundations/00-concepts.md#7-事务与隔离级别)
 2. 副本和分片各解决什么问题？全世界司机位置加起来才 200 MB、一台机器绰绰有余，那为什么还要分片？
-   答不出 → 先读 [00-concepts §5 副本 / 分片 / 分区](../00-foundations/00-concepts.md)
+   答不出 → 先读 [00-concepts §5 副本 / 分片 / 分区](../00-foundations/00-concepts.md#5-副本分片分区--三个被混用的词)
 3. 弱网会带来重复、乱序、迟到三件事。幂等键能解决其中哪几件？剩下那件靠什么？
-   答不出 → 先读 [01-fundamentals §5 幂等](../00-foundations/01-fundamentals.md)、[§9 幂等 × 重试 × 超时](../00-foundations/01-fundamentals.md)
+   答不出 → 先读 [01-fundamentals §5 幂等](../00-foundations/01-fundamentals.md#5-幂等idempotency分布式系统的第一公民)、[§9 幂等 × 重试 × 超时](../00-foundations/01-fundamentals.md#9-幂等--重试--超时三件套必须一起设计)
 
 **这道题会用到的构件**
 
 | 构件 | 用在哪 | 详见 |
 |---|---|---|
 | 条件更新、fencing token、租约 | §4.3 判定"这个司机归谁"、§4.4 超时回收 | [`05-consensus-and-coordination.md`](../01-building-blocks/05-consensus-and-coordination.md) §3、§4 |
-| 有状态 vs 无状态 | 司机长连接与 Geo 索引分片都是有状态的 | [00-concepts §9](../00-foundations/00-concepts.md)、[`04-networking-and-edge.md`](../01-building-blocks/04-networking-and-edge.md) §2、§4 |
-| Little's Law（并发 = 吞吐 × 延迟） | §2.4 推出 43.5 万在途订单与 30 台接入机 | [00-concepts §2](../00-foundations/00-concepts.md)、[`02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §3 |
+| 有状态 vs 无状态 | 司机长连接与 Geo 索引分片都是有状态的 | [00-concepts §9](../00-foundations/00-concepts.md#9-有状态-vs-无状态)、[`04-networking-and-edge.md`](../01-building-blocks/04-networking-and-edge.md) §2、§4 |
+| Little's Law（并发 = 吞吐 × 延迟） | §2.4 推出 43.5 万在途订单与 30 台接入机 | [00-concepts §2](../00-foundations/00-concepts.md#2-延迟吞吐并发--三个最常被混淆的词)、[`02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §3 |
 | 流式窗口聚合与 watermark | §4.6 供需信号 → surge 价格快照 | [`03-messaging-and-streams.md`](../01-building-blocks/03-messaging-and-streams.md) §6 |
 | 热 key | §4.2 "一城一个 geo key" 为什么会烧掉一个分片 | [`02-caching.md`](../01-building-blocks/02-caching.md) §4 |
 
@@ -91,12 +91,12 @@
   召回半径补偿 +300 m 即可抵消，匹配质量不变 ⇒ 这是本题最便宜的优化
 ```
 
-**传输方式决定带宽和 CPU，差 7 倍**：
+**传输方式决定带宽、连接管理与实时下行能力。不要用“每次 HTTP 都重新握手”做假基线**：HTTP keep-alive / HTTP/2 同样会复用连接。
 
 | 方式 | 单条线上字节 | 25 万/s 的入向带宽 | 隐藏成本 |
 |---|---|---|---|
-| HTTPS POST（每次新连接） | ~900 B（头部 + TLS 握手摊销） | 225 MB/s ≈ 1.8 Gbps | **TLS 握手的 CPU 才是真瓶颈**，25 万握手/s 需要几十台机器纯做握手 |
-| **WebSocket 二进制帧（长连接）** | ~120 B | 30 MB/s ≈ 240 Mbps | 需要连接管理与重连风暴防护 |
+| HTTP/2 keep-alive + 紧凑请求体 | 取决于 header 压缩与 payload，通常数百 B | 需实测 | 请求/响应简单，代理与重试语义成熟；不天然支持服务端低延迟推送 |
+| **WebSocket 二进制帧（长连接）** | 本题假设约 120 B | 约 30 MB/s | 适合同时承载派单下行；代价是连接管理与重连风暴防护 |
 
 ### 2.2 存储：这份数据小到荒谬
 
@@ -243,7 +243,7 @@ ETA 调用 = 58 QPS × 20 候选 = 1,160 次/s → 30 亿次/月 × $2–5/千�
 
 | 方案 | 写吞吐 | 单写成本 | 崩溃后 | 致命代价 |
 |---|---|---|---|---|
-| A. `UPDATE ... SET geog` 主库 | 单主约 2 万 TPS 上限 | ~1 ms + WAL fsync + GiST 维护 | 数据在 | **超上限 12 倍**；25 万死元组/s 让 autovacuum 永远追不上；且与订单写共享 WAL 与 buffer pool |
+| A. `UPDATE ... SET geog` 主库 | 本题先假设该更新形状压测安全线约 2 万 TPS | ~1 ms + WAL fsync + GiST 维护 | 数据在 | **需求约为假设安全线的 12 倍**；25 万死元组/s 让 autovacuum 难以追上；且与订单写共享 WAL 与 buffer pool。门槛需在目标硬件重测 |
 | B. Redis GEO（`GEOADD` / `GEOSEARCH`） | 单实例约 10 万 ops/s（`GEOADD` 即 `ZADD`，O(log N)）；25 万需 4–8 分片 | 0.3 ms 网络往返 | 丢几秒无所谓 | 一城一个 geo key 会变**热 key**；ZSET 成员数百万时大半径 `GEOSEARCH` 退化 |
 | C. **自建内存索引**（本文） | 单机 300–500 万 ops/s（纯内存 map） | 0（本地） | 全丢，**30 s TTL 内自愈** | 要自己写分片、故障转移、扩缩容 |
 
@@ -276,35 +276,44 @@ ETA 调用 = 58 QPS × 20 候选 = 1,160 次/s → 30 亿次/月 × $2–5/千�
 | 方案 | 正确性 | 延迟 | 失效模式 |
 |---|---|---|---|
 | A. Redis 分布式锁 `SET NX PX 15000` | 不带 fencing token 就不安全 | +0.3 ms | GC 暂停 30 s → 锁过期而持有者不自知，两个持有者并存；Redis 主从异步复制，主挂即丢锁；Redlock 也不解决 GC 暂停 |
-| B. **数据库条件更新（CAS）** | **单条语句原子，DB 是唯一裁决者** | +1–2 ms（同 AZ） | 只受单行 TPS 限制（约 500–1,000）；而**单个司机行的实际写入 < 0.1 TPS** ⇒ 完全不是问题 |
+| B. **数据库事务 + 条件更新** | 同时守住“司机最多一单”和“订单最多一名司机” | +1–2 ms（同 AZ，场景量级） | order 行会串行化同一订单的并发 dispatch；司机行天然分散 |
 | C. 按 cell 分区的单线程匹配器 | 分区内天然无冲突 | 0 | 引入有状态服务 + 故障转移；**跨分区仍冲突**（司机在 cell A、订单在 cell B 的边界上） |
 
-**选 B。** 具体实现：
+**选 B。两个不变量必须在同一事务里一起提交**：只更新 `driver_assignment` 只能保证“一名司机不接两单”，两个并发 dispatcher 仍可让同一订单占住两名不同司机。下面是事务性伪代码；所有实现固定按“订单行 → 司机行”的顺序加锁，避免死锁：
 ```sql
--- driver_assignment：每个司机一行，PK = driver_id。全系统唯一的强一致点。
-UPDATE driver_assignment
-   SET order_id   = :order_id,
-       state      = 'offered',
-       expires_at = now() + interval '15 seconds',
-       epoch      = epoch + 1                    -- fencing token
- WHERE driver_id  = :driver_id
-   AND (order_id IS NULL                          -- 空闲
-        OR expires_at < now())                    -- 或上一次持有已过期（惰性过期判定）
-RETURNING epoch;
--- 返回 0 行 = 没抢到。不重试、不等待、不加锁，直接换下一个候选。
+BEGIN;
+  UPDATE ride_order
+     SET active_driver_id = :driver_id,
+         state = 'offering',
+         assignment_epoch = assignment_epoch + 1
+   WHERE order_id = :order_id
+     AND state IN ('searching','widening')
+     AND active_driver_id IS NULL
+  RETURNING assignment_epoch;                    -- 0 行：该订单已被另一 dispatcher 占用
+
+  UPDATE driver_assignment
+     SET order_id = :order_id, state = 'offered',
+         expires_at = now() + interval '15 seconds', epoch = epoch + 1
+   WHERE driver_id = :driver_id
+     AND (order_id IS NULL OR expires_at < now())
+  RETURNING epoch;                               -- 0 行：回滚订单更新，换候选
+
+  INSERT INTO dispatch_outbox(order_id, driver_id, assignment_epoch, driver_epoch, type)
+  VALUES (:order_id, :driver_id, :assignment_epoch, :driver_epoch, 'offer');
+COMMIT;
 ```
 
 **三个要点，每一个都是独立的评分信号**：
 
 1. **`expires_at < now()` 是惰性过期判定（lazy expiry）**：正确性只依赖读时比时间戳。后台清理器挂掉不会永久占用运力 —— 清理器只负责"体验"（让司机 App 及时回到空闲界面），**不负责正确性**。这两件事必须由两个机制分别保证。
-2. **`epoch` 是 fencing token**（围栏令牌：一个单调递增的编号，让被抢占的旧持有者的写在下游被识别出来并拒绝，见 [`05-consensus-and-coordination.md`](../01-building-blocks/05-consensus-and-coordination.md) §3）：司机 App 上报"我接受订单 X"时必须回传收到 offer 时的 epoch。epoch 落后 = 这是一个过期 offer 的回声（弱网延迟送达），服务端必须拒绝。**没有 epoch，一条迟到 10 秒的"接受"会把一个已经重派给别人的订单改回来，然后两个司机同时开向同一个乘客。**
+2. **双边 epoch 是 fencing token**：司机 App 接受时回传 `(order_id, driver_id, assignment_epoch, driver_epoch)`，服务端同时匹配订单与司机当前版本。任一版本落后都是旧 offer 的回声，必须拒绝。
 3. **串行 offer，不是并行广播**。并行给 5 个司机发同一单，4 个人白点一次 —— 接单率指标直接废掉，司机端体验崩坏。串行的代价是延迟 = 轮数 × 超时，所以超时必须短（§4.4）。
 
 **注意这题和票务系统的关键差别**：票务的痛点是**单行热点**（1 万座位的总余量在一行上被 6 万 QPS 打），所以它需要准入层削峰 + 分桶。打车这里，`driver_assignment` 按 `driver_id` 天然分散在 100 万行上，**单行 TPS < 0.1，根本没有热点**。同样是"条件更新守不变量"，两题的瓶颈完全不在一处 —— 说得出这个区别，说明你不是在背模板。
 
 > **面试金句**
-> "这题看起来是地理索引题，实际是在一个最终一致的世界里守住一个强一致的不变量：任一时刻一个司机只能被一个订单持有。我用 `driver_assignment` 一行上的条件更新守它 —— 单条语句原子，数据库是唯一裁决者，所以'持锁进程 GC 暂停 30 秒'这一整类问题根本不存在。过期用 `expires_at < now()` 惰性判定，清理器挂了也不会永久占住运力。"
-> "This looks like a geo-indexing problem, but it's really about holding one strongly consistent invariant inside an eventually consistent world: at any instant a driver can be held by at most one order. I enforce that with a conditional update on a single driver_assignment row — one atomic statement, the database is the only arbiter, so the whole 'what if the lock holder GC-pauses for thirty seconds' class of bugs never exists. Expiry is evaluated lazily against expires_at, so a dead sweeper can't strand supply."
+> "这题看起来是地理索引题，实际要同时守住两个强一致不变量：一个司机最多服务一单，一张订单最多占用一名司机。我固定按订单行再司机行的顺序，在同一数据库事务里做两次条件更新并写 outbox；任一步失败就整体回滚。接受操作携带订单与司机两侧 epoch，旧 offer 不能复活。"
+> "This looks like a geo-indexing problem, but it has two strongly consistent invariants: one driver can serve at most one order, and one order can hold at most one driver. I update the order row, driver row, and outbox in one database transaction with a fixed lock order. Acceptance carries both epochs, so a stale offer cannot come back to life."
 
 **什么条件下改选 C**：上批量撮合时。撮合器本来就是有状态的，独占性由二分图匹配内部保证（一个司机只出现在一条匹配边上），条件更新退化成落库时的最后一道防线。这时冲突只发生在**跨批次**（上一批已 offer 未响应的司机），解法是撮合器读候选时排除 `state <> 'idle'` 的司机。
 **什么条件下不变量本身要改**：允许拼车时，谓词从 `order_id IS NULL` 变成 `active_count < k` —— **仍然不需要分布式锁**，但排序必须换成路径可行性判断，本文的方案会给出很差的结果（见 §4.7）。
@@ -347,10 +356,17 @@ stateDiagram-v2
 **超时处理必须幂等且可重放**：
 
 ```sql
--- 超时事件到达时先做条件更新，不要"先读状态再决定"
-UPDATE driver_assignment SET order_id = NULL, state = 'idle'
- WHERE driver_id = :d AND order_id = :o AND state = 'offered' AND expires_at < now();
--- 返回 0 行 = 司机刚好接受了，或者这是一次重复投递。直接丢弃该事件。
+BEGIN;
+  -- 固定订单→司机的锁顺序，并同时匹配两侧 epoch；任一 0 行都回滚
+  UPDATE ride_order
+     SET active_driver_id = NULL, state = 'searching'
+   WHERE order_id = :o AND active_driver_id = :d
+     AND assignment_epoch = :assignment_epoch AND state = 'offering';
+  UPDATE driver_assignment SET order_id = NULL, state = 'idle'
+   WHERE driver_id = :d AND order_id = :o AND epoch = :driver_epoch
+     AND state = 'offered' AND expires_at < now();
+  INSERT INTO dispatch_outbox(...) VALUES (..., 'search_again');
+COMMIT;
 ```
 
 **这是本题第二个 check-then-act 陷阱。** 定时器一定会重复投递（调度器崩溃重启、消息重放），"先 SELECT 看状态、再 UPDATE"在并发下必错。**重派的三条硬规则**：
@@ -379,7 +395,7 @@ UPDATE driver_assignment SET order_id = NULL, state = 'idle'
 
 **弱网状态同步：司机端永远不是真相源。** ❌ 司机端上报"我现在是 `in_trip`"（状态）→ 重复上报覆盖后续状态，迟到的 `in_trip` 把 `completed` 改回去。✅ 司机端发**命令** `(order_id, action, client_event_id, epoch)`，服务端在状态机上校验，非法转移返 409 + 权威状态。四条实现规则：
 
-1. **`client_event_id` 由 `(order_id, action)` 派生，不是随机 UUID。** 同一动作重发一百次只生效一次 —— 和计费系统的幂等键是同一条原则（见 [`04-usage-based-billing.md`](04-usage-based-billing.md) §6）。
+1. **`client_event_id` 必须稳定标识这一次业务动作。** 可由 `(order_id, action)` 派生，也可在动作首次入本地离线队列时生成随机 UUID 并持久化；同一动作的所有重放都必须复用它。每次网络重试生成新 UUID 才会让动作重复生效（见 [`04-usage-based-billing.md`](04-usage-based-billing.md) §6）。
 2. **司机端离线队列按序重放，不允许跳过失败的命令** —— 否则 `end_trip` 会先于 `start_trip` 到达。
 3. **服务端不信任 `client_ts`**，合法性只看动作在状态机上是否可达：`in_trip` 收到 `start_trip` → 幂等返回成功；`assigned` 收到 `end_trip` → 409 + 当前状态。
 4. **客户端无条件以服务端返回的状态为准**，不做本地合并。"谁的时间戳新听谁的"在时钟不可信时必错。
@@ -532,4 +548,6 @@ v3  批量撮合成为主路径 / 跨国多区域
 
 ---
 
-**下一篇** → [14-ticket-booking.md](14-ticket-booking.md)：库存扣减的三个约束互相打架 —— 不超卖、不锁死、能自动释放。
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**案例顺读下一篇** → [14-ticket-booking.md](14-ticket-booking.md)：库存扣减的三个约束互相打架 —— 不超卖、不锁死、能自动释放。

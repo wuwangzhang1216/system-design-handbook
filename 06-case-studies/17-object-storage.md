@@ -12,11 +12,11 @@
 **先确认你能回答这三个问题**
 
 1. 延迟、吞吐、并发三者什么关系？为什么一个只有 510 QPS 的服务，可能需要 65 台机器？
-   答不出 → 先读 [00-concepts §2 延迟 / 吞吐 / 并发](../00-foundations/00-concepts.md)、[§1 一个请求的旅程](../00-foundations/00-concepts.md)
+   答不出 → 先读 [00-concepts §2 延迟 / 吞吐 / 并发](../00-foundations/00-concepts.md#2-延迟吞吐并发--三个最常被混淆的词)、[§1 一个请求的旅程](../00-foundations/00-concepts.md#1-一个请求到底经历了什么)
 2. 强一致与最终一致的区别？"元数据说文件 ready、字节还没落地"属于哪一种不一致，谁负责让它收敛？
-   答不出 → 先读 [00-concepts §6 什么是一致性](../00-foundations/00-concepts.md)
+   答不出 → 先读 [00-concepts §6 什么是一致性](../00-foundations/00-concepts.md#6-什么是一致性--一个词两种完全不同的意思)
 3. 客户端**一定**会在传完最后一片后崩溃、关标签页、换设备。为什么"只有一条兜底路径"等于没有兜底？
-   答不出 → 先读 [01-fundamentals §8 失败模型](../00-foundations/01-fundamentals.md)、[§5 幂等](../00-foundations/01-fundamentals.md)
+   答不出 → 先读 [01-fundamentals §8 失败模型](../00-foundations/01-fundamentals.md#8-失败模型你要防的到底是什么)、[§5 幂等](../00-foundations/01-fundamentals.md#5-幂等idempotency分布式系统的第一公民)
 
 **这道题会用到的构件**
 
@@ -25,7 +25,7 @@
 | 对象存储当"数据库"、条件写、首字节延迟 | §4.3 覆盖写与并发、§4.5 分层的物理下限 | [`01-storage-engines.md`](../01-building-blocks/01-storage-engines.md) §7 |
 | 出网流量成本、CDN、Anycast | §2.3 出网是存储的 3.2 倍、§4.6 下载路径 | [`04-networking-and-edge.md`](../01-building-blocks/04-networking-and-edge.md) §6、§7 |
 | 缓存键与失效、serve stale | §4.3 "覆盖写后 CDN 还是旧内容" | [`02-caching.md`](../01-building-blocks/02-caching.md) §6 |
-| Little's Law、峰谷比、成本建模 | §2.1 峰值字节速率、§2.4 并发连接不是瓶颈 | [00-concepts §2](../00-foundations/00-concepts.md)、[`02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §1、§3、§6 |
+| Little's Law、峰均比、成本建模 | §2.1 峰值字节速率、§2.4 并发连接不是瓶颈 | [00-concepts §2](../00-foundations/00-concepts.md#2-延迟吞吐并发--三个最常被混淆的词)、[`02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §1、§3、§6 |
 | 事件驱动、双向对账 | §3 事件面（扫毒 / 缩略图 / 索引）、§4.3 三种不一致 | [`02-event-driven-and-cqrs.md`](../02-architecture-patterns/02-event-driven-and-cqrs.md) §1 |
 
 **这道题的一句话本质**
@@ -75,7 +75,7 @@
 
 ```
 上传：100 万次/天 ÷ 86,400 = 11.6 次/s 均值
-      峰谷比 4（企业负载集中在 10 小时工作时间）→ 46 次/s 峰值
+      峰均比 4（企业负载集中在 10 小时工作时间）→ 46 次/s 峰值
 下载：读写比 10:1 → 1,000 万次/天 = 116 次/s 均值 × 4 = 464 次/s 峰值
 
 字节速率（这才是本题的支配变量）：
@@ -100,13 +100,26 @@
 
 预签名直传（presigned URL：应用用自己的凭证预先签好一个带有效期和限定条件的 URL，
   客户端拿着它**直接**读写对象存储，全程不需要任何凭证，字节也不经过你）后：
-  create ~500 B + complete（ETag 列表，通常 < 1 KB）
-  → 应用层字节流量 200 万次 × 1 KB ≈ 2 GB/天 = 23 KB/s
-  → 退化成一个约 850 QPS 的纯 JSON API（每请求约 3 次元数据查询，
-     即 §2.4 那 2,700 的 DB QPS）→ 3 台（还是为了跨 AZ 冗余）
+  普通单 PUT 的 create + complete 控制消息约 KB 级
+  → 若暂把 100 万次上传都按单 PUT 做基线：约 200 万个控制请求 × 1 KB ≈ 2 GB/天 = 23 KB/s
+
+  但 multipart 不能仍按“complete < 1 KB”估：
+  50 GB ÷ 16 MB = 3,200 parts；每批签 100 个 URL → 32 次签发请求。
+  若每 100 片回传一次 manifest checkpoint，再加 create + complete，约 66 个控制请求；
+  part tuple 按 ~100 B、预签名 URL 按 ~500 B 的教学假设，
+  完成 manifest 约 320 KB，URL 响应约 1.6 MB，合计约 2 MB（仍只占 50 GB 的约 0.004%）。
+
+  → 把所有上传先按 create + complete 计时，基线可视为约 850 QPS 的纯 JSON API
+     （结合不同端点的查询数得到 §2.4 约 2,700 DB QPS）→ 3 台（还是为了跨 AZ 冗余）；
+     最终上传 API 请求率应按下面的分布重算，而不是给每个请求统一乘 3 次查询：
+       单 PUT 率 × 2
+       + Σ(multipart 桶的上传率 × [2 + 2×ceil(parts/100) + 续传 ListParts 页数])。
+     若从已含 create + complete 的 850 QPS 基线增量计算，则每个 multipart 只再加
+     `2×ceil(parts/100) + 续传页数`。
+     没有“文件大小 × multipart 占比”的直方图，就不能把 850 QPS 当最终容量数字。
 ```
 
-> **65 台 → 3 台。这是这道题唯一必须背下来的数字对。**
+> **在本文负载分布的基线里，承载字节的 65 台变成控制面的 3 台。**要记住的是数量级为何改变；multipart 尾部会增加控制请求与 manifest 字节，必须按文件大小分布补算。
 
 **注意一个常见的错误论据**：直传**不省出网单价**。EC2 → Internet 与 S3 → Internet 都是 $0.09/GB 量级，同 region 的 EC2 ↔ S3 走 gateway endpoint（网关端点：让流量走云内部路由而不出公网的一条通道）免费。省的是机器、部署耦合和失败面（§4.1 会拆开讲）。真正把出网费砍掉的是 CDN —— [S3 → CloudFront 的回源（origin fetch）流量免费](https://aws.amazon.com/cloudfront/pricing/)。
 
@@ -143,7 +156,8 @@
 元数据 QPS（峰值）：下载换 URL 464 + 上传 138 + 列目录 232（每次扫 ~1,000 行）
                    + 权限/去重/同步 delta（≈ 上述之和 × 2）  →  约 2,700/s
 元数据存量：3.65 亿条/年 × 1 KB = 365 GB/年 + 索引 ×2 ≈ 1.1 TB/年
-            → 单机 Postgres 能撑 3–5 年，这是"先别分片"的强信号
+            → 数据量本身不足以证明首日分片；先以单主 Postgres 为候选，
+              再按点查/list 形状、索引、硬件与 p99 SLO 压测，决定它能撑几年
 并发连接（Little's Law）：上传 46/s × 20 s = 920 + 下载 464/s × 5 s = 2,320 ≈ 3,240 条
             分摊到 65 台 = 50 条/台 → 连接数根本不是瓶颈，带宽才是
 ```
@@ -161,9 +175,10 @@
  │  Client ──① POST /uploads ─▶ App（3 台）──▶ Metadata DB               │
  │           {key,size,sha256}    校验配额/权限/去重     objects 表        │
  │                                生成 storage_key       status=pending    │
- │  Client ◀──② 预签名 URL 列表 ──┘  （绑定 size/content-type/key）        │
+ │  Client ◀──② 预签名 URL 列表 ──┘  （绑定 key/content-type/checksum；    │
+ │                                     大小按厂商能力签入或完成后校验）    │
  │  Client ──⑤ POST /uploads/{id}/complete {parts[]} ─▶ App               │
- │             校验 ETag 与 sha256 → status=verifying                     │
+ │             校验 part 标识与服务端 checksum → status=verifying         │
  └────────────────────────────────────────────────────────────────────────┘
               ┃                                          ┃
  ┌── 数据面（data plane）：字节，大而稀 ──┐    ┌── 事件面：异步处理 ──────┐
@@ -178,12 +193,12 @@
        大文件 / 视频：客户端并发 8 个 Range 请求（见 §4.6）
 ```
 
-**数据流说明（一次 50 GB 上传）**：①② 应用查去重表未命中 → 建 `objects` 行（`pending`）+ 发起 multipart upload 拿 `upload_id` → 按 `size` 算出 `part_size=16 MB`、片数 3,200，**只批量签发前 100 个 part URL**（不是一次签 3,200 个）。③④ 客户端 8 并发 PUT，用完 100 个 URL 再要下一批；中断后调 `ListParts` 拿服务端视角、只补缺片。⑤ `complete` 校验片数与 ETag（对象存储在每片上传成功时返回的内容指纹，客户端把它原样回传，服务端据此确认"这一片确实完整落地了"；细节见 §4.2）→ `verifying` → 发事件 → 扫毒通过 → `ready`。
+**数据流说明（一次 50 GB 上传）**：①② 应用查去重表未命中 → 建 `objects` 行（`pending`）+ 发起 multipart upload 拿 `upload_id` → 按 `size` 算出 `part_size=16 MB`、片数 3,200，**只批量签发前 100 个 part URL**（不是一次签 3,200 个）。③④ 客户端 8 并发 PUT，用完 100 个 URL 再要下一批；中断后调 `ListParts` 拿服务端视角、只补缺片。⑤ `complete` 校验片号和服务端返回的 part identifier / ETag（把它当完成协议里的不透明标识，不假设它必然是 MD5）→ 比对存储服务计算的全对象 checksum；若厂商不支持，就由受信任后台读取校验 → `verifying` → 扫毒通过后才 `ready`。
 
 **四条不可动摇的边界**：
 
 1. **字节不经过应用服务器。** 唯一的例外是 < 1 MB 的小文件（省一次 RTT 比省带宽重要），且必须有大小硬上限。
-2. **元数据是唯一的目录真相源（source of truth）。** 绝不用对象存储的 `ListObjects` 当"列目录"—— 它没有二级索引、没有权限过滤、翻页是 token 而不是 offset，且一个大 bucket 上它会慢到不可用。
+2. **应用元数据是目录与权限的真相源（source of truth）。** `ListObjects` 适合存储侧枚举与对账，但它没有应用的二级索引、租户权限和业务状态；即使底层服务能稳定分页列出大 bucket，也不能据此实现产品目录。
 3. **`pending → ready` 之间的对象对任何人不可读。** 扫毒没过的文件能被下载，是一个安全事故，不是一个边缘 case。
 4. **兜底不能只有一条。** 客户端不调 `complete` 是必然发生的（换设备、崩溃、关标签页），所以清理必须**同时**有应用侧（pending 超 24 h 删元数据）和存储侧（lifecycle 规则 abort 未完成分片）两条路。
 
@@ -191,27 +206,27 @@
 
 ## 4. 深挖
 
-### 4.1 · 为什么字节绝对不能流经应用层
+### 4.1 · 为什么大文件默认绕过应用层
 
-**问题**：让客户端把文件 POST 到应用服务器、服务器再转存对象存储，代码最简单（一个 handler 搞定），为什么是"立即出局"的答案？
+**问题**：让客户端把文件 POST 到应用服务器、服务器再流式转存对象存储，代码最直接；在什么规模与约束下它会变成错误默认？
 
 | 方案 | 应用层机器数 | 单文件上限 | 部署耦合 | 失败面 |
 |---|---|---|---|---|
-| **A. 经应用层转发** | 65 台（§2.2） | 受 LB 空闲超时约束（ALB 默认 60 s）→ 5 MB/s 上行下**最大约 300 MB** | 滚动重启打断所有在途上传 | 应用崩溃 = 上传失败；应用扩容跟着带宽走 |
-| **B. 预签名 URL 直传** | 3 台 | 50 TB（[S3 2025-12 起把上限从 5 TB 提到 50 TB](https://aws.amazon.com/about-aws/whats-new/2025/12/amazon-s3-maximum-object-size-50-tb/)） | 完全解耦，重启不影响在途上传 | 元数据与字节可能短暂不一致（§4.3） |
+| **A. 经应用层转发** | 65 台（§2.2 算例） | 由应用、代理与存储 API 的显式限制决定；持续传输不会仅因 idle timeout 到期 | 必须对长连接做 connection draining；宽限期不足才会中断 | 应用/代理故障进入上传路径；应用按带宽与连接数扩展 |
+| **B. 预签名 URL 直传** | 3 台（§2.2 算例） | 受目标对象存储 API 限制；例如 S3 当前上限见[官方公告](https://aws.amazon.com/about-aws/whats-new/2025/12/amazon-s3-maximum-object-size-50-tb/) | 应用部署不承载字节连接，但签名与元数据服务仍影响新上传 | 元数据与字节可能短暂不一致（§4.3） |
 | C. 自建边缘上传节点 | 按带宽算，但节点无状态、可就近 | 同 B | 同 B | 多一套要运维的东西；只有在托管存储的入口延迟不可接受时才值 |
 
-**选 B。** 但真正的论据不是"省带宽费"（§2.2 已说明单价一样），而是这三条：
+**在本案例的大文件与高带宽假设下选 B。** 费用是否下降取决于云厂商、地域、LB/传输处理与 CDN 路径，稳定论据是以下三条：
 
-1. **部署耦合是最贵的那一条，也是最少人说的。** 转发方案下，你每周 20 次部署，每次滚动重启都会掐断当时在途的上传。**上传成功率被绑到了部署频率上** —— 这是一个你永远无法通过"加机器"解决的可用性天花板。
-2. **超时是硬约束，不是调参。** ALB 空闲超时默认 60 s，可调到 4,000 s，但中间还有客户端、CDN、反向代理各自的超时。一个 50 GB 的上传要跑几小时，**没有任何一层 HTTP 基础设施是为它设计的。**
-3. **弹性方向错了。** 转发方案下应用层要按**带宽**扩容；直传后应用层按**请求数**扩容。请求数的峰谷比是 4，带宽的峰谷比是 3 但基数大 4 个数量级 —— 你在为一个和业务逻辑无关的维度买单。
+1. **发布与连接排空成为额外约束。** 转发方案必须让实例停止接新流量后继续服务旧上传，并把 drain 宽限设到可接受的上传时长；做不到才会让发布中断上传。直传把这项责任交给专门的数据面。
+2. **长连接限制要逐层验证。** idle timeout 只在连接一段时间没有字节时触发，不等于 `带宽 × idle timeout` 的文件上限；仍要核对客户端、CDN、LB、应用 server、代理和存储端的 idle/request/body 限制与重试语义。
+3. **弹性方向错了。** 转发方案下应用层要按**带宽**扩容；直传后应用层按**请求数**扩容。请求数的峰均比是 4，带宽的峰均比是 3 但基数大 4 个数量级 —— 你在为一个和业务逻辑无关的维度买单。
 
 > **面试金句**
-> 这题只有一个真正的评分点：**文件字节永远不经过应用服务器**。而理由不是省带宽 —— 出网单价是一样的。理由是：转发方案下应用层要 65 台机器纯搬字节，单文件大小被 LB 超时卡死在几百 MB，而且**每次滚动部署都会掐断在途上传，等于把上传成功率绑在了部署频率上**。预签名直传把应用层降到 3 台，只处理每次上传约 1 KB 的控制消息。分片、断点续传、去重、转码，全是这一个决策的推论。
-> There's exactly one thing being graded here: file bytes must never pass through your application servers. And the reason isn't bandwidth cost — egress is priced the same either way. The reason is that proxying needs sixty-five machines doing nothing but copying bytes, it caps single-file size at a few hundred megs because of load-balancer idle timeouts, and every rolling deploy kills the uploads in flight — so your upload success rate is now coupled to your deploy frequency. Presigned direct upload drops the app tier to three machines handling about a kilobyte of control messages per upload. Multipart, resumability, dedup, transcoding — all of it falls out of that one decision.
+> 本案例的主轴是：**大文件字节默认绕过通用应用层，应用只保留权限、配额和元数据控制面。** 这样把带宽、长连接和发布排空移出业务服务；代价是预签名链接的暴露面、对象与元数据对账，以及厂商协议差异。机器数与费用结论必须跟本案例假设一起说。
+> The main design axis is to keep authorization, quotas, and metadata in the application control plane while large-file bytes go directly to a storage data plane. This removes bandwidth, long-lived connections, and deployment draining from the general-purpose app tier. The tradeoffs are signed-URL exposure, metadata/object reconciliation, and provider-specific semantics; machine counts and pricing must remain attached to the scenario assumptions.
 
-**什么条件下改选 A**：文件恒定 < 1 MB（头像、富文本内嵌图）且要求上传后立即可读 —— 这时多一次 RTT 和一次预签名往返比省下的带宽更贵，直接收进应用层反而对。**但一定要加 `MaxBytesReader` 之类的硬上限**，否则一个 5 GB 的 POST 就能打爆一台机器的内存。
+**什么条件下改选 A**：文件有严格小上限、客户端不支持直传，或必须在接受前做同步协议转换/检查时，应用层代理可能更简单。要使用流式处理、请求体硬上限、背压与连接排空，不能把整个对象读进内存；“上传后立即可读”本身并不排除直传 + complete 协议。
 
 ---
 
@@ -223,18 +238,21 @@
 ① POST /uploads {key,size,sha256} → App: CreateMultipartUpload → upload_id
      objects(status=pending, upload_id, part_size, expected_parts)
 ② App 批量签发 part URL（一次 100 个）
-③ Client 并发 8 路 PUT，每路一片 → 返回 ETag（= 该片内容的 MD5）
+③ Client 并发 8 路 PUT，每路一片 → 保存服务端返回的 part identifier / ETag
+     它是完成请求所需的“不透明标识”；不要把它通用地解释成该片 MD5
      ┌ 断线 ─▶ 重连 ─▶ GET /uploads/{id}/parts ─▶ App 转发 ListParts
      └ 服务端视角的已完成分片列表 ─▶ 只补缺片
 ④ POST /uploads/{id}/complete {parts:[{n,etag}...]}
      └─▶ 校验片数与顺序 → CompleteMultipartUpload
          对象存储服务端拼接（零字节回传，不经过任何人的内存）
-         最终 ETag = md5(concat(每片的 md5)) + "-" + 片数  ← 不是整文件的 md5！
-⑤ 完整性：整文件 sha256 由客户端提供、下载侧抽检；若厂商支持全对象
-   CRC64/SHA256 校验和则优先用它（服务端算，客户端无法伪造）
+         返回最终对象标识；它是否等于某种 MD5 取决于厂商、加密和上传模式
+⑤ 完整性：客户端 sha256 只能表达“期望值”，不能作为可信证明。
+   优先要求存储服务在上传时校验受支持的 CRC/SHA 校验和，并在 complete 后
+   比对服务端返回的全对象校验和；厂商不支持时，由受信任的后台读取并校验后
+   再把 status 从 verifying 改为 ready
 ```
 
-**分片大小怎么选**（对象存储普遍的硬约束：**最多 10,000 片，单片 5 MiB–5 GiB，末片不限**）：
+**分片大小怎么选**（下表采用 [AWS S3 当前 multipart 约束](https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html)作示例：最多 10,000 片、除末片外单片 5 MiB–5 GiB；其他厂商可能不同，落地前查目标服务文档）：
 
 | 分片大小 | 50 GB 的片数 | 单次重传浪费 | 请求费（传完 50 GB） | 客户端内存（8 并发） | 判定 |
 |---|---|---|---|---|---|
@@ -251,7 +269,7 @@ part_size = max( 5 MiB, ceil(object_size / 10000), 单流带宽 × 4 s )
 ```
 2–10 s 这个区间的理由：短于 2 s，每片的 TLS + 签名验证开销占比过高；长于 10 s，重传浪费和进度条粒度都变差。
 
-**断点续传的关键判断**：客户端**可以**缓存已完成的 part 列表省一次调用，但**正确性必须以服务端的 `ListParts` 为准** —— 本地记录会在换设备、清缓存、多端并发时失效。**服务端不需要为断点续传维护任何额外状态**：`upload_id` 本身就是那个状态。
+**断点续传的关键判断**：每次 `UploadPart` 成功后，客户端要持久保存 `(part_number, ETag/part_identifier)`；需要跨设备续传时，就把这份很小的 manifest 分批回传应用元数据层。重连后用分页的 `ListParts` **核验存储侧确实收到哪些片**，再补传缺片；但完成请求仍使用上传时记录的标识，不把一次 listing 当成唯一 manifest。`upload_id` 保存存储侧分片，manifest 保存“按什么顺序、用哪些标识完成”—— 换设备续传要两者，不能声称完全不需要额外状态。AWS S3 也明确要求记录每个 part 的 ETag，并把 listing 只用于验证，见 [multipart upload 文档](https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpuoverview.html)。
 
 **未完成分片的清理 —— 这是本节最强的经验信号**：
 
@@ -266,7 +284,7 @@ part_size = max( 5 MiB, ceil(object_size / 10000), 单流带宽 × 4 s )
 ⇒ 一条 lifecycle 规则，省 $2,000/月，代码量为零。
 ```
 
-**什么条件下不做分片**：文件恒定 < 100 MB 且客户端网络可靠（内网、服务端到服务端）。分片带来的复杂度（并发控制、进度合并、清理规则、失败重组）对小文件是纯负担。多数厂商 SDK 的自动切换阈值就是 **100 MB**，直接用它。
+**什么条件下不做分片**：文件恒定 < 100 MB 且客户端网络可靠（内网、服务端到服务端）。分片带来的复杂度（并发控制、进度合并、清理规则、失败重组）对小文件可能是纯负担。[AWS 建议对象接近 100 MB 时开始考虑 multipart](https://docs.aws.amazon.com/AmazonS3/latest/userguide/qfacts.html)；它是起始假设，不是跨厂商硬阈值，最终按 SDK 配置和失败重传数据调。
 
 ---
 
@@ -281,13 +299,15 @@ CREATE TABLE objects (
   bucket_id BIGINT, key TEXT,            -- key: 'projects/2026/report.pdf'
   version_id BIGINT,                     -- 单调递增；删除写 delete marker 行
   storage_key TEXT,                      -- 物理位置，与用户可见的 key 解耦
-  size BIGINT, content_sha256 BYTEA, etag TEXT,   -- sha256 用于去重与校验
+  size BIGINT, content_sha256 BYTEA, etag TEXT,   -- sha256 用于内容校验；ETag 只作不透明版本/条件请求标识
   storage_class SMALLINT,                -- hot / warm / cold / archive
   status SMALLINT,                       -- pending/verifying/ready/quarantined/deleted
   last_access_at TIMESTAMPTZ,            -- 分层判据，绝不用 created_at
   created_at TIMESTAMPTZ,
-  PRIMARY KEY (bucket_id, key, version_id DESC));
--- 列目录 = 前缀范围扫描，天然走主键，不需要额外索引：
+  PRIMARY KEY (bucket_id, key, version_id));
+CREATE INDEX objects_latest_idx
+  ON objects (bucket_id, key, version_id DESC);
+-- 列目录 = 前缀范围扫描；取最新版时使用上面的降序索引：
 --   WHERE bucket_id = ? AND key >= 'projects/2026/' AND key < 'projects/2026' || chr(255)
 ```
 
@@ -299,7 +319,7 @@ CREATE TABLE objects (
 |---|---|---|---|
 | **字节在、元数据 pending** | 客户端传完最后一片，`complete` 调用失败或用户直接关了页面 | 每日双向对账：存储侧 Inventory（对象存储按日产出的全量对象清单文件，用它代替昂贵的 `ListObjects` 遍历）⨝ `objects` | `pending` 超 24 h → 删元数据 + abort multipart；**同时**存储侧 lifecycle 兜底 |
 | **元数据 ready、字节不在** | 生命周期规则误配、人为误删、跨 region 复制未完成 | 同上，反向差集 | 标记 `corrupted` + 告警 + 从版本/副本恢复。**绝不静默返回 404** |
-| **覆盖写后 CDN 还是旧内容** | 同 key 覆盖 + CDN 已缓存 | 覆盖后 CDN 返回内容的 hash ≠ 元数据 `etag` | **根本解：key 里带内容哈希，让"覆盖"变成"写新 key"**；退一步用 surrogate key（代理键：给一批 URL 打上同一个缓存标签，之后按标签一次性失效，不用逐个 URL purge）定点 purge |
+| **覆盖写后 CDN 还是旧内容** | 同 key 覆盖 + CDN 已缓存 | 比较响应中的应用版本标记与元数据 `version_id`；抽样下载时可计算正文 SHA-256 并与 `content_sha256` 比较。**不要把 ETag 当内容哈希** | **根本解：key 里带内容哈希，让“覆盖”变成“写新 key”**；退一步用 surrogate key（代理键：给一批 URL 打上同一个缓存标签，之后按标签一次性失效，不用逐个 URL purge）定点 purge |
 
 #### 覆盖写与并发
 
@@ -447,17 +467,17 @@ Range: bytes=0-8388607  →  206 Partial Content + Content-Range: bytes 0-838860
 
 | 场景 | TTL | 必须绑定的条件 | 理由 |
 |---|---|---|---|
-| 单 PUT 上传 | 15 min | 精确 key、`content-length-range`、`content-type` | 弱网重试要留余量；不绑 length 用户能传 5 TB |
+| 单 PUT 上传 | 15 min | 精确 key、`content-type`、厂商支持时签入 `Content-Length` / checksum | 弱网重试要留余量；不支持签入长度时，完成后用 HEAD 校验并隔离/删除超限对象。`content-length-range` 是 POST policy 条件，不是通用 PUT 参数 |
 | multipart 的 part | 1 h，**每批签 100 个** | key + `upload_id` + `partNumber` | 大文件传得久；一次签 6,400 个是把整个对象的写权限一次性交出去 |
 | 应用内下载 | **5 min** | 精确 key、`response-content-disposition` | URL 会进浏览器历史、Referer 头、日志、客服截图 |
 | **可撤销的分享链接** | 见下 | — | **不能用裸预签名 URL** |
 
-> **预签名 URL 一旦签发就无法撤销。** 能撤销它的只有三件事：删对象、改 bucket policy、轮换签名密钥 —— 三个都是核弹级操作。
+> **预签名 URL 通常没有“只撤销这一条 URL”的即时开关。** 删除/改名对象、修改访问策略、撤销或轮换凭证等手段可能让它提前失效，但影响范围大，而且不同厂商语义不同。
 > ⇒ 任何"可以随时取消的分享链接"必须走**你自己的重定向端点**：
 > `GET /share/{token}` → 查 token 是否被撤销 / 过期 / 配额用完 → `302` 到一个 **30 秒**的签名 URL。
 > 这多了一跳（约 30 ms），换来的是可撤销、可审计、可限速、可统计。**这是本节最容易被忽略的设计点。**
 
-⚠ **一个会当场被追问的实现细节**：SigV4 预签名的理论上限是 7 天，但**签名活不过签它的凭证**。生产上应用跑在 IAM role 上，临时凭证默认 1–12 小时 —— 所以"我签了 7 天"的 URL 会在几小时后开始返回 `ExpiredToken`。这也说明**长有效期本来就不该用**：TTL 短是安全要求，凭证寿命只是顺手替你兜住了。
+⚠ **一个会当场被追问的实现细节**：AWS SDK/CLI 用 SigV4 生成的预签名 URL 最长可设 7 天，但**签名活不过签它的凭证**。角色或 STS 临时凭证可能更早到期，所以“配置了 7 天”不等于一定可用 7 天；具体会话寿命由凭证来源与配置决定，不能笼统背成 1–12 小时。见 [AWS 预签名 URL 文档](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html)。长分享仍应走自己的短签名重定向端点。
 
 **防盗链（hotlink protection）按有效性排序**：Referer 白名单最弱（可伪造），只挡住浏览器里的 `<img>` 直接嵌入，成本为零所以仍值得开；绑定客户端 IP 中等，但**移动网络切换 IP 会误杀**，只适合固定出口；**默认方案是短 TTL 签名 + 每 token 下载配额 + 异常检测**（信号：同一 token 5 分钟内出现在 20 个 IP）。
 
@@ -471,10 +491,10 @@ Range: bytes=0-8388607  →  206 Partial Content + Content-Range: bytes 0-838860
 |---|---|---|---|
 | **未完成 multipart 堆积** | 每年 91 TB 的幽灵账单，且在对象列表里**完全不可见** | `ListMultipartUploads` 计数 / Storage Lens 的 incomplete-MPU 字节数 | 配 `AbortIncompleteMultipartUpload` 7 天规则；存量用批量 abort 脚本一次性清 |
 | **`complete` 调用丢失 → 孤儿对象** | 字节已计费，用户看不到，元数据无记录 | 每日双向对账：Inventory ⨝ `objects` 的两个方向差集 | 有对象无元数据 → lifecycle 清；有元数据无对象 → 标 `corrupted` + 告警，**绝不静默 404** |
-| **单前缀 QPS 超限**（约 3,500 PUT/s、5,500 GET/s 每分区前缀） | `503 SlowDown`，批量上传成片失败 | 503 率 > 0.1% | key 加 hash 前缀打散；客户端 full jitter 退避（重试间隔在 `[0, 上限]` 里取随机值，否则所有客户端的重试时刻仍会对齐成第二波洪峰，见 [`03-resilience-patterns.md`](../05-reliability/03-resilience-patterns.md) §3）；大批量任务提前分散前缀 |
-| **预签名 URL 泄漏** | 私有对象被公开下载，且**无法撤销** | 同一签名出现在多个 IP；单对象下载量突增 | TTL 压到分钟级；分享链接改走可撤销 token 端点；按 signature 聚合访问日志告警 |
+| **少量前缀/对象上的持续高 QPS**（AWS 建议超过约 3,500 写或 5,500 读请求/s/前缀时主动设计扩展；服务会自动扩展但并非瞬时） | 扩展期间可能出现 `503 SlowDown`，批量上传成片失败 | 503 率 > 0.1% | 先并行连接、渐进升流和 full jitter；确需更高吞吐时再按访问模式分散前缀，而不是机械给所有 key 加随机前缀。见 [AWS 性能设计模式](https://docs.aws.amazon.com/AmazonS3/latest/userguide/optimizing-performance-design-patterns.html) |
+| **预签名 URL 泄漏** | 私有对象在 TTL 内可被持有者下载，通常无法只撤销这一条 URL | 同一签名出现在多个 IP；单对象下载量突增 | TTL 压到分钟级；分享链接改走可撤销 token 端点；紧急时按厂商能力删/改对象或策略，并评估影响范围；按 signature 聚合访问日志告警 |
 | **生命周期规则误配** | 热数据被降到 Deep Archive，用户点下载等 12 小时；批量取回 $20/TB | 规则生效后 24 h 内 restore 请求数突增 | 规则上线前用 Inventory 做 dry-run；判据只用 `last_access_at`；新规则先在单个 bucket 灰度 |
-| **CDN 缓存旧版本** | 覆盖写后用户看到旧文件，"刷新也没用" | CDN 返回内容 hash ≠ 元数据 `etag` | 根本解：内容寻址 key（§4.3）；过渡期用 surrogate key 定点 purge |
+| **CDN 缓存旧版本** | 覆盖写后用户看到旧文件，“刷新也没用” | 响应应用版本标记 ≠ 元数据 `version_id`；或抽样正文 SHA-256 ≠ `content_sha256`。ETag 不作通用内容哈希 | 根本解：内容寻址 key（§4.3）；过渡期用 surrogate key 定点 purge |
 | **扫毒 / 转码管道积压** | 对象长期停在 `verifying`，用户看到"处理中" | 队列 lag > 5 min | 按文件大小分优先级队列（小文件走快车道）；超时后标记"未扫描"并限制分享 |
 | **元数据主库故障** | 连预签名 URL 都签不出来 = 上传下载全停 | 主库连接失败率 | **下载路径必须能只靠只读副本活着**（换 URL 只需读）；上传返回 503 + `Retry-After`。客户端侧的对偶故障是大对象 OOM ⇒ SDK 强制流式 + 服务端在 `create` 响应里下发建议的 `part_size` 与并发度 |
 
@@ -524,8 +544,8 @@ v2 —— 本文：生命周期分层（按 last_access_at）+ 元数据按 buck
 
 | ❌ mid-level 会怎么答 | 为什么掉分 | ✅ 正确的说法 |
 |---|---|---|
-| **"客户端上传到应用服务器，服务器再转存对象存储"** | 本题唯一的"立即出局"错误。65 台机器纯搬字节、单文件被 LB 超时卡在几百 MB、每次部署掐断在途上传 | "字节走预签名 URL 直传，应用层只处理每次约 1 KB 的控制消息。代价是元数据和字节会短暂不一致，我用 pending 状态 + 存储侧 lifecycle 两条路兜底。" |
-| **"大文件一次 PUT 传完，失败就重试"** | 50 GB 网络抖一次就从头再来；且 LB 空闲超时（默认 60 s）会直接杀掉连接 | "> 100 MB 走分片，8–16 MB 一片，8 并发，断线后调 `ListParts` 拿服务端视角只补缺片。片大小的规则是让单片传输时长落在 2–10 s。" |
+| **"不问大小和约束，所有文件都先传应用服务器"** | 大文件让通用应用按带宽和长连接扩展，还要承担逐层限制与发布排空；算例中的 65 台不是通用常数 | "本案例让大文件走预签名直传，应用层只处理控制消息。代价是链接暴露与元数据/字节短暂不一致，我用短 TTL、显式状态、校验与 lifecycle 收敛。" |
+| **"大文件一次 PUT 传完，失败就重试"** | 50 GB 网络抖动后通常要重传整对象，恢复粒度太粗；若路径经过代理，还要逐层验证 timeout，而不是把 idle timeout 当固定大小上限 | "大文件按目标存储的 part 数、吞吐和重试成本选分片与并发；断线后核验服务端已收分片，只补缺片。8–16 MB / 8 并发是本案例起点，不是协议定律。" |
 | **"上传完成由客户端调 complete 接口标记 ready"** | 客户端**一定**会不调（换设备、崩溃、关标签页）。只有一条路径的兜底等于没有兜底 | "客户端调 complete 是快路径；同时应用侧清理 pending 超 24 h 的元数据，存储侧配 7 天 abort 规则。**两条兜底，缺一条就是每年 91 TB 的幽灵账单。**" |
 | **"元数据就存在对象存储里，列目录用 ListObjects"** | 没有二级索引、没有权限过滤、翻页是 continuation token 不是 offset、大 bucket 上慢到不可用 | "元数据是一个 QPS 高 50 倍、数据量小 10,000 倍、需要强一致和范围扫描的系统 —— 它和字节的形状完全相反，必须是两个存储。" |
 
@@ -535,13 +555,13 @@ v2 —— 本文：生命周期分层（按 last_access_at）+ 元数据按 buck
 
 | 这题用到的构件 | 章节 |
 |---|---|
-| 出网流量成本、CDN、边缘、Anycast | [`01-building-blocks/04-networking-and-edge.md §6–7`](../01-building-blocks/04-networking-and-edge.md) |
-| 对象存储作为"数据库"、条件写、存算分离、首字节延迟 | [`01-building-blocks/01-storage-engines.md §7`](../01-building-blocks/01-storage-engines.md) |
+| 出网流量成本、CDN、边缘、Anycast | [`01-building-blocks/04-networking-and-edge.md §6–7`](../01-building-blocks/04-networking-and-edge.md#6-anycast多区域与边缘) |
+| 对象存储作为"数据库"、条件写、存算分离、首字节延迟 | [`01-building-blocks/01-storage-engines.md §7`](../01-building-blocks/01-storage-engines.md#7-对象存储被低估的数据库) |
 | CDN 缓存键、失效级联、serve stale | [`01-building-blocks/02-caching.md`](../01-building-blocks/02-caching.md) |
-| Little's Law、峰谷比、成本建模 | [`00-foundations/02-capacity-estimation.md §1、§3、§6`](../00-foundations/02-capacity-estimation.md)；可逆性与单向门见 [`03-tradeoff-framework.md`](../00-foundations/03-tradeoff-framework.md) |
-| `object_created` 事件、小文件问题、双向对账 | [`02-architecture-patterns/02-event-driven-and-cqrs.md`](../02-architecture-patterns/02-event-driven-and-cqrs.md)、[`05-data-platform.md §2`](../02-architecture-patterns/05-data-platform.md) |
+| Little's Law、峰均比、成本建模 | [`00-foundations/02-capacity-estimation.md §1、§3、§6`](../00-foundations/02-capacity-estimation.md#1-估算的黄金流程)；可逆性与单向门见 [`03-tradeoff-framework.md`](../00-foundations/03-tradeoff-framework.md) |
+| `object_created` 事件、小文件问题、双向对账 | [`02-architecture-patterns/02-event-driven-and-cqrs.md`](../02-architecture-patterns/02-event-driven-and-cqrs.md)、[`05-data-platform.md §2`](../02-architecture-patterns/05-data-platform.md#2-lakehouse-表格式核心机制) |
 | 加密粉碎、数据驻留、分享链接的授权模型 | [`03-saas-platform/04-isolation-and-compliance.md`](../03-saas-platform/04-isolation-and-compliance.md)、[`03-identity-and-authz.md`](../03-saas-platform/03-identity-and-authz.md) |
-| 超时、重试放大、full jitter、优雅降级、症状告警 | [`05-reliability/03-resilience-patterns.md §2–3、§7`](../05-reliability/03-resilience-patterns.md)、[`02-observability.md`](../05-reliability/02-observability.md) |
+| 超时、重试放大、full jitter、优雅降级、症状告警 | [`05-reliability/03-resilience-patterns.md §2–3、§7`](../05-reliability/03-resilience-patterns.md#2-超时预算timeout-budget与-deadline-传播)、[`02-observability.md`](../05-reliability/02-observability.md) |
 | 本题的压缩版 | [`06-case-studies/07-classic-canon.md` 第 10 题](07-classic-canon.md) |
 
 ---
@@ -571,4 +591,6 @@ v2 —— 本文：生命周期分层（按 last_access_at）+ 元数据按 buck
 
 ---
 
-**下一篇** → [18-model-serving-platform.md](18-model-serving-platform.md)：把 ML 系统那一章合成一道完整的设计题。
+**目录下一篇（ML 系统专项）** → [18-model-serving-platform.md](18-model-serving-platform.md)：负责模型平台时，再把 ML 系统章节合成一道完整设计题。
+
+**通用 Full Stack 主学习链下一步** → [07/01 面试框架](../07-interview/01-interview-framework.md)，随后按 [PRACTICE.md](../PRACTICE.md) 选择下一道计时练习。

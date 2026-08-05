@@ -29,13 +29,13 @@
 
 | 概念 | 一句话 | 详见 |
 |---|---|---|
-| 一个请求的旅程 | 从客户端点击到数据库再返回，中间经过哪些跳 | [00-concepts §1](00-concepts.md) |
-| 延迟 / 吞吐 / 并发 | 延迟是单次耗时，吞吐是单位时间处理量，并发数把两者连起来 | [00-concepts §2](00-concepts.md) |
-| 分位数 p50/p99 | 描述的是分布的形状；平均值会骗人，尾部才决定体验 | [00-concepts §3](00-concepts.md) |
-| 副本 / 分片 | 同一份数据存多份 vs. 把数据切成多份 | [00-concepts §5](00-concepts.md) |
-| 一致性 | 有多个副本时，"我读到的是不是最新的" | [00-concepts §6](00-concepts.md) |
-| 同步 / 异步 | 调用方是否原地等结果 | [00-concepts §8](00-concepts.md) |
-| 可用性 | 几个 9 分别对应全年多长的停机时间 | [00-concepts §10](00-concepts.md) |
+| 一个请求的旅程 | 从客户端点击到数据库再返回，中间经过哪些跳 | [00-concepts §1](00-concepts.md#1-一个请求到底经历了什么) |
+| 延迟 / 吞吐 / 并发 | 延迟是单次耗时，吞吐是单位时间处理量，并发数把两者连起来 | [00-concepts §2](00-concepts.md#2-延迟吞吐并发--三个最常被混淆的词) |
+| 分位数 p50/p99 | 描述的是分布的形状；平均值会骗人，尾部才决定体验 | [00-concepts §3](00-concepts.md#3-为什么平均值是骗人的p50--p90--p99) |
+| 副本 / 分片 | 同一份数据存多份 vs. 把数据切成多份 | [00-concepts §5](00-concepts.md#5-副本分片分区--三个被混用的词) |
+| 一致性 | 有多个副本时，"我读到的是不是最新的" | [00-concepts §6](00-concepts.md#6-什么是一致性--一个词两种完全不同的意思) |
+| 同步 / 异步 | 调用方是否原地等结果 | [00-concepts §8](00-concepts.md#8-同步--异步--阻塞--非阻塞) |
+| 可用性 | 几个 9 分别对应全年多长的停机时间 | [00-concepts §10](00-concepts.md#10-可用性几个-9-是什么意思) |
 
 **这一章要回答的问题**
 
@@ -54,7 +54,7 @@
 | CAP | Consistency / Availability / Partition tolerance | 网络分区发生时，强一致与每个请求都成功响应不能同时保证 |
 | PACELC | PACELC | 网络断开、机器分成互相通不了的两拨时（Partition），你只能在"两拨都继续接客但数据可能不一致"和"停掉一拨保住一致"之间选一个；网络正常时（Else），你还要在"少等一个跨机房往返"和"读到的一定是最新值"之间选一个 |
 | 写偏斜 | write skew | 两个事务各自只看见自己开始那一刻的数据副本（快照隔离），于是各自读到的都是合法状态、各自的提交也都合法，合在一起却破坏了某条规则（例如"至少留一个人值班"被两个人同时请假绕过） |
-| 幂等键 | idempotency key | 客户端生成、服务端去重的请求标识，让重试不产生第二次副作用 |
+| 幂等键 | idempotency key | 标识同一个逻辑操作、由服务端去重的稳定键；可由客户端或可信上游生成并跨重试复用 |
 | 背压 | backpressure | 处理不过来时向上游反向施压（拒绝/阻塞），而不是无限排队 |
 | 对冲请求 | hedged request | 超过 p95 还没返回就向另一副本补发一份，取先到的 |
 | 灰色故障 | gray failure | 节点健康检查通过、实际能力已严重退化的"半死不活"状态 |
@@ -254,7 +254,7 @@ else (Else):     choose L(atency) or C(onsistency)
 | MongoDB replica set | 取决于 read concern + write concern | `w: majority` 主要描述写确认和持久性，不自动让默认 `local` 读取变成线性一致 |
 | Redis 主从异步复制 | PA/EL | 是否可能丢失已确认写取决于确认与持久化配置，不能只看“用了 Redis” |
 
-> **QUORUM / majority（法定多数）是什么**：在最简化的 N 副本模型里，写等 W 份确认、读问 R 份；只要 `W + R > N`，读集合和最近一次成功写入的集合就至少重叠一个副本。
+> **Quorum（法定人数）与 majority（多数派）是什么**：quorum 是协议规定的、足以推进某一步的集合或阈值；majority 是 `> N/2` 的一种常见 quorum。在最简化且成员集合固定的 N 副本读写模型里，写等 W 份确认、读问 R 份；只要 `W + R > N`，读集合和最近一次成功写入的集合就至少重叠一个副本。
 > 但“集合有交集”不自动等于线性一致。系统还必须正确识别更新版本、处理并发写和冲突，并保证实际读写遵守这套 quorum 模型。Cassandra 的 consistency level、MongoDB 的 write concern 和共识协议里的多数派在细节上也不能完全画等号。完整推导见 [`01/05`](../01-building-blocks/05-consensus-and-coordination.md)。
 
 **可复用的回答模板**：
@@ -289,7 +289,7 @@ Eventual (最终一致)
 Serializable > Snapshot Isolation > Read Committed > Read Uncommitted
 ```
 
-**Snapshot Isolation（SI，快照隔离）**可以先理解为：事务第一次建立快照后，普通一致性读取持续看同一张快照，并发事务后来的提交不进入这张快照；具体建立快照的时点、锁定读和冲突规则由数据库实现决定。PostgreSQL 的 `REPEATABLE READ` 使用 SI 思路，但不能据此假设所有数据库里 `REPEATABLE READ` 与 SI 完全等价。详见 [00-concepts §7](00-concepts.md)。
+**Snapshot Isolation（SI，快照隔离）**可以先理解为：事务第一次建立快照后，普通一致性读取持续看同一张快照，并发事务后来的提交不进入这张快照；具体建立快照的时点、锁定读和冲突规则由数据库实现决定。PostgreSQL 的 `REPEATABLE READ` 使用 SI 思路，但不能据此假设所有数据库里 `REPEATABLE READ` 与 SI 完全等价。详见 [00-concepts §7](00-concepts.md#7-事务与隔离级别)。
 
 ⚠️ 常见陷阱：**Snapshot Isolation ≠ Serializable**。SI 允许 **写偏斜（write skew）**：
 > 医院要求"至少一名医生值班"。Alice 和 Bob 同时读到"有 2 名医生在班"，各自请假。两个事务在 SI 下都提交成功，结果 0 名医生值班。
@@ -394,7 +394,7 @@ stateDiagram-v2
 
 这里最危险的误解是“租约过期 = 旧 worker 已死”。旧 worker 可能只是暂停，恢复后仍会继续写；新 worker 接管时必须使用单调递增的 **fencing token**，或让外部系统接受同一个业务幂等键并返回第一次结果。对于“请求可能已经成功但暂时查不到结果”的 `Uncertain` 状态，应该先对账，不能直接重复副作用。
 
-### 幂等的三种实现层次
+### 幂等的四种实现机制
 
 | 层次 | 做法 | 适用 |
 |---|---|---|
@@ -579,4 +579,6 @@ sleep = random.uniform(0, min(cap, base * 2 ** attempt))
 
 ---
 
-**下一篇** → [02-capacity-estimation.md](02-capacity-estimation.md)：把这些数字变成可以论证的估算。
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**目录顺读下一篇** → [02-capacity-estimation.md](02-capacity-estimation.md)：把这些数字变成可以论证的估算。

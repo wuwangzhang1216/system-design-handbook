@@ -7,6 +7,8 @@
 
 ## 读这道题之前
 
+> **阅读层级与时间口径**：full-stack 读者先抓住“按租户规模分档、过滤必须进入检索、写入靠不可变段、版本迁移不能混查”四件事；ANN 参数和厂商能力是进阶内容。硬件吞吐、云价与产品 limits 是截至 **2026-08** 的量级示例，必须用自己的向量分布与官方文档复核。
+
 🔶 **这道题属于 AI 岗方向**：通用 full-stack / 后端面试路径（[README 路径 A / B](../README.md#学习路径)）可以整题跳过 —— 判断依据和 [`04-ai-agent-systems/`](../04-ai-agent-systems/) 一致：JD 里出现「LLM / Agent / 推理 / RAG / GPU」中任意一个词，它才从"可跳过"变成"面试官的主场"（路径 C）。
 
 **如果你是直接翻到这道题的**：这题是一道披着 ANN 外衣的多租户存储题。答不出第 1 题，你会拿均值去做容量规划，然后正文里"长尾"这个词从头到尾都落不了地 —— 案例篇不再解释构件。
@@ -14,11 +16,11 @@
 **先确认你能回答这三个问题**
 
 1. 重尾（heavy-tailed）分布下，"平均每租户 5.6 万向量"这个均值为什么完全不能用来做容量规划？p50、均值、p99 在这里各自意味着什么？
-   答不出 → 先读 [00-concepts §3 p50 / p90 / p99](../00-foundations/00-concepts.md)、[02-capacity-estimation §7 估算中最常见的 6 个错误](../00-foundations/02-capacity-estimation.md)
+   答不出 → 先读 [00-concepts §3 p50 / p90 / p99](../00-foundations/00-concepts.md#3-为什么平均值是骗人的p50--p90--p99)、[02-capacity-estimation §7 估算中最常见的 6 个错误](../00-foundations/02-capacity-estimation.md#7-估算中最常见的-6-个错误)
 2. 多租户的四种隔离级别分别是什么？"共享一张表 + 查询里带 tenant_id"这一档，在向量检索里为什么比在 OLTP 里危险得多？
-   答不出 → 先读 [03-multi-tenancy §1 四种隔离级别](../02-architecture-patterns/03-multi-tenancy.md)、[§9 AI 场景的多租户新问题](../02-architecture-patterns/03-multi-tenancy.md)
+   答不出 → 先读 [03-multi-tenancy §1 四种隔离级别](../02-architecture-patterns/03-multi-tenancy.md#1-四种隔离级别)、[§9 AI 场景的多租户新问题](../02-architecture-patterns/03-multi-tenancy.md#9-专项选读ai-场景的多租户问题)
 3. HNSW 的内存占用由哪几个参数决定？RAG 链路里召回（recall）和 rerank 各在补什么？没有 ground truth 的时候，你凭什么调这两个旋钮？
-   答不出 → 先读 [01-storage-engines §6 向量索引](../01-building-blocks/01-storage-engines.md)、[02-context-engineering-and-rag §5 检索流水线](../04-ai-agent-systems/02-context-engineering-and-rag.md)、[§12 检索评测](../04-ai-agent-systems/02-context-engineering-and-rag.md)
+   答不出 → 先读 [01-storage-engines §6 向量索引](../01-building-blocks/01-storage-engines.md#6-专项选读向量索引)、[02-context-engineering-and-rag §5 检索流水线](../04-ai-agent-systems/02-context-engineering-and-rag.md#5-检索流水线全景)、[§12 检索评测](../04-ai-agent-systems/02-context-engineering-and-rag.md#12-检索评测分层归因否则你在调错东西)
 
 **这道题会用到的构件**
 
@@ -70,7 +72,7 @@
 
 ### 内存账（决定一切）
 
-按 [`01-building-blocks/01-storage-engines.md`](../01-building-blocks/01-storage-engines.md) 的公式，HNSW 每向量内存 ≈ `d × 4 + M × 2 × 4` 字节：
+先用下界做容量级别判断：向量本体约 `d × bytes_per_component`，底层邻接边粗估 `M × 2 × 4` 字节。真实 HNSW 还包括上层图、ID/payload、对齐和分配器开销，因此表中不是采购数字，最终必须以目标引擎的实测 bytes/vector 为准：
 
 | 方案 | 每向量 | 56 亿向量总量 | 月成本（内存 ≈ $6/GB，2026 年中量级，随时变动） |
 |---|---|---|---|
@@ -79,7 +81,7 @@
 | 512 维 **int8** 量化，M=16 | 640 B | **3.6 TB** | ≈ $22,000 |
 | 512 维 **binary**（1 bit/维）+ 原向量 rerank | 192 B | 1.07 TB | ≈ $6,600 |
 
-Matryoshka（MRL）截断到 256–512 维通常只损 **2–3%** 精度、存储降 4×（2026 量级）；int8 标量量化（scalar quantization）再降 4×，配 top-100 用全精度向量重排（rerank）可把损失基本补回。
+对支持 Matryoshka 表示的模型，截断到 256–512 维可能显著降存储；精度损失取决于模型、语料和指标，不能把“2–3%”当通则。int8 标量量化可再降向量本体大小，候选集用全精度向量重排常能补回一部分召回，但仍要在租户自己的 ground truth 上测。
 
 > **面试金句**
 > "在 56 亿向量这个量级上，索引结构的选择远不如**每向量字节数**重要。1536 维 float32 到 512 维 int8 是 10× 的成本差，而召回只掉 2–3 个百分点 —— 前者决定我要不要建这个系统，后者可以用重排补回来。所以我的第一个设计决策是量化方案，第二个才是索引类型。"
@@ -114,7 +116,7 @@ Matryoshka（MRL）截断到 256–512 维通常只损 **2–3%** 精度、存�
 **四个不可动摇的边界**：
 
 1. **控制面不进关键路径**。路由表在数据面缓存；控制面挂了，已知租户继续可查，只是新租户开不了。
-2. **对象存储是唯一真相**。搜索节点是可丢弃的缓存，重建靠拉段而不是重建索引。
+2. **持久真相由三部分组成**：已 seal 的对象存储段、尚未 seal 的复制写入日志，以及带版本的 manifest/墓碑。搜索节点是可丢弃缓存；只保留对象段却丢了日志或 manifest，最近写入仍会丢或不可见。
 3. **段（segment）不可变（immutable）**。写入 = 追加新段；删除 = 墓碑位图（tombstone bitmap）；更新 = 删 + 插。这与 LSM 完全同构（见 `../01-building-blocks/01-storage-engines.md`）。
 4. **tenant_id 只能来自认证凭据**，绝不接受请求体参数。见 §7。
 
@@ -126,16 +128,16 @@ Matryoshka（MRL）截断到 256–512 维通常只损 **2–3%** 精度、存�
 
 | 范式 | 做法 | 优点 | 撞墙条件 |
 |---|---|---|---|
-| **A. 每租户独立索引**（silo） | 一个租户一个 HNSW/collection | 过滤退化成"选哪个索引"，ANN 质量不受影响；删租户 = 删文件 | **索引对象数爆炸**。10 万个索引 × 固定开销（fixed overhead）2–10 MB（图头、ID 映射、arena、后台线程）= **200 GB–1 TB 纯开销**，超过微型租户向量本身（量化后仅 ~170 GB） |
+| **A. 每租户独立索引**（silo） | 一个租户一个 HNSW/collection | 过滤退化成"选哪个索引"，ANN 质量不受影响；删租户边界清晰 | **索引对象数爆炸**。若目标实现每索引固定开销实测为 2–10 MB，10 万个就是 **200 GB–1 TB**；此外还有调度、文件和后台任务开销。这个范围是示例，不是所有引擎的常量 |
 | **B. 共享索引 + 过滤**（pool） | 全库一个大索引，`tenant_id` 作 payload 过滤 | 索引对象少，内存利用率高，小租户零固定成本 | **过滤选择性（filter selectivity）极低时 ANN 退化**。一个 3,000 向量的租户占全库 0.00005%，图遍历几乎每一步都被过滤掉，`ef_search` 要开到几千才能凑够 top-10 |
-| **C. 分组共享**（bridge，正解） | 小租户合并进"多租户合并段"，段内**按 tenant 分组建图**；大租户独立段 | 兼得两端 | 分组边界要跟着租户成长动态迁移，需要控制面协调 |
+| **C. 分组共享**（bridge，本文选择） | 小租户合并进"多租户合并段"，段内**按 tenant 分组建图**；大租户独立段 | 兼顾两端 | 分组边界要跟着租户成长动态迁移，需要控制面协调 |
 
 ### 为什么 post-filter 在多租户里是错的
 
 ```
 全库 56 亿向量 → ANN 取 top-1000 → WHERE tenant_id='acme' → 剩 0 条
 ```
-`acme` 的 3,000 个向量出现在全局 top-1000 里的概率约 `3000/5.6e9 × 1000 ≈ 5×10⁻⁴`。
+若暂用“排名与租户均匀独立”这个玩具模型，`acme` 的 3,000 个向量出现在全局 top-1000 里的期望条数约 `3000/5.6e9 × 1000 ≈ 5×10⁻⁴`；真实 embedding 分布并不均匀，但数量级足以说明全局 post-filter 没有召回保证。
 **post-filter 在多租户场景下不是"慢"，是"返回空结果"**。这条必须能脱口而出。
 
 ### 正确做法：过滤感知 + 租户物理分组
@@ -150,13 +152,13 @@ Matryoshka（MRL）截断到 256–512 维通常只损 **2–3%** 精度、存�
 - **Qdrant**：`tenant_id` 建 payload index 并标记为租户键（[多租户指南](https://qdrant.tech/documentation/guides/multiple-partitions/)），使同租户点在存储上聚簇（co-locate）；`hnsw_config.payload_m` 为分组单独建边，`full_scan_threshold` 控制"候选集小于阈值就直接暴力扫"的切换点。
 - **Weaviate**：[原生 multi-tenancy](https://docs.weaviate.io/weaviate/manage-collections/multi-tenancy)，每 tenant 一个 shard，支持 `ACTIVE/INACTIVE/OFFLOADED` 三态 —— 这直接是 §5 的冷热分层原语。
 - **Pinecone**：namespace，**每次查询只能命中一个 namespace**。
-- **pgvector**：RLS + `tenant_id`，只适合几十到几百租户量级。
+- **pgvector**：RLS + `tenant_id` 是较小规模、已有 Postgres 团队的简单起点；能服务多少租户取决于总行数、过滤选择性、索引/分区设计和 SLO，不能按“几十到几百租户”一刀切。
 
 > ⚠️ 各类 2026 年对比文里的"Pinecone 10 万 namespace / Cloudflare Vectorize 5 万 namespace"之类的上限**未经一手核实且厂商在改**。**namespace 数量爆炸是多租户向量库最常见的翻车点**，选型评审必须把这一条列为阻塞项（blocker）。
 
 ### 被忽略的最优解：微型租户根本不需要 ANN
 
-3,000 个 512 维 int8 向量 = **1.5 MB**。SIMD 暴力（brute-force）点积 ≈ 150 万次乘加，单核 **< 1 ms**，且 `Recall = 1.0`。
+3,000 个 512 维 int8 向量的本体约 **1.5 MB**，一次全扫约 150 万个分量运算；优化良好的 SIMD 实现可能做到毫秒级，并且相对该向量集合的精确 top-k，`Recall = 1.0`。Python 循环、payload 过滤和远程 IO 不在这个估算里，阈值必须按实际实现压测。
 
 ```
 if tenant.vector_count <= FLAT_THRESHOLD:   # 经验取 10,000–50,000
@@ -165,7 +167,7 @@ else:
     return hnsw_search(segment, q, k, ef_search)
 ```
 
-**90% 的租户走这一条分支。** 它们不需要 HNSW 图（省 40% 内存）、不需要 compaction、不需要 ef 调参、删除立即生效。
+按本文分布，最多约 90% 的微型租户可走这一条分支。它们不需要 HNSW 图和 `ef_search` 调参；但只要仍采用不可变段 + 墓碑，就仍可能需要段合并，不能笼统说“无需 compaction”。
 把 `FLAT_THRESHOLD` 当成一个可调的产品参数，随硬件（SIMD 宽度、内存带宽）上调。
 
 ---
@@ -188,9 +190,11 @@ else:
 ```
 段大小 = 向量数 × 640 B
   3,000 向量  →   1.9 MB → S3 GET ~30 ms + mmap ~10 ms  ≈  50 ms
- 60,000 向量  →    38 MB → 单流 ~90 MB/s → ~420 ms；8 路并行 → ~120 ms
-200 万向量    →   1.3 GB → 必须分片并行拉，16 路 → ~1.5 s（这类租户不该被卸载）
+ 60,000 向量  →    38 MB → 若有效吞吐 ~90 MB/s，传输下界约 420 ms
+200 万向量    →   1.3 GB → 需要预分片/范围读并行；总时延由带宽、请求开销和解压共同决定
 ```
+
+并行数不能直接除在单对象时延上：只有对象预分片或可靠的 range GET 才有并行收益，而且会受节点总带宽限制。表里的首查延迟是待压测假设，不是 S3 的保证。
 
 **卸载策略（offload policy）**：只卸载"向量数 < 20 万 且 连续 7 天无查询"的租户。大租户永不卸载 —— 卸载它们省下的钱远小于把 p95 打成 2 秒的代价。
 
@@ -205,9 +209,9 @@ else:
 ### 预热（warm-up）与惊群（thundering herd）
 
 - **可预测的预热**：按租户的历史活跃时段 + 本地时区，在工作日 08:45 批量拉起。命中率提升的收益远高于预热成本。
-- **惊群防护**：搜索节点全量重启后，所有租户同时打 S3。S3 单前缀约 **5,500 GET/s**，且你会被限流成雪崩。
+- **惊群防护**：搜索节点全量重启后，所有租户同时回源对象存储；连接、节点带宽、KMS、对象存储限流中的任一项都可能成为瓶颈。不要把某个历史“每前缀 GET/s”数字当永久硬上限，应以当前官方说明、配额和压测为准。
   对策与 `../01-building-blocks/02-caching.md` 里的"回源（origin fetch）限流"完全同构：
-  1. 段路径前缀**散列打散（spread / shard the key）**（`s3://idx/{hash(tenant)[:2]}/{tenant}/{seg}`）
+  1. 只有在目标对象存储/当前配额确实存在前缀热点时才散列 key；现代 S3 会自动扩展分区，盲目打散反而降低可运维性
   2. 加载路径加**信号量（semaphore）**（如单机 32 并发），超出的查询排队并返回 `Retry-After`
   3. 同段的并发加载做 **single-flight** 合并
   4. 节点重启走**滚动重启（rolling restart）+ 预热探针**，预热未完成不进 LB
@@ -218,7 +222,7 @@ else:
 
 ### 增量插入：LSM 化
 
-HNSW 支持增量插入，但**图质量随插入顺序退化**，且删除只能软删（soft delete）。所以写入按 LSM 组织：
+HNSW 支持增量插入，但部分实现的图质量会受插入顺序、更新与删除影响；很多实现的删除也依赖软删和重建。本文因此选择 LSM 风格的不可变段，代价是查询扇出与后台合并：
 
 ```
 写入 → L0 内存平坦段（暴力可查，无图）
@@ -227,7 +231,7 @@ HNSW 支持增量插入，但**图质量随插入顺序退化**，且删除只�
 查询 = 扇出所有活跃段 → 各取 top-k' → 全局归并 top-k
 ```
 
-**段数直接乘进查询延迟**。段数从 4 涨到 20，p95 大约翻倍。所以 compaction 落后是一个必须告警的指标（`segments_per_tenant_p99 > 8` 报警）。
+段数增加会扩大查询扇出，但延迟不一定线性增长（可并行，且会受最慢段支配）。因此 `segments_per_tenant`、扇出数、合并 backlog 与查询 p95 要一起监控；“4→20、p95 翻倍”和 `p99 > 8` 只能作为压测后可能采用的阈值示例。
 
 ### 删除：墓碑与 over-fetch
 
@@ -258,9 +262,10 @@ over_fetch_k = ceil(k / (1 - deleted_ratio)) + safety_margin
 
 ```
 1. 双写      新写入同时进 v1 与 v2 索引（只对已进入迁移队列的租户）
-2. 回填      按优先级队列 backfill：先 5 个内部租户 → 小租户抽样 → 大租户
-             用 Batch API（三家均 50% off）+ prompt cache，成本可再降一半
-3. 影子读    v1 返回结果给用户；同时查 v2，离线比对 Recall@10 / NDCG@10 重叠度
+2. 回填      按优先级队列 backfill：先内部租户 → 小租户抽样 → 大租户
+             供应商若为 embedding 提供异步批量折扣再使用；不能假设“三家都 50% off”，prompt cache 也不等于 embedding 折扣
+3. 影子读    v1 返回结果给用户；同时查 v2。有标注集才计算 Recall@10 / NDCG@10；
+             无标注时只能看结果重叠、排名漂移与线上代理指标，不能把重叠率叫 recall
 4. 灰度切    per-tenant 元数据 `active_embedding_version: v2`，1% → 10% → 100%
 5. 观察      线上指标：点击率、无结果率、rerank 后 top-1 变化率。留 ≥ 7 天
 6. 回收      确认无回滚需求后删 v1 段（保留 manifest 记录以备审计）
@@ -277,15 +282,15 @@ over_fetch_k = ceil(k / (1 - deleted_ratio)) + safety_margin
 
 | 阶段 | 预算 | 备注 |
 |---|---|---|
-| 认证 + 路由 + manifest 查表 | 5 ms | manifest 本地缓存，miss 时 +20 ms |
-| Query embedding | 40 ms（API）/ 8 ms（本地小模型） | **最容易被忽略的一段**；可缓存，命中率 30–60% |
+| 认证 + 路由 + manifest 查表 | 5 ms | manifest 本地缓存；miss 代价需实测 |
+| Query embedding | 40 ms（API）/ 8 ms（本地小模型） | **最容易被忽略的一段**；仅对明确可复用、按租户/权限隔离的输入缓存，命中率实测 |
 | 段加载（热） | 0 ms | 冷则 150 ms–2 s，走档位 B |
 | BM25 检索 top-50 | 12 ms | 与 ANN 并行 |
 | ANN 检索 top-100 | 8–25 ms | `ef_search` 是唯一运行时旋钮 |
 | RRF 融合 | < 1 ms | `score(d) = Σ 1/(60 + rank_i(d))` |
 | Rerank（cross-encoder，50 候选） | **100–200 ms** | 端到端最大单项 |
 | 取回原文 + 序列化 | 15 ms | |
-| **合计** | **≈ 200 ms（无 rerank）/ 400 ms（含）** | 留 10% 余量 |
+| **端到端目标** | **p95 ≤ 300 ms（无 rerank）/ 450 ms（含）** | 不能把各阶段 p95 机械相加；以上是工程预算，最终用端到端负载测试与 trace 验证 |
 
 **Rerank 占了近一半预算。** 所以它必须是可开关的：低延迟档关掉，质量档打开。头部 reranker 延迟在 **~190 ms（Jina v3 档）到 ~600 ms（Voyage 2.5 / Cohere 档）** 区间（第三方 2026 测评口径，跨 harness 不可直接横比）。
 
@@ -305,7 +310,7 @@ over_fetch_k = ceil(k / (1 - deleted_ratio)) + safety_margin
 
 纯 dense 在**错误码、SKU、函数名、罕见实体、受控词表（controlled vocabulary）**上系统性失效 —— embedding 会把 `ERR_4021` 映射到"错误码语义邻域"从而召回错误对象。BM25 在这里不可替代。
 
-但要诚实：**裸 RRF 相对 BM25 只有约 +1.3% NDCG，调优（alpha/权重 + 领域适配 domain adaptation，约需 40 条标注 query-relevance 对）后约 +7.5%**（2026 实测口径）；领域越窄绝对增益越小（专利检索绝对增益仅 +0.0094 NDCG@100）。
+但要诚实：公开实验里的收益强依赖数据集、候选规模与调参；少量标注 query-relevance 对可以启动调优，却不足以给所有领域承诺固定增益。把 BM25、dense、融合和 rerank 放进同一离线评测集，再用线上业务指标确认。
 **"打开 hybrid 开关就有 26–31% 提升"的说法未见可核对的原始实验，不要对客户承诺。** 详见 `../04-ai-agent-systems/02-context-engineering-and-rag.md`。
 
 ### 不要为了"看起来先进"上多向量（multi-vector）
@@ -341,9 +346,9 @@ def search(ctx: AuthContext, q, k):
                          acl_filter=scope.doc_acl)   # ACL 也进引擎，不在应用层后过滤
 ```
 
-**文档级权限（document-level permission）也必须进引擎。** "先 ANN 取 100 条再按用户 ACL 过滤"和 post-filter 是同一个错误：一个只能看 0.1% 文档的用户会拿到 0 条结果。把 ACL 编成 payload（`allowed_groups: [...]`）在遍历时过滤，或对高选择性 ACL 单独建分组段。
+**文档级权限（document-level permission）也必须进入检索候选生成。** "先 ANN 取 100 条再按用户 ACL 过滤"和 post-filter 是同一个错误：可见集合很小时会返空。可用 payload/bitmap、权限集合版本或按安全域分组段；不要把无限增长的 `allowed_groups` 数组原样复制到每个向量而不先算更新与存储放大。
 
-**加密与删除权**：BYOK 租户的段用其 DEK 加密（段级，不是行级），**这类租户不能进合并段**（合并段无法按租户单独销毁密钥）。GDPR 删除权的可执行版本是"删掉这个租户的所有段对象 + 销毁 DEK"，而不是"发一批 delete 请求等 compaction"。
+**加密与删除权**：需要租户级 crypto-shredding 的数据集，用租户删除键/KEK 包裹其段 DEK；这类租户不能与其他租户共享同一不可分割密文段。删除流程还要覆盖在线副本、墓碑、缓存、派生索引、对象版本、备份过期与恢复后的删除重放。删对象 + 销毁包裹密钥只是技术控制的一层，是否满足具体删除义务仍由适用法规、合同与保留例外决定。
 
 ---
 
@@ -353,7 +358,7 @@ def search(ctx: AuthContext, q, k):
 
 | 项 | 用量 | 月成本 |
 |---|---|---|
-| L1 内存/NVMe（热 25% + page cache） | ~900 GB RAM + 12 TB NVMe | $5,400 + $1,600 |
+| L1 工作集内存 + 热段 NVMe | 约 25% 工作集（~900 GB）驻 RAM/page cache；按 §2 假设约 87% 向量常驻本地 NVMe，并为图/payload/副本留余量 | $5,400 + $1,600（示例） |
 | L2 对象存储（全量 + 版本） | 4.5 TB | $105 |
 | 搜索计算（峰值 5k QPS，40 核心机 × 12） | — | $6,800 |
 | 索引/compaction 计算 | — | $2,200 |
@@ -442,7 +447,8 @@ v2  1 万–10 万租户 / 数十亿向量   ← 本文
 
 v3  巨型租户 silo + cell 化
     单个 cell 服务 ~2 万租户，cell 之间不共享数据；
-    合规/驻留租户走独立 cell。爆炸半径 ≤ 1/N（见 ../03-saas-platform/01-control-plane.md）。
+    合规/驻留租户走独立 cell。若共有 K 个 cell，某 cell 故障影响的是它实际承载的流量/租户权重；
+    只有均匀且无共享依赖时才近似 1/K（见 ../03-saas-platform/01-control-plane.md）。
 ```
 
 ---
@@ -460,4 +466,6 @@ v3  巨型租户 silo + cell 化
 
 ---
 
-**下一篇** → [04-usage-based-billing.md](04-usage-based-billing.md)
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**案例顺读下一篇** → [04-usage-based-billing.md](04-usage-based-billing.md)

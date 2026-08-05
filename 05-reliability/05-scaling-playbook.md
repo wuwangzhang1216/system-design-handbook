@@ -2,6 +2,8 @@
 
 > 每一个数量级都是一个新系统。让你到达 10k QPS 的架构，正是让你卡在 100k 的那个架构。
 > 扩展的真正技能不是"知道怎么分片（sharding）"，是**知道现在该做哪一步、以及下一堵墙的信号长什么样**。
+>
+> **阅读分层与时间边界**：§1–§5、§8–§9 是 Core，§6–§7 是高风险迁移/单元化，§10 是 AI 扩展。QPS、表大小、成本、阈值与硬件结果都是示例或 **2026-08 快照**；瓶颈信号和验证方法比数字本身更可迁移。
 
 ---
 
@@ -18,12 +20,12 @@
 
 | 概念 | 一句话 | 详见 |
 |---|---|---|
-| 垂直扩展 vs 水平扩展 | 换一台更强的机器 vs 加更多台机器；中文都叫"扩容"，英文必须分清 | [00-concepts §4](../00-foundations/00-concepts.md) |
-| 副本 / 分片 / 分片键 | 副本解决"会挂"和"读太多"，分片解决"装不下"和"写太多"，两者互相独立 | [00-concepts §5](../00-foundations/00-concepts.md) |
-| 最终一致 | 停止写入后最终收敛，中间可能读到旧值，且**没有时间上界** | [00-concepts §6](../00-foundations/00-concepts.md) |
-| 复制延迟与读己之写 | 写完立刻读只读副本会读到旧值，解法是会话内粘到主库 | [01-fundamentals §4](../00-foundations/01-fundamentals.md) |
-| 幂等 | 同一操作做多次等于做一次 —— 回填与双写全靠它兜底 | [01-fundamentals §5](../00-foundations/01-fundamentals.md) |
-| 爆炸半径 | 一次故障最多能波及多大范围；分片不解决它，单元化才解决 | [04-incident-and-chaos.md §10](04-incident-and-chaos.md) |
+| 垂直扩展 vs 水平扩展 | 换一台更强的机器 vs 加更多台机器；中文都叫"扩容"，英文必须分清 | [00-concepts §4](../00-foundations/00-concepts.md#4-什么是扩展垂直-vs-水平) |
+| 副本 / 分片 / 分片键 | 副本解决"会挂"和"读太多"，分片解决"装不下"和"写太多"，两者互相独立 | [00-concepts §5](../00-foundations/00-concepts.md#5-副本分片分区--三个被混用的词) |
+| 最终一致 | 停止写入后最终收敛，中间可能读到旧值，且**没有时间上界** | [00-concepts §6](../00-foundations/00-concepts.md#6-什么是一致性--一个词两种完全不同的意思) |
+| 复制延迟与读己之写 | 写完立刻读只读副本会读到旧值，解法是会话内粘到主库 | [01-fundamentals §4](../00-foundations/01-fundamentals.md#4-两条正交轴副本一致性与事务隔离) |
+| 幂等 | 同一操作做多次等于做一次 —— 回填与双写全靠它兜底 | [01-fundamentals §5](../00-foundations/01-fundamentals.md#5-幂等idempotency分布式系统的第一公民) |
+| 爆炸半径 | 一次故障最多能波及多大范围；分片不解决它，单元化才解决 | [04-incident-and-chaos.md §10](04-incident-and-chaos.md#10-混沌工程假设驱动不是随机破坏) |
 
 **这一章要回答的问题**
 
@@ -45,8 +47,8 @@
 | 双写 | dual write | 同一份变更同时写老系统和新系统的过渡状态，老系统仍是唯一真相 |
 | 回填 | backfill | 把历史存量数据分批灌进新存储的过程，必须限速、幂等、可断点续传 |
 | 影子读 | shadow read | 用户拿到的仍是老系统的结果，同时**异步**读一份新系统的结果做比对，用户零暴露 |
-| 扩展-收缩 | expand and contract | 大表 schema 变更的六步：加新列 → 双写 → 回填 → 切读 → 停写老列 → 删老列，每步可独立回滚 |
-| 单元化 | cell-based architecture | 把整个技术栈复制成 N 份，每份服务一个用户子集，把爆炸半径压到 1/N |
+| 扩展-收缩 | expand and contract | 大表 schema 变更的六步：加新列 → 兼容写入 → 回填 → 切读 → 停写老列 → 删老列；每步独立部署，破坏性 contract 之后不能简单回滚 |
+| 单元化 | cell-based architecture | 把整个技术栈复制成 K 个相互独立的部署单元；名义租户占比约 1/K，真实爆炸半径按流量/收入/关键租户权重计算 |
 | 削峰 | smoothing traffic spikes | 把同步的瞬时峰值转成排队的异步处理，让容量按平均值而不是峰值配 |
 
 ---
@@ -95,7 +97,7 @@
 
 | 组件 | 单实例上限（量级） | 先撞哪堵墙 |
 |---|---|---|
-| Postgres（简单点查，有缓存） | 读 20k–50k QPS；写 5k–15k TPS | **连接数**通常先于 CPU |
+| Postgres（本表假设调优硬件、简单点查/小事务） | 读 20k–50k QPS；写 5k–15k TPS 的**量级示例** | **连接数**通常先于 CPU；安全线以本工作负载在 SLO 内的压测 goodput 为准 |
 | MySQL/InnoDB | 类似量级 | 同上 |
 | Redis 单实例 | 10万–15万 QPS | 单线程 CPU / 网络 pps |
 | Kafka 单 broker | 数十万 msg/s（取决于消息大小） | 磁盘吞吐 / 网络 |
@@ -127,7 +129,7 @@
 | 1. 修 N+1（N+1 query）与缺失索引 | 常见 5–50× | 零架构代价。**永远先做这个** |
 | 2. 缓存（多级） | 10–100× | 一致性复杂度，见 [`01-building-blocks/02-caching.md`](../01-building-blocks/02-caching.md) |
 | 3. 只读副本 | 线性（每副本 +1×） | **复制延迟（replication lag）** → read-your-writes 破坏 |
-| 4. CQRS / 物化读模型（materialized read model：把一个复杂查询的结果预先算好、单独存一份，读的时候直接取） | 复杂查询 10–1000× | 双写（dual write）复杂度、最终一致，见 [`02-architecture-patterns/02-event-driven-and-cqrs.md`](../02-architecture-patterns/02-event-driven-and-cqrs.md) |
+| 4. CQRS / 物化读模型（materialized read model：把一个复杂查询的结果预先算好、单独存一份，读的时候直接取） | 复杂查询可能获数量级收益 | outbox/CDC、投影幂等与最终一致性复杂度；不要靠无修复日志的应用双写，见 [`02-architecture-patterns/02-event-driven-and-cqrs.md`](../02-architecture-patterns/02-event-driven-and-cqrs.md) |
 | 5. 搜索/分析外置（ES/ClickHouse） | 聚合查询 100× | 一份数据两处存，需要 CDC（change data capture：从数据库的复制日志里捕获每一次行级变更，实时推给下游） |
 
 ⚠️ **只读副本的隐形陷阱**：用户改完资料立刻刷新，读到旧值。解法不是"关掉副本"，而是**按会话粘性（session stickiness）**：写入后的 N 秒内（或直到 LSN 追上 —— LSN 是 log sequence number，Postgres 复制日志位置的单调递增编号，用它就能判断副本追到哪一刻了）该用户的读走主库。在 cookie/会话里存一个 `write_lsn` 是最干净的做法。
@@ -224,117 +226,66 @@ Vitess（[vitess.io](https://vitess.io/)）的 keyspace/shard、Elasticsearch �
 
 ## 6. 在线分片迁移（online migration）的完整剧本
 
-这是 Staff 面试里最能区分层次的题目。**关键在于每一步都有独立的回滚点，且任何一步失败都不需要停机。**
+在线迁移的危险不在“搬得慢”，而在**某一次写只到一边且永远没人修、回填覆盖新写、删除被复活，以及旧 writer 在租约过期后继续写**。安全剧本依赖四个可验证不变量：
 
-```
-前置：唯一 ID 已经全局唯一（不能依赖单库自增，见 §8）
-      应用层已有"分片路由"抽象（读写都走它，没有裸 SQL 直连）
-      有可信的数据校验工具
+1. 切写前 Old 是唯一真相源；每次成功业务提交都在**同一事务**写入 outbox，或能从数据库 WAL/binlog CDC 可靠重放，不能 fire-and-forget 写 New 后“失败只记指标”。
+2. New 按 `(entity_key, source_version/op_id)` 幂等、条件应用；更新和 **delete/TTL tombstone** 使用同一版本序列，旧回填不能覆盖新值或复活已删数据。
+3. 失败进入**持久 repair ledger/DLQ**，记录 key、版本、尝试、错误与最终 ACK；指标只用于发现问题，不是修复机制。
+4. 每个写带 `route_epoch`，目标存储原子校验 `(scope, target, epoch)` **恰好等于**当前值。租约只能发现持有者失联，单调 fencing token 才能拒绝恢复运行的旧 writer。
 
-┌─ P0 双写准备（可回滚：删代码即可）────────────────────────────────┐
-│ 1. 上线新分片集群（空的），配置就绪但不接流量                      │
-│ 2. 路由层加开关：  write_new = off,  read_new = off              │
-│ 3. 灰度打开 write_new：应用同时写老库和新库                        │
-│    · 新库写失败**不影响主流程**（只记指标 + 告警），老库仍是唯一真相 │
-│    · 观察 24–72 小时：写失败率、延迟增加量                        │
-│    ★ 回滚点 A：关掉 write_new，一切如初                          │
-└──────────────────────────────────────────────────────────────────┘
-┌─ P1 历史回填（可回滚：清空新库）──────────────────────────────────┐
-│ 4. 分批回填历史数据（按主键区间 / 按 chunk）                      │
-│    · 限速：目标是老库 CPU 增量 < 10%，通常 1k–10k 行/秒          │
-│    · 必须幂等（UPSERT），可断点续传，记录进度水位（watermark：      │
-│      "已经处理到这个位置了"的标记，重启后从这里接着往下做）        │
-│    · **回填的写不能覆盖双写产生的新数据** → 用 `INSERT ... ON      │
-│      CONFLICT DO NOTHING`，或比较版本号/更新时间                  │
-│ 5. 回填完成后，持续跑一致性校验                                    │
-│    ★ 回滚点 B：新库仍无流量，随时可清空重来                       │
-└──────────────────────────────────────────────────────────────────┘
-┌─ P2 校验（不可跳过，这是整个剧本的核心）──────────────────────────┐
-│ 6. 全量校验：按主键区间分块，两边算 checksum 比对                  │
-│ 7. 影子读校验（最有价值）：                                        │
-│    读请求走老库返回给用户，同时**异步**读新库并比对结果            │
-│    → 记录差异率，按差异类型分类                                    │
-│    → 目标：差异率 < 0.001% 且剩余差异全部可解释                   │
-│    → 差异的常见来源：时间戳精度、NULL 语义、排序不稳定、           │
-│      浮点数、回填期间的竞态                                        │
-│ 8. 连续 3–7 天差异率达标才进下一步                                │
-└──────────────────────────────────────────────────────────────────┘
-┌─ P3 切读（可回滚：秒级）──────────────────────────────────────────┐
-│ 9. read_new 灰度：1% → 5% → 25% → 50% → 100%                    │
-│    · 每一档观察至少 1 小时（覆盖一个流量周期更好）                 │
-│    · 监控：错误率、p99、业务指标（★ 不只是技术指标）              │
-│    ★ 回滚点 C：把 read_new 调回 0，秒级生效，老库一直是最新的      │
-└──────────────────────────────────────────────────────────────────┘
-┌─ P4 切写（★ 唯一不可秒级回滚的一步）──────────────────────────────┐
-│ 10. 反转真相源：新库为主，老库为副（继续反向双写一段时间）         │
-│     · 切换瞬间需要极短的写暂停（或用分布式锁/租约保证不双主）      │
-│     · 这一步之后，新库有了老库没有的数据 → 回滚需要反向补数据      │
-│     ★ 回滚点 D：反向双写让你还能回去，但要付反向回填的代价        │
-│ 11. 观察 1–2 周                                                   │
-└──────────────────────────────────────────────────────────────────┘
-┌─ P5 收尾 ─────────────────────────────────────────────────────────┐
-│ 12. 停止反向双写 → 老库只读 → 保留 30 天 → 归档 → 删除            │
-│ 13. 删除路由开关与双写代码（★ 一定要删，否则下一个人不敢动）       │
-└──────────────────────────────────────────────────────────────────┘
-```
+| 阶段 | 操作与退出条件 | 回退语义 |
+|---|---|---|
+| **P0 准备复制** | 部署空 New、幂等 apply API、outbox/CDC consumer、repair ledger 和 per-key version/tombstone。先开复制但读仍全走 Old；监控复制 lag、DLQ oldest age、apply 冲突 | 停 consumer 即可；Old 从未失去真相源。New 可清理，但不要在未确认 scope 时做破坏性清空 |
+| **P1 一致快照 + 回填** | 取得一致快照及其源 watermark `W0`，从 `W0` 继续消费增量；按 chunk 限速回填。New 只接受高于当前 source version 的状态，不能只用 `ON CONFLICT DO NOTHING` | 降速/暂停/重跑 chunk；复制日志继续保留，不能让其超过 retention |
+| **P2 追平 + 校验** | 等 `applied_watermark ≥ source_committed_watermark`；按 key-range 对 row count、checksum、版本和 tombstone 做校验；抽样影子读。所有差异必须分类、修复并 ACK，而非只追求一个漂亮百分比 | 仍由 Old 服务，修复 New；差异阈值和观察周期按数据风险/业务周期设，`0.001% / 3–7 天` 仅是示例 |
+| **P3 渐进切读** | 按租户/逻辑分片 stable cohort 放量。New 缺失、版本落后或校验失败时回 Old，并**持久登记 repair**；监控错误、延迟、业务语义与 fallback 率 | `read_new → 0`；前提是 Old 仍是所有写的真相源 |
+| **P4 写屏障与切写** | 对一个 scope 暂停新写；排空 epoch `E` 的 in-flight；等复制到切换 watermark 且 repair 达标；把 Old 置为拒绝写，激活 New 的 epoch `E+1`，再发布路由。旧请求即使恢复也被存储侧 fencing 拒绝 | 切写后不能只翻开关。若持续做 **New→Old 的 durable reverse replication** 且已追平，可用同样屏障反向切回；否则只能前滚/修复 |
+| **P5 回滚窗口与收尾** | 在合同/风险定义的窗口内验证反向复制、备份恢复、离线 job 和历史消息均使用新路由；之后停反向复制、撤旧凭证、归档/删除 Old，并移除迁移开关 | 数据删除是单独审批的单向操作；“保留 30 天”只是示例，不代表安全或合规要求 |
 
-**四条最容易翻车的地方**：
-1. **跳过 P2 影子读（shadow read）校验**。直接从回填跳到切读，你会在切读到 25% 时发现数据不对，而这时已经有用户看到了错误数据。
-2. **回填（backfill）不限速**，把老库压垮，制造一次自己造的事故。
-3. **忘记删除**（delete）与 TTL 过期在双写期的处理。回填时那行已被删，双写把它写回去了 —— 幽灵数据（resurrected row / zombie record）。
-4. **P4 没有做"防双主（split-brain）"**。切换瞬间两边都在写同一行 = 数据分叉。用短暂只读窗口或全局租约。
-
-**上面的方框图讲的是"有哪几个阶段"，下面这张时序图讲的是另一件事：在任意时刻，用户的读和写分别落在哪一边 —— 以及四个回滚点各自把你退回到哪个时刻。**
+切换写入允许一个很短的**有意不可写窗口**，通常比无 fencing 的“零停机双主”更诚实。若业务连短暂停写也不能接受，就需要由数据库/共识层提供单写者交接，而不是靠两个应用进程同时写两库。
 
 ```mermaid
 sequenceDiagram
-    participant App as App
-    participant Old as OldShard
-    participant New as NewShard
-    participant Ver as Verifier
+    participant C as Client
+    participant R as Router
+    participant O as Old source
+    participant L as Outbox or CDC log
+    participant P as Replicator and repair ledger
+    participant N as New target
 
-    Note over App,New: Step 1 dual write on. Old is still the only source of truth
-    App->>Old: write and wait for ack
-    App->>New: write without blocking the request
-    New-->>App: a failure here only bumps a metric
-    Note over App,New: Observe 24 to 72h. Rollback point A is flipping write_new off
+    Note over O,N: Before cutover, Old is the only write authority at epoch E
+    C->>R: write with operation key
+    R->>O: write(scope, epoch E)
+    O->>O: commit business row and outbox atomically
+    O-->>C: success
+    L-->>P: versioned change or tombstone
+    P->>N: idempotent conditional apply
+    N-->>P: durable ACK or durable repair item
 
-    Note over Ver,New: Step 2 backfill history in rate limited chunks
-    Ver->>Old: read chunk by primary key range
-    Ver->>New: UPSERT chunk without overwriting dual written rows
-    Note over Ver,New: Rollback point B is truncating New. It still serves zero reads
+    Note over O,N: Snapshot at W0, backfill with versions, then replay through current watermark
+    P->>O: read snapshot chunks
+    P->>N: apply only if source version is newer
+    P->>O: compare counts, checksums, versions, tombstones
+    P->>N: shadow read and repair mismatches
 
-    Note over App,Ver: Step 3 verify and quantify the gap
-    Ver->>Old: checksum per key range
-    Ver->>New: checksum per key range
-    App->>Old: read that is actually served to the user
-    Ver->>New: shadow read of the same key for comparison
-    Ver-->>App: gate is diff rate under 0.001% for 3 to 7 straight days
-    Note over App,Ver: Users have still never seen one byte from New
-
-    Note over App,New: Step 4 ramp read_new 1% 5% 25% 50%
-    App->>New: read for the ramped slice
-    New-->>App: response
-    Ver-->>App: on mismatch route that key back to Old and page
-    Note over App,New: Rollback point C is read_new to 0 and it lands in seconds
-
-    Note over App,New: Step 5 read_new is 100% while every write still goes to both
-    App->>New: all reads
-    App->>Old: write and wait for ack
-    Note over App,Old: Rollback point D is still cheap because Old is complete
-
-    Note over App,New: Step 6 stop dual write and promote New
-    App->>New: write and wait for ack
-    Note over App,Old: ONE-WAY DOOR. Old goes stale so any rollback now needs a reverse backfill
+    Note over R,N: Cutover barrier for one tenant or logical shard
+    R->>O: freeze epoch E and drain in-flight writes
+    P->>N: catch up through cutover watermark
+    R->>N: activate write epoch E+1
+    R->>R: publish target New, epoch E+1
+    C->>R: next write
+    R->>N: write(scope, epoch E+1)
+    R->>O: stale retry with epoch E is rejected
+    N-->>L: durable reverse change during rollback window
 ```
 
-> 📖 **读图要点**：盯住 `App` 这条生命线上"读"箭头指向谁 —— 直到 Step 3 结束，它一根都没指向 `New`，用户从没读过一个来自新库的字节。校验的全部价值就买在这个"零用户暴露"的窗口里，跳过它等于把差异留给 Step 4 的真实用户去发现。另一处是 Step 5 与 Step 6 之间那道分界：前五步的回滚都只是改一个开关（A 关双写、B 清空新库、C 把 read_new 调回 0、D 靠反向双写兜底），代价是分钟级；跨过最后一条 Note，`Old` 从这一刻起开始变旧，回滚从"改开关"变成"再做一次反向回填"。这是整个剧本唯一的单向门，也是唯一需要提前写好审批和演练的一步。
+> 📖 **读图要点**：Old 返回成功之前，业务行与待复制事实已经一起持久化；因此 New 暂时失败只增加 lag/repair，不会静默丢写。真正的单向门是切写：路由 epoch 与存储 fencing 让两边不可能同时接受同一 scope 的 writer。切写后的回退能力来自已经追平并验证的反向复制，不来自“我们还留着旧库”。
 
 ---
 
 ## 7. 单元化（Cell / cell-based architecture）：从"扩展"变成"复制"
 
-分片解决了数据容量，**没有解决爆炸半径（blast radius）**：一个坏部署仍然影响 100% 用户。单元化的思路是**把整个栈复制 N 份**，每份服务一个用户子集。
+分片解决数据容量，却不自动隔离部署、配置和共享依赖故障。单元化把 serving stack 复制成 **K 个独立部署单元**，每个服务一个租户子集；控制面和全局服务若仍在同步关键路径上，依然可能制造全局故障。
 
 ```
         ┌──────────────── 全局控制面（薄，尽量只读）─────────────────┐
@@ -342,18 +293,18 @@ sequenceDiagram
         └────────────────────────────┬──────────────────────────────┘
                     ┌────────────────┼────────────────┐
               ┌─────▼─────┐    ┌─────▼─────┐    ┌─────▼─────┐
-              │  Cell-1   │    │  Cell-2   │    │  Cell-N   │
+              │  Cell-1   │    │  Cell-2   │    │  Cell-K   │
               │ LB/App/DB │    │ LB/App/DB │    │ LB/App/DB │
               │ 缓存/队列  │    │ 缓存/队列  │    │ 缓存/队列  │
               └───────────┘    └───────────┘    └───────────┘
-              各自完整、互不依赖；一个 cell 全挂 → 影响 ≤ 1/N 流量
+              serving path 无跨 cell 同步依赖；名义租户占比约 1/K
 ```
 
-**收益**：爆炸半径 ≤ `1/N`（AWS 的公开材料里给过"误删数据库时影响限制在约 0.1% 用户"这样的量级）；金丝雀（canary）天然存在（先发一个 cell）；混沌演练可以常态化（拿一个 cell 做）。
+**收益**：故障可限制在一个部署单元，天然支持按 cell 金丝雀与演练。但 `1/K` 只在租户和流量均匀时成立；实际半径应报告 `max(cell 流量占比, MAU 占比, ARR/关键租户权重)`，并把全局路由、身份、配置和发布系统的相关失败单独建模。
 **代价**：跨 cell 的查询/迁移复杂；部署要编排 N 次；小规模时资源利用率低（每个 cell 都要有冗余）。
-**准入门槛**：至少 3 个 cell 才有意义；通常在 S4/S5 阶段引入。详见 [`03-saas-platform/01-control-plane.md`](../03-saas-platform/01-control-plane.md)。
+**准入判断**：cell 数来自目标加权爆炸半径、单 cell 容量、冗余与运维成本，不是“至少 3 个”的统一门槛。详见 [`03-saas-platform/01-control-plane.md`](../03-saas-platform/01-control-plane.md)。
 
-**规则**：**cell 之间不允许同步调用。** 一旦 Cell-1 同步依赖 Cell-2，你的爆炸半径立刻回到 100%，且付了单元化的全部成本。
+**规则**：serving path 默认不做跨 cell 同步调用；跨 cell 协作走有界异步流程或专门全局服务。一次跨 cell 调用不必然让当次影响立刻变成 100%，但会建立传播边，传递闭包可能把最坏爆炸半径扩到全部 cell。
 
 ---
 
@@ -395,7 +346,7 @@ Postgres 默认 max_connections = 100，调到 500 就已经很吃力
 
 `SELECT * FROM orders WHERE status='pending'` 这种全表扫描的定时任务，在 10 万行时无感，在 1 亿行时会把主库打死，**而且它在凌晨跑，没人看着**。
 
-对策：所有后台任务必须**分片化 + 限速（throttling） + 有游标（cursor）**；跑在只读副本上；有单独的资源配额；有超时与熔断。**批处理任务是最容易被遗忘的容量消费者。**
+对策：后台任务应分片化、限速、有游标并使用独立资源配额。纯读扫描可在满足一致性要求的副本/分析库上跑；会更新状态的任务仍需安全写路径、幂等与 fencing，不能笼统地“跑在只读副本上”。
 
 ### ④ 报表与分析查询
 
@@ -416,15 +367,11 @@ Postgres 默认 max_connections = 100，调到 500 就已经很吃力
 
 这是把很多团队钉死在原地的一堵墙。
 
-| 表大小 | 可行做法 |
-|---|---|
-| < 10 GB | 直接 `ALTER TABLE`（Postgres 的加列带默认值、加 NOT NULL 约束在现代版本已优化） |
-| 10 GB – 500 GB | 在线 DDL 工具：[gh-ost](https://github.com/github/gh-ost)、`pt-online-schema-change`（MySQL）；Postgres 用 `CREATE INDEX CONCURRENTLY` + 分步迁移 |
-| > 500 GB | **改架构而不是改表**：分区表、双写到新表 + 回填 + 切换（就是 §6 的剧本） |
+表大小只能提示风险，不能决定 DDL 是否安全；决定因素还包括数据库版本、具体语句是否重写表、锁级别/等待队列、写入率、复制延迟、磁盘余量和可中止性。即使 1 GB 热表，未设 `lock_timeout` 的 catalog-only DDL 也可能排在长事务后阻塞；500 GB 表的某些元数据变更反而可很快完成。Postgres 大表索引通常用 `CREATE INDEX CONCURRENTLY`，约束用 `NOT VALID → VALIDATE`，并设置有限 `lock_timeout/statement_timeout`；MySQL 先验证目标版本的 `INSTANT/INPLACE`，再评估 gh-ost/pt-osc。完整剧本见下方链接。
 
-**通用的六步扩展-收缩法（expand and contract）**（[`03-saas-platform/05-release-engineering.md`](../03-saas-platform/05-release-engineering.md) 有完整版）：加新列（可空）→ 双写 → 回填 → 切读 → 停写老列 → 删老列。**每一步都可独立部署与回滚。**
+**通用的六步扩展-收缩法**（[`03-saas-platform/05-release-engineering.md`](../03-saas-platform/05-release-engineering.md) 有完整版）：加新列（可空）→ 兼容写入 → 回填 → 切读 → 停写老列 → 删老列。每步应独立部署/验证；最后的 contract 是破坏性动作，不能承诺简单回滚。
 
-⚠️ **加索引在大表上会锁写**。Postgres 必须用 `CREATE INDEX CONCURRENTLY`（更慢，但不阻塞），且要处理它失败后留下 INVALID 索引的情况。
+⚠️ 普通 `CREATE INDEX` 会阻塞写；`CREATE INDEX CONCURRENTLY` 允许并发写，但仍会消耗 I/O/CPU、等待旧事务/快照、增加复制压力，失败还可能留下 INVALID 索引。它不能在事务块内运行，需专用迁移会话、有限超时、监控和精确清理步骤。
 
 ---
 
@@ -453,7 +400,7 @@ Postgres 默认 max_connections = 100，调到 500 就已经很吃力
 **① GPU 显存是新的分片维度，KV cache 是新的"热数据"。**
 KV cache 的每 token 体积**由注意力结构决定，模型之间差 30 倍**：MHA ~2.5 MB、GQA ~320 KB、MQA ~40 KB、MLA ~70 KB（BF16 口径，FP8 减半）。以 Llama-3.1-70B（GQA）+ FP8 为例是 160 KB/token，8k tokens 的 KV 约 **1.3 GB/请求**。
 > ⚠️ 流传的"约 1 MB/token"是 **MHA 时代**（LLaMA-1 65B 那一代）的口径。套到今天的 GQA 模型上会把 KV 体积**高估 3.2×**（FP8 下 6.4×），也就是把一张卡能装下的会话数**低估同样的倍数**。
-> 注意 **Llama-2-70B 已经是 GQA**（论文明确 34B/70B 用 GQA），别拿它当 MHA 的例子。扩容前按 [`04/01 §2`](../04-ai-agent-systems/01-llm-serving-infra.md) 的公式自己算一遍。
+> 注意 **Llama-2-70B 已经是 GQA**（论文明确 34B/70B 用 GQA），别拿它当 MHA 的例子。扩容前按 [`04/01 §2`](../04-ai-agent-systems/01-llm-serving-infra.md#2-kv-cache显存预算的主项公式--算例) 的公式自己算一遍。
 
 这意味着**并发数直接被显存卡死**，不是被 CPU 卡死。扩容的第一问题是"我还能放下几个会话的 KV"。
 
@@ -533,4 +480,6 @@ Mooncake 的 agentic 场景实测（GB200×60，Kimi-2.5 NVFP4，输入:输出 �
 
 ---
 
-**下一章** → [`06-case-studies/`](../06-case-studies/)
+**目录下一章** → [`06-case-studies/`](../06-case-studies/)
+
+**主学习链下一篇** → [04-incident-and-chaos.md](04-incident-and-chaos.md)（用事故响应与受控演练收尾可靠性模块）。

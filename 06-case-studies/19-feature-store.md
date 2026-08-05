@@ -29,7 +29,7 @@
 2. 事件时间与处理时间差在哪？一个迟到 30 秒的点击事件，会让"最近 5 分钟点击数"这个值在多长时间里是错的？
    答不出 → 先读 [`03-messaging-and-streams.md`](../01-building-blocks/03-messaging-and-streams.md) §6
 3. 一个请求要读 300 个特征，它们分散在 5 张表里。这次取数的 p99 主要由 300 决定，还是由 5 决定？
-   答不出 → 先读 [00-concepts §3 p50 / p90 / p99](../00-foundations/00-concepts.md)
+   答不出 → 先读 [00-concepts §3 p50 / p90 / p99](../00-foundations/00-concepts.md#3-为什么平均值是骗人的p50--p90--p99)
 
 **这道题会用到的构件**
 
@@ -41,13 +41,14 @@
 | 表格式、分区、时间旅行、数据契约与 CI 门禁 | §4.3 回填的分区设计、§4.7 变更管控 | [`05-data-platform.md`](../02-architecture-patterns/05-data-platform.md) §2、§4 |
 | 列存压缩比、对象存储单价、Little's Law | §2 全部四段估算 | [`02-capacity-estimation.md`](../00-foundations/02-capacity-estimation.md) §2、§6 |
 | 数据倾斜与 shuffle | §4.3 as-of join 的热 key 单 task 卡死 | [`01-storage-engines.md`](../01-building-blocks/01-storage-engines.md) §4 |
+| ML 特征主线 | 本题的 point-in-time join、在线取数和 skew 校验 | 先读 [`08/06 · 特征与数据`](../08-ml-systems/06-feature-and-data.md)；本题是其综合演练 |
 
 **本题新引入的术语**
 
 | 术语 | English | 一句话定义 |
 |---|---|---|
 | 实体 | entity | 特征挂靠的主键对象（用户 / 商品 / 商户 / 设备），它决定在线取数按什么 key 查 |
-| 特征视图 | feature view / feature group | 共享同一个实体主键和同一份计算逻辑的一组特征，是物化和取数的最小单位。**一次请求读几个 view 就是几次网络往返 —— 延迟由 view 个数决定，不由特征个数决定** |
+| 特征视图 | feature view / feature group | 共享同一实体主键和计算逻辑的一组特征。view 数增加逻辑读取，但实际 RTT 取决于分片、batch/pipeline、并行度与 payload，不能直接一一等同 |
 | 在线存储 / 离线存储 | online store / offline store | 前者按主键返回"当前值"、毫秒级；后者存全部带时间戳的历史值，供拼训练集 |
 | 物化 | materialization | 把离线算好的特征值批量写进在线存储的那个动作；它的滞后决定在线值有多旧 |
 | 特征新鲜度 | feature freshness | 从"产生这个特征的事件真的发生"到"线上能取到它"之间的时间 |
@@ -142,18 +143,18 @@ embedding user 2 亿 × 128 维 × 4 B = 102 GB；item 5,000 万 × 512 B = 26 G
 | 在线存储 | p50 / p99 / p999 | 单分片参考 | 100K QPS 年成本 | 500 GB 数据集年成本 |
 |---|---|---|---|---|
 | **Redis** | **600–700 µs / 2.5–3.0 ms / 9–12 ms** | ≈ 18,000 QPS **或** 18 GB（cache.m5.2xlarge） | **≈ $76,404** | ≈ $305,619 |
-| **DynamoDB** | 3–4 ms / 20–25 ms / 60–120 ms | 单 entity key **3,000 QPS 硬上限**，响应 2 MiB | ≈ $788,476（**10.3×**） | **≈ $9,329（1/33）** |
+| **DynamoDB** | 3–4 ms / 20–25 ms / 60–120 ms | 物理分区约 3,000 RCU/s；QPS 随 item 大小、读一致性、分区与自适应容量变化 | ≈ $788,476（**10.3×**） | **≈ $9,329（1/33）** |
 
-（数字为 Tecton / Feast 官方文档口径，2025–2026 量级；[Tecton online serving](https://docs.tecton.ai/docs/monitoring/online-serving)、[Feast performance tuning](https://docs.feast.dev/how-to-guides/online-server-performance-tuning)）
+（这是本文 region、实例、载荷与折扣假设下的 2025–2026 量级快照，用来演示成本模型，不是产品报价保证；正式决策要用目标地区的当前价格和同一 workload 压测。[Tecton online serving](https://docs.tecton.ai/docs/monitoring/online-serving)、[Feast performance tuning](https://docs.feast.dev/how-to-guides/online-server-performance-tuning)）
 
-**推论 4：这题两个方向同时撞墙，所以"选一个在线存储"这个问题本身是错的。** 1 TB 数据让 DynamoDB 便宜 33 倍，高 QPS 让 Redis 便宜 10 倍。唯一正确的答案是**按访问模式分层**：排序关键路径的热特征进 Redis，风控 / 低频 / 大基数长尾特征进 DynamoDB。
+**推论 4：按本文参数，容量成本与高 QPS 请求成本指向不同方案。** 表里的“DynamoDB 约便宜 33× / Redis 的该 QPS 账单约便宜 10×”只对这组数据量、请求大小、一致性、实例和价格假设成立。由此得到的候选方案是**按访问模式分层**：低延迟热特征放 Redis/内存类存储，大基数低频长尾放按量 KV；但也可用其它兼容后端，最终以 SLO、运维能力和实测总成本收口。
 
 **推论 5：分片数由容量决定，不由 QPS 决定，二者差 20 倍。**
 
 ```
 容量：1.03 TB ÷ 18 GB/分片 = 58 分片    QPS：4 万 queries/s ÷ 18,000 = 3 分片
 ⇒ 为容量买的 58 个分片顺带给了 20× 的 QPS 余量
-⇒ 热点永远不是分片级问题，只可能是单 key 级问题（爆款 item / 爬虫 user）
+⇒ 平均容量有余量仍不代表没有热点；热点可能集中在 key、物理分区、租户或网络/CPU 节点，需看实际分布与 throttling
 ```
 
 ### 2.3 离线回填：贵的不是存储，是"改一个定义要重算两年"
@@ -180,10 +181,10 @@ Parquet + 字典编码 + zstd 约 4–6× → ~90 GB/天 → 2 年 ≈ 66 TB
 再加 1% 请求的"全候选"记录：200 QPS × 200 候选 × 470 × 8 B = 150 MB/s ≈ 13 TB/天（原始）
   ⇒ 压缩后 +1.6–2.6 TB/天，日志成本 +20%（约 +$4k/月）
   ⚠️ 这一项的增量看的是"1% 的请求 × 200 个候选"，不是"曝光日志的 1%"——
-     两者差 (0.01×200)/(1×10) = 20 倍，把它当成 1% 是最常见的一次算错
+     相对曝光日志的增量 = (0.01×200)/(1×10) = 0.2，即 20%；这又是朴素“只多 1%”估计的 20 倍
 ```
 
-**推论 7：只记曝光样本，等于把冰山效应（iceberg effect：训练集只有推荐系统曝光过的有偏样本，线上却要给从未曝光的物品打分）永久焊死在训练数据里。** 那 1% 的全候选与随机流量记录是打破它的唯一手段，代价是日志账单涨两成（$21k → $25k/月）—— **在一个每月 GPU 账单以十万美元计的系统里，这仍然是全书性价比最高的一条采样决策**。
+**推论 7：只记曝光样本会固化曝光偏差。** 本文选择 1% 全候选日志 + 随机/探索流量，并记录采样与曝光概率，按上述假设日志账单约从 $21k 增至 $25k/月。它不是唯一办法：受控探索、propensity logging/IPW、反事实评估和专项采样也可组合使用；比例与 ROI 必须按偏差降低、隐私、留存和本地 GPU/日志成本验证。
 
 ---
 
@@ -237,7 +238,7 @@ Parquet + 字典编码 + zstd 约 4–6× → ~90 GB/天 → 2 年 ≈ 66 TB
 **四条边界，每一条都是一个评分点**：
 
 1. **定义只有一份，执行有两个。** 但两个执行计划必须由同一个 IR 编译出来 —— 否则你有的不是"一份定义"，是"一份文档 + 两份实现"（§4.1）。
-2. **在线是离线的物化产物，绝不双写。** 应用同时写两个存储没有事务，一边成功一边失败就是静默偏斜（[双写问题见 03-messaging §4](../01-building-blocks/03-messaging-and-streams.md)）。
+2. **在线是离线的物化产物，绝不双写。** 应用同时写两个存储没有事务，一边成功一边失败就是静默偏斜（[双写问题见 03-messaging §4](../01-building-blocks/03-messaging-and-streams.md#4-双写问题dual-write-problem与-outbox-模式)）。
 3. **训练样本的主来源是 Feature Log，不是回填。** 回填只用于新特征冷启动与校验。
 4. **一致性是被度量的，不是被承诺的。** 校验流水线不是加分项，是必需品 —— 没有它，§4.6 的排查第一步就做不了。
 
@@ -297,7 +298,7 @@ LEFT JOIN LATERAL (
   WHERE f.entity_id = l.entity_id
     AND f.event_ts <= l.label_ts                        -- 只看标签时刻之前
     AND f.event_ts >  l.label_ts - INTERVAL '7 days'    -- lookback_window
-  ORDER BY f.event_ts DESC LIMIT 1
+  ORDER BY f.event_ts DESC, f.ingested_at DESC, f.feature_version DESC LIMIT 1
 ) f ON true;
 ```
 
@@ -331,7 +332,7 @@ p99 15 ms 预算分解：
   ⇒ 可用往返 = (15 − 4.5) / 3 ≈ 3.5 次 ⇒ 设计上限 2 次，留一次重试余量
 ```
 
-**硬结论：延迟的驱动量是 feature view 个数（串行往返数），不是特征个数**（Feast 官方口径）。10 个特征分散在 5 个 view = 5 次串行 RTT；唯一的例外是 Redis 把同一 entity 的所有 view 塞进一个 hash key —— 往返恒为 1 次。**"特征太多所以慢"是错的诊断，减特征减不掉往返。**四条工程手段，按收益排序：
+**延迟要看串行关键路径，不只看特征列数或 view 数。** 10 个特征分散在 5 个 view 会增加逻辑读取，但可通过 batch/pipeline/并行降低 RTT；Redis 也只有同 key/slot 且用 HMGET 时才接近一次往返。payload、分片和反序列化同样要量。四条工程手段，按场景压测排序：
 
 | 手段 | 收益 | 代价 |
 |---|---|---|
@@ -340,7 +341,7 @@ p99 15 ms 预算分解：
 | 跨实体（user / item / merchant）并行发起 | 3 次串行 → 1 次并行 | 客户端复杂度；任一后端慢就是木桶效应 |
 | 重变换搬到写入侧（on-write 预物化） | 读路径计算清零 | 写放大；只对可预物化的特征成立 |
 
-**单 key 热点是这里唯一的真瓶颈**（§2.2 推论 5）：DynamoDB 单 entity key 3,000 QPS 是硬上限，大促时一个爆款 item 轻松超过。解法是 Feature Server 进程内 LRU + 1–5 s TTL —— 这就是 [02-caching §4 热 key](../01-building-blocks/02-caching.md) 的标准解法，特征平台没有任何特殊性。
+**平均容量有余量时仍要防热点**（§2.2 推论 5）：DynamoDB 公布的是物理分区吞吐（如强一致读约 3,000 RCU/s 的量级），不是“每个 entity key 固定 3,000 QPS”；单请求 item 大小、一致性、自适应容量和键分布都会改变边界。爆款 item 可用 Feature Server 进程内 LRU + 短 TTL 吸收，但 TTL 1–5 s 只是按新鲜度 SLO 起步，还可评估请求合并、预热与数据建模。
 
 **注意本题的批处理与 LLM 服务的批处理完全不是一回事**：这里是请求级动态组批，形状固定、一次推理到底；LLM 那边是 continuous batching（在每个 decode step 之后重新组批，某条序列结束就立刻把新请求塞进它的槽位），因为它的每个请求长度不定。**把 LLM 的调优旋钮搬过来是纯延迟浪费**，见 [`04-ai-agent-systems/01-llm-serving-infra.md`](../04-ai-agent-systems/01-llm-serving-infra.md) §3。
 
@@ -354,14 +355,17 @@ p99 15 ms 预算分解：
 
 **公开的锚点数字**（引用时必须带边界）：Coinbase 用 [Spark Real-Time Mode](https://www.databricks.com/blog/announcing-general-availability-real-time-mode-apache-spark-structured-streaming-databricks)（GA 2026-03-19，端到端最低 5 ms）把 250+ 特征从 800–900 ms 微批降到 100–250 ms（无状态 150 ms / 有状态聚合 250 ms），在线离线一致性 99%，成本 −51%；Pinterest 的实时用户信号摄入 1.2M events/s、端到端 p99 ≈ 10 s，有状态聚合把服务端 p99 从 ~100 ms 降到 < 35 ms（2019-12-05，年代久，需折算）。
 
-**乱序**是流式特征唯一真正难的地方：
+**乱序是流式特征的核心难点之一**，还要同时处理重复、重放、状态膨胀与背压：
 
 ```
 一个点击事件迟到 30 s 到达：
-  在线侧：只有"覆盖写最新值"这一个语义，没有 watermark 概念 → 计数被改回更小的值（时间倒流）
+  在线侧：若把窗口结果当普通 latest-value 覆盖写，迟到事件可能造成丢计数或时间倒流
   离线侧：as-of join 用事件时间，迟到事件改写已发布的历史分区 → 训练集不可重放
 解法（两侧各一条，不能只做一边）：
-  在线：值带 (value, event_ts)，写入做 CAS —— 只有 event_ts 更大才覆盖
+  在线：流处理器按 event time 聚合；watermark 决定何时首次认为窗口可结算，
+        allowed lateness 决定越过 watermark 后还接受多久的修正，state retention 决定状态实际保留多久。
+        在声明的 allowed lateness 内做更新/撤回/补偿，超出后进入旁路回填，不能把三者写成一个 TTL。
+        KV 发布快照再用 (window_end, revision) CAS 防旧快照覆盖新快照；只比较单个 event_ts 不能保证聚合正确
   离线：固定 lateness 上限（如 1 h），超时事件进补偿分区，已发布分区永不原地改写，
         训练集引用分区版本号
 ```
@@ -399,11 +403,11 @@ p99 15 ms 预算分解：
 
 **推论 8：没有 feature log 的系统，第 1 步根本做不了 —— 你只能读两边代码猜。** 这就是 feature logging 不是可选项的原因：它把"查一周"变成"查一小时"。
 
-**这类问题的检测时间是可以量化的**：Uber 的 D3 系统用 100,000+ monitors 覆盖 300+ Tier-1 数据集（1,000+ 数据集 × 50+ 列），fact 表告警精确率 95.23%，把数据事故的平均检测时间从 **45 天压到 2 天（20×）**（[Uber D3, 2023-02-23](https://www.uber.com/us/en/blog/d3-an-automated-system-to-detect-data-drifts/)）。触发它的那起事故是：某费用组件在美国主要城市 10% 的 session 中缺失、持续 45 天、零服务告警，模拟影响约 0.23% gross booking。
+**厂商历史快照可以提示量级，但不能直接当本团队 SLO**：Uber 2023 的 D3 文章报告 100,000+ monitors、300+ Tier-1 数据集、fact 表告警精确率 95.23%，并在其口径下把平均检测时间从 **45 天降到 2 天（20×）**（[Uber D3, 2023-02-23](https://www.uber.com/us/en/blog/d3-an-automated-system-to-detect-data-drifts/)）。触发背景是某费用组件在美国主要城市 10% session 中缺失、持续 45 天且服务告警未触发，模拟影响约 0.23% gross booking。你的目标要从自己的当前 TTD、误报率和覆盖列数设定。
 
 **教训是反直觉的：列级数据质量监控比模型监控更早触发。** 空值率、分位数、distinct count 这些统计量在特征层就会动，而模型的 AUC 要等标签回流。
 
-**skew 与 drift 是两套基线，不能合并**：skew 对**训练集**比，drift 对**上一时间窗**比。只做 drift 会漏掉"部署第一天就存在"的实现差异 —— 那正是本节要抓的东西。Vertex AI 的默认告警阈值是 0.3（数值特征用 JS 散度、类别特征用 L∞ 距离，可 per-feature 覆盖），监控频率默认 24 h、最小 1 h。
+**skew 与 drift 不能合并**：skew 对训练/回放值逐条比；drift 同时保留冻结训练/发布基线与近期/季节性参照，不能只对上一窗口。只做 drift 仍会漏掉部署第一天就存在的实现差异。Vertex AI 的 0.3 只是默认配置，必须按特征和历史稳定期重标定。
 
 > **面试金句**
 > "上了特征平台不等于没有偏斜。定义一致不等于执行一致 —— 偏斜藏在 NULL 怎么填、窗口左右开闭、时区、浮点精度这些地方，而这些东西在两个执行引擎里天然会分岔。所以我要两样东西：feature logging 把它结构性消掉，比对流水线把剩下的量出来。至于我怎么定位一次已经发生的偏斜，我的第一步不是读代码，是查 SRM —— 十分钟，而且大约十次里会中一次。"
@@ -444,18 +448,25 @@ stateDiagram-v2
 
 ### 4.8 什么时候根本不该建这个平台
 
-**立项判据（三条全中才立项）**：(a) 在线路径要在 < 50 ms 内拿到跨多个实体的特征；(b) 特征被 ≥ 3 个团队 / 模型复用；(c) 存在有状态时间窗聚合。三条不全中，独立特征平台大概率是**净负债**。
+**立项检查表（不是硬定律）**：在线低延迟跨实体取数、跨团队/模型复用、有状态时间窗聚合都会提高平台收益；团队规模、合规治理、现有 lakehouse/流平台能力和事故成本也会改变决策。`<50 ms`、`≥3` 只作为场景起点，需用 TCO 与失败成本验证。
 
 | 场景 | 为什么本文方案错 | 应该做什么 |
 |---|---|---|
 | 1 个模型、1 个团队、日级新鲜度 | 平台的全部价值是复用与一致性；没有复用就只剩运维成本 | §3.1 的一个 Spark 作业 + 一张 Redis hash |
-| **批量打分**（离线推荐、风控日跑） | 根本没有在线路径，"在线离线一致性"这个问题不存在 | 直接在仓库里做 as-of join，训练与推理共用同一段 SQL |
+| **批量打分**（离线推荐、风控日跑） | 不需要毫秒级在线 KV，但训练/批量推理仍可能因快照、代码和窗口不同产生偏斜 | 在仓库里做 as-of join，训练与推理共用版本化变换并做快照/输出比对 |
 | 特征全是请求时才存在的（query 文本、当前购物车） | 没有可物化的东西，KV 层是纯开销 | 全走 on-demand 变换，平台只提供定义与日志 |
 | **特征以 embedding 为主** | 行式 KV 路径对几百 KB 的向量很差；Meta 的 embedding 表是数十到数百 TB 量级，占模型参数 > 99% | 独立通道：TTL + 多级缓存 + 离线在线混合（Meta Mosaic：AOTI + 模型切分 −56% GPU，叠 memcache 累计 −79%，缓存 TTL 2 h，[arXiv 2607.24015](https://arxiv.org/html/2607.24015v1)）。检索侧见 [`03-multi-tenant-vector-search.md`](03-multi-tenant-vector-search.md) |
 | 团队 < 10 人且没有专职平台工程师 | 自建特征平台是可预期的失败模式 —— [Xebia 那篇（2026-01-28 更新）](https://xebia.com/blog/you-still-don-t-need-a-feature-store/)的作者花了 6 个月重构一个过度工程化的 Feast 实现 | 用数据平台已有的能力，买"能力"不要买"产品" |
 
-**一条通用判据**：**当两个团队为同一个业务概念写了两份不同的 SQL、并且第一次因此出线上事故时，才是建平台的时刻。** 在那之前建，你解决的是一个还不存在的问题。
+一条实用信号是多个团队开始为同一概念维护不同 SQL，或一致性/合规成本已高于平台 TCO；不必等第一次事故发生，也不能只因达到某个团队数就立项。
 顺便记住 2025–2026 的赛道现实：独立特征平台产品在收缩（[Tecton 于 2025-08-22 并入 Databricks](https://databricks.com/blog/tecton-joining-databricks-power-real-time-data-personalized-ai-agents)，Databricks 的 legacy online tables 已下线），而特征平台的**能力**在扩散到 lakehouse 与流引擎里。选型文档只要写于 2024 年及更早，基本都要重做。
+
+### 4.9 安全与隐私：特征值不是普通缓存
+
+- 所有在线/离线读取都按调用方、租户、实体类型和 feature view 做授权；`entity_id` 不能成为越权读取凭证，跨租户批量 key 必须逐项校验。
+- PII/敏感特征要分类、字段级加密或 tokenization，传输加密，密钥与数据分域；日志默认不落完整向量，feature logging 设采样、脱敏、用途限制和保留期。
+- 血缘要支持数据主体访问/删除请求沿离线表、在线 KV、日志、训练集和备份传播；合法保留例外由隐私/法务确认。
+- 管理面用 RBAC/审批保护定义、回填与删除，数据面记录调用身份、模型/view 版本和批量读取规模，异常跨租户或大范围导出告警。
 
 ---
 
@@ -465,7 +476,7 @@ stateDiagram-v2
 |---|---|---|---|
 | 物化作业挂 | 在线值静默变旧，模型缓慢劣化 | **`value_age` p99**（错误率恒为 0，APM 全绿） | 按 freshness_tier 分级告警；超过 3× TTL 自动把该特征置 NULL 而不是给旧值 —— **模型对 NULL 有训练过的处理，对"旧 7 天"没有** |
 | 元数据变更推错 | 在线服务整体挂（Uber Palette 真实 Tier-1 事故） | 部署后 error rate 尖峰 | 服务端校验（不是客户端）+ 增量而非全量刷新 + 灰度；回滚元数据版本 |
-| 爆款 item 单 key 热点 | DynamoDB 3,000 QPS/key 硬上限被打穿，该 key 全部限流 | 单 key QPS、限流计数 | 进程内 LRU（TTL 1–5 s）+ 副本 key 打散 |
+| 爆款 item / 分区热点 | 热 key 所在分区或缓存节点容量被打穿 | 单 key QPS、分区 consumed capacity、throttling | 进程内 LRU/请求合并；必要时调整键模型。TTL 与是否副本打散按一致性和新鲜度验证 |
 | 上游埋点变更导致某特征 10% 缺失 | 零服务告警，靠人工发现耗时 45 天 | **列级空值率突变**（不是模型监控） | 列级 monitor + 自动关闭噪声 monitor 的诊断作业（Uber D3 模式） |
 | 在线存储迁移期 | 双写窗口内不一致 | 双读比对差异率 | event-level + sequence-level 双读比对达标再切流，切流后保留回切开关 2 周 |
 | 流式作业 lag | 分钟级特征退化成小时级 | consumer lag + `value_age` | 降级到最近一次批物化值，并在特征向量里带 staleness 标志位**让模型知道**（把降级变成模型的输入，而不是隐藏它） |
@@ -484,7 +495,7 @@ v0  1 个模型、1 个团队（在线读 < 5,000 QPS，日级新鲜度）：一
 v1  定义即代码 + 回填（3–8 个模型，特征数百）
     FeatureView DSL + as-of join 回填 + 按 (feature_group, date) 分区 + 物化作业 + 血缘。
     → v2 触发条件：在线 p99 吃满预算（串行往返 > 2）；或在线数据 > 500 GB
-      （成本拐点：Redis ≈ $305k/年 vs DynamoDB ≈ $9.3k/年，差 33×）；或需要有状态窗口聚合
+      （按本文 2025–2026 场景快照：Redis ≈ $305k/年 vs DynamoDB ≈ $9.3k/年；上线前按当前 region/载荷重算）；或需要有状态窗口聚合
 
 v2  双存储分级 + 流式 + 特征日志 ← 本文
     Redis（QPS 型）/ DynamoDB（容量型）/ 进程内只读副本三层；Flink 分钟级管道；
@@ -543,11 +554,13 @@ v3  平台化治理：CI 门禁（兼容性表）、下线流程（血缘 + Depr
 遮住上文，你能不能说出：
 
 1. **as-of join 的谓词是哪一行？** 少了它会发生什么，且为什么监控发现不了？（`f.event_ts <= l.label_ts`；模型看到未来 → 离线虚高线上不兑现；分布不变，drift 看不见，只有比对流水线看得见）
-2. **在线取数延迟的驱动量是什么？** 唯一的例外是什么？（feature view 个数 = 串行往返数，不是特征个数；例外是 Redis 把同 entity 的所有 view 放进一个 hash key，往返恒为 1）
+2. **在线取数延迟的驱动量是什么？**（物理 key/分区、串并行与批量方式、载荷、排队和网络；feature view 只有在映射为独立串行读取时才直接增加往返。同 key 共置可减少 RTT，但会引入更新、权限和大 value 权衡）
 3. **物化作业挂掉时，哪个指标会动？** 为什么错误率不动？（`value_age` p99；因为根本没有写发生，写成功率是 100%）
 4. **偏斜排查的第 0 步是什么？** 为什么排在读代码前面？（SRM 检查，p < 0.0005；10 分钟成本，且 triggered 实验里发生率约 6–10%，跳过它去读代码期望损失是几天）
 5. **哪三条同时成立才该建特征平台？**（在线 < 50 ms 取跨实体特征；≥ 3 个团队/模型复用；存在有状态时间窗聚合 —— 不全中就是净负债）
 
 ---
 
-**下一篇** → [20-ranking-service.md](20-ranking-service.md)：这一章算出来的特征要在几十毫秒内喂进漏斗，而漏斗每一级的候选数与单条算力互为倒数。
+**按训练路径阅读** → 回 [START-HERE](../START-HERE.md) 按所选路径继续；页尾链接只表示本目录或专章的顺读顺序。
+
+**案例顺读下一篇** → [20-ranking-service.md](20-ranking-service.md)：这一章算出来的特征要在几十毫秒内喂进漏斗，而漏斗每一级的候选数与单条算力互为倒数。
